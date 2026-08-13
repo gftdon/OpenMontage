@@ -1,0 +1,178 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "decisions": [
+    {
+      "decision_id": "d-001",
+      "stage": "idea",
+      "category": "pipeline_selection",
+      "subject": "Pipeline \u0e2a\u0e33\u0e2b\u0e23\u0e31\u0e1a\u0e27\u0e34\u0e14\u0e35\u0e42\u0e2d\u0e02\u0e48\u0e32\u0e27\u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c + support visuals",
+      "options_considered": [
+        {
+          "option_id": "hybrid",
+          "label": "hybrid (source footage + support visuals)",
+          "score": 0.95,
+          "reason": "\u0e15\u0e23\u0e07\u0e1a\u0e23\u0e35\u0e1f: anchor \u0e04\u0e37\u0e2d footage \u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c + overlays/b-roll \u0e40\u0e1b\u0e47\u0e19 support; stability production"
+        },
+        {
+          "option_id": "talking-head",
+          "label": "talking-head",
+          "score": 0.6,
+          "reason": "\u0e43\u0e01\u0e25\u0e49\u0e40\u0e04\u0e35\u0e22\u0e07\u0e41\u0e15\u0e48\u0e2a\u0e16\u0e32\u0e19\u0e30 beta \u0e41\u0e25\u0e30\u0e40\u0e19\u0e49\u0e19\u0e15\u0e31\u0e27\u0e1e\u0e39\u0e14\u0e40\u0e1b\u0e47\u0e19\u0e2b\u0e25\u0e31\u0e01 \u0e44\u0e21\u0e48\u0e04\u0e23\u0e2d\u0e1a\u0e04\u0e25\u0e38\u0e21 b-roll \u0e42\u0e0b\u0e19\u0e1a\u0e19",
+          "rejected_because": "beta + scope \u0e41\u0e04\u0e1a\u0e01\u0e27\u0e48\u0e32"
+        },
+        {
+          "option_id": "animation",
+          "label": "animation (motion-graphics first)",
+          "score": 0.3,
+          "reason": "\u0e44\u0e21\u0e48\u0e21\u0e35 anchor footage",
+          "rejected_because": "\u0e1a\u0e23\u0e35\u0e1f\u0e1c\u0e39\u0e01\u0e01\u0e31\u0e1a footage \u0e08\u0e23\u0e34\u0e07"
+        }
+      ],
+      "selected": "hybrid",
+      "reason": "footage-led + designed support layers \u0e04\u0e37\u0e2d\u0e19\u0e34\u0e22\u0e32\u0e21\u0e02\u0e2d\u0e07 hybrid pipeline",
+      "user_visible": true
+    },
+    {
+      "decision_id": "d-002",
+      "stage": "idea",
+      "category": "render_runtime_selection",
+      "subject": "Render runtime \u0e2a\u0e33\u0e2b\u0e23\u0e31\u0e1a composite \u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c + motion graphics",
+      "options_considered": [
+        {
+          "option_id": "remotion",
+          "label": "Remotion (React)",
+          "score": 0.95,
+          "reason": "OffthreadVideo crop/scale \u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c + React scene stack (stat cards, VS cards) \u0e43\u0e19 render \u0e40\u0e14\u0e35\u0e22\u0e27; pattern \u0e1e\u0e34\u0e2a\u0e39\u0e08\u0e19\u0e4c\u0e41\u0e25\u0e49\u0e27\u0e01\u0e31\u0e1a ClaudeTagReel"
+        },
+        {
+          "option_id": "hyperframes",
+          "label": "HyperFrames (HTML/GSAP)",
+          "score": 0.55,
+          "reason": "kinetic typography \u0e41\u0e02\u0e47\u0e07\u0e41\u0e23\u0e07 \u0e41\u0e15\u0e48\u0e15\u0e49\u0e2d\u0e07\u0e40\u0e02\u0e35\u0e22\u0e19 overlay system \u0e43\u0e2b\u0e21\u0e48\u0e17\u0e31\u0e49\u0e07\u0e2b\u0e21\u0e14\u0e41\u0e25\u0e30 video crop/blend \u0e08\u0e33\u0e01\u0e31\u0e14\u0e01\u0e27\u0e48\u0e32",
+          "rejected_because": "support layer \u0e19\u0e35\u0e49\u0e40\u0e1b\u0e47\u0e19 React-native \u0e21\u0e32\u0e01\u0e01\u0e27\u0e48\u0e32; \u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34 Remotion"
+        },
+        {
+          "option_id": "ffmpeg",
+          "label": "FFmpeg only",
+          "score": 0.2,
+          "reason": "\u0e17\u0e33 motion graphics \u0e23\u0e30\u0e14\u0e31\u0e1a\u0e19\u0e35\u0e49\u0e44\u0e21\u0e48\u0e44\u0e14\u0e49",
+          "rejected_because": "\u0e40\u0e1b\u0e25\u0e35\u0e48\u0e22\u0e19 deliverable \u0e08\u0e32\u0e01 motion-led \u0e40\u0e1b\u0e47\u0e19 static"
+        }
+      ],
+      "selected": "remotion",
+      "reason": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e40\u0e25\u0e37\u0e2d\u0e01 Remotion \u0e2b\u0e25\u0e31\u0e07\u0e40\u0e2b\u0e47\u0e19\u0e15\u0e31\u0e27\u0e40\u0e25\u0e37\u0e2d\u0e01\u0e17\u0e31\u0e49\u0e07\u0e2a\u0e2d\u0e07; component stack \u0e1e\u0e23\u0e49\u0e2d\u0e21\u0e41\u0e25\u0e30\u0e1c\u0e48\u0e32\u0e19\u0e01\u0e32\u0e23\u0e43\u0e0a\u0e49\u0e07\u0e32\u0e19\u0e08\u0e23\u0e34\u0e07\u0e43\u0e19\u0e42\u0e1b\u0e23\u0e40\u0e08\u0e01\u0e15\u0e4c ClaudeTagReel",
+      "user_visible": true
+    },
+    {
+      "decision_id": "d-003",
+      "stage": "idea",
+      "category": "provider_selection",
+      "subject": "\u0e41\u0e2b\u0e25\u0e48\u0e07 b-roll \u0e42\u0e0b\u0e19\u0e1a\u0e19 (7 \u0e20\u0e32\u0e1e\u0e18\u0e35\u0e21 dark-neon AI benchmark)",
+      "options_considered": [
+        {
+          "option_id": "google_imagen",
+          "label": "Generated images \u2014 Google Imagen (\u0e1c\u0e48\u0e32\u0e19 image_selector)",
+          "score": 0.9,
+          "reason": "\u0e04\u0e38\u0e21\u0e18\u0e35\u0e21/\u0e2a\u0e35\u0e43\u0e2b\u0e49\u0e40\u0e02\u0e49\u0e32\u0e01\u0e31\u0e1a\u0e01\u0e23\u0e32\u0e1f\u0e34\u0e01\u0e44\u0e14\u0e49 100%, \u0e04\u0e38\u0e13\u0e20\u0e32\u0e1e\u0e1e\u0e23\u0e35\u0e40\u0e21\u0e35\u0e22\u0e21, ~$0.04/\u0e20\u0e32\u0e1e; \u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34"
+        },
+        {
+          "option_id": "seedance",
+          "label": "Generated video clips \u2014 Seedance",
+          "score": 0.7,
+          "reason": "\u0e40\u0e04\u0e25\u0e37\u0e48\u0e2d\u0e19\u0e44\u0e2b\u0e27\u0e08\u0e23\u0e34\u0e07\u0e2a\u0e27\u0e22\u0e2a\u0e38\u0e14 \u0e41\u0e15\u0e48 ~$1.5-2 \u0e41\u0e25\u0e30\u0e0a\u0e49\u0e32\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01",
+          "rejected_because": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e40\u0e25\u0e37\u0e2d\u0e01\u0e20\u0e32\u0e1e\u0e19\u0e34\u0e48\u0e07 + motion"
+        },
+        {
+          "option_id": "pexels",
+          "label": "Stock Pexels/Pixabay",
+          "score": 0.5,
+          "reason": "\u0e1f\u0e23\u0e35\u0e41\u0e15\u0e48\u0e18\u0e35\u0e21 AI generic \u0e04\u0e27\u0e1a\u0e04\u0e38\u0e21\u0e2a\u0e44\u0e15\u0e25\u0e4c\u0e22\u0e32\u0e01",
+          "rejected_because": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e40\u0e25\u0e37\u0e2d\u0e01 generated"
+        },
+        {
+          "option_id": "mg_only",
+          "label": "Motion graphics \u0e25\u0e49\u0e27\u0e19",
+          "score": 0.6,
+          "reason": "\u0e04\u0e21\u0e41\u0e25\u0e30\u0e40\u0e23\u0e47\u0e27\u0e41\u0e15\u0e48 texture \u0e19\u0e49\u0e2d\u0e22",
+          "rejected_because": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e40\u0e25\u0e37\u0e2d\u0e01\u0e21\u0e35 b-roll \u0e20\u0e32\u0e1e"
+        }
+      ],
+      "selected": "google_imagen",
+      "reason": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34: gen \u0e20\u0e32\u0e1e Imagen + Ken Burns/motion \u0e43\u0e19 Remotion",
+      "user_visible": true
+    },
+    {
+      "decision_id": "d-004",
+      "stage": "idea",
+      "category": "music_source",
+      "subject": "\u0e40\u0e1e\u0e25\u0e07\u0e1b\u0e23\u0e30\u0e01\u0e2d\u0e1a",
+      "options_considered": [
+        {
+          "option_id": "none",
+          "label": "\u0e44\u0e21\u0e48\u0e43\u0e2a\u0e48 \u2014 VO \u0e15\u0e49\u0e19\u0e09\u0e1a\u0e31\u0e1a\u0e25\u0e49\u0e27\u0e19 (re-mux audio \u0e40\u0e14\u0e34\u0e21)",
+          "score": 0.9,
+          "reason": "\u0e02\u0e48\u0e32\u0e27\u0e2d\u0e48\u0e32\u0e19 VO \u0e0a\u0e31\u0e14\u0e2d\u0e22\u0e39\u0e48\u0e41\u0e25\u0e49\u0e27; \u0e40\u0e2b\u0e21\u0e37\u0e2d\u0e19\u0e23\u0e35\u0e25 Claude Tag; \u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34"
+        },
+        {
+          "option_id": "suno",
+          "label": "Suno generated bed",
+          "score": 0.5,
+          "reason": "\u0e40\u0e2a\u0e35\u0e48\u0e22\u0e07\u0e01\u0e25\u0e1a VO",
+          "rejected_because": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e40\u0e25\u0e37\u0e2d\u0e01\u0e44\u0e21\u0e48\u0e43\u0e2a\u0e48\u0e40\u0e1e\u0e25\u0e07"
+        }
+      ],
+      "selected": "none",
+      "reason": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e44\u0e21\u0e48\u0e43\u0e2a\u0e48\u0e40\u0e1e\u0e25\u0e07 \u2014 \u0e43\u0e0a\u0e49\u0e40\u0e2a\u0e35\u0e22\u0e07\u0e15\u0e49\u0e19\u0e09\u0e1a\u0e31\u0e1a re-mux \u0e2b\u0e25\u0e31\u0e07 render (Remotion render \u0e40\u0e1b\u0e47\u0e19 silent)",
+      "user_visible": true
+    },
+    {
+      "decision_id": "d-005",
+      "stage": "idea",
+      "category": "concept_selection",
+      "subject": "\u0e04\u0e33\u0e1a\u0e23\u0e23\u0e22\u0e32\u0e22 karaoke \u0e44\u0e25\u0e48\u0e04\u0e33",
+      "options_considered": [
+        {
+          "option_id": "none",
+          "label": "\u0e44\u0e21\u0e48\u0e43\u0e2a\u0e48 \u2014 \u0e02\u0e49\u0e2d\u0e04\u0e27\u0e32\u0e21\u0e40\u0e1b\u0e47\u0e19 motion-graphic \u0e2b\u0e31\u0e27\u0e02\u0e49\u0e2d/\u0e2a\u0e16\u0e34\u0e15\u0e34\u0e40\u0e17\u0e48\u0e32\u0e19\u0e31\u0e49\u0e19",
+          "score": 0.9,
+          "reason": "\u0e15\u0e32\u0e21\u0e1a\u0e23\u0e35\u0e1f\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49; \u0e40\u0e1f\u0e23\u0e21\u0e2a\u0e30\u0e2d\u0e32\u0e14 \u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c\u0e04\u0e23\u0e36\u0e48\u0e07\u0e25\u0e48\u0e32\u0e07\u0e44\u0e21\u0e48\u0e16\u0e39\u0e01\u0e17\u0e31\u0e1a; \u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34"
+        },
+        {
+          "option_id": "karaoke",
+          "label": "karaoke captions \u0e44\u0e25\u0e48\u0e04\u0e33 (Kanit gold)",
+          "score": 0.5,
+          "reason": "\u0e0a\u0e48\u0e27\u0e22 retention \u0e41\u0e15\u0e48\u0e17\u0e31\u0e1a\u0e15\u0e31\u0e27\u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c\u0e42\u0e0b\u0e19\u0e25\u0e48\u0e32\u0e07",
+          "rejected_because": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e40\u0e25\u0e37\u0e2d\u0e01\u0e44\u0e21\u0e48\u0e43\u0e2a\u0e48"
+        }
+      ],
+      "selected": "none",
+      "reason": "\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e44\u0e21\u0e48\u0e43\u0e2a\u0e48 captions",
+      "user_visible": true
+    },
+    {
+      "decision_id": "d-006",
+      "stage": "idea",
+      "category": "concept_selection",
+      "subject": "\u0e40\u0e25\u0e22\u0e4c\u0e40\u0e2d\u0e32\u0e15\u0e4c\u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c",
+      "options_considered": [
+        {
+          "option_id": "bottom_half",
+          "label": "\u0e04\u0e23\u0e2d\u0e1a\u0e04\u0e23\u0e36\u0e48\u0e07\u0e15\u0e31\u0e27 \u0e22\u0e36\u0e14\u0e04\u0e23\u0e36\u0e48\u0e07\u0e25\u0e48\u0e32\u0e07\u0e02\u0e2d\u0e07\u0e40\u0e1f\u0e23\u0e21 \u0e1a\u0e19\u0e1e\u0e37\u0e49\u0e19\u0e14\u0e33 seamless",
+          "score": 1.0,
+          "reason": "\u0e04\u0e33\u0e2a\u0e31\u0e48\u0e07\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e42\u0e14\u0e22\u0e15\u0e23\u0e07: '\u0e15\u0e31\u0e14\u0e43\u0e2b\u0e49\u0e19\u0e49\u0e2d\u0e07\u0e1f\u0e23\u0e31\u0e07\u0e2d\u0e22\u0e39\u0e48\u0e04\u0e23\u0e36\u0e48\u0e07\u0e25\u0e48\u0e32\u0e07\u0e43\u0e2b\u0e49\u0e40\u0e2b\u0e47\u0e19\u0e41\u0e04\u0e48\u0e04\u0e23\u0e36\u0e48\u0e07\u0e15\u0e31\u0e27'; \u0e1e\u0e37\u0e49\u0e19\u0e14\u0e33\u0e02\u0e2d\u0e07 footage \u0e01\u0e25\u0e37\u0e19\u0e01\u0e31\u0e1a\u0e42\u0e0b\u0e19\u0e14\u0e33\u0e02\u0e2d\u0e07\u0e14\u0e35\u0e44\u0e0b\u0e19\u0e4c"
+        },
+        {
+          "option_id": "full_frame_overlay",
+          "label": "\u0e40\u0e15\u0e47\u0e21\u0e40\u0e1f\u0e23\u0e21 + overlays \u0e17\u0e31\u0e1a (\u0e41\u0e1a\u0e1a ClaudeTagReel)",
+          "score": 0.4,
+          "reason": "\u0e23\u0e39\u0e1b\u0e41\u0e1a\u0e1a\u0e40\u0e14\u0e34\u0e21\u0e17\u0e35\u0e48\u0e43\u0e0a\u0e49\u0e44\u0e14\u0e49 \u0e41\u0e15\u0e48\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49\u0e2a\u0e31\u0e48\u0e07\u0e40\u0e1b\u0e25\u0e35\u0e48\u0e22\u0e19",
+          "rejected_because": "\u0e02\u0e31\u0e14\u0e04\u0e33\u0e2a\u0e31\u0e48\u0e07\u0e1c\u0e39\u0e49\u0e43\u0e0a\u0e49"
+        }
+      ],
+      "selected": "bottom_half",
+      "reason": "user directive 2026-08-13",
+      "user_visible": true
+    }
+  ]
+}

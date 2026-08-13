@@ -1,0 +1,184 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "pipeline_type": "hybrid",
+  "stage": "assets",
+  "status": "completed",
+  "timestamp": "2026-08-13T05:27:35.179118+00:00",
+  "checkpoint_policy": "guided",
+  "human_approval_required": false,
+  "human_approved": false,
+  "artifacts": {
+    "asset_manifest": {
+      "version": "1.0",
+      "assets": [
+        {
+          "id": "source_video",
+          "type": "video",
+          "path": "assets/source.mp4",
+          "source_tool": "user_provided",
+          "scene_id": "all",
+          "duration_seconds": 89.64,
+          "resolution": "720x1280",
+          "format": "mp4",
+          "subtype": "provided",
+          "generation_summary": "Presenter footage (Frang) provided by user, black background, Thai VO embedded"
+        },
+        {
+          "id": "b1_hook",
+          "type": "image",
+          "path": "assets/images/b1_hook.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b1-hook",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "glowing orange AI neural core launch reveal, dark neon news backdrop",
+          "generation_summary": "Imagen 4 b-roll, shared dark-neon style anchor, no text"
+        },
+        {
+          "id": "b2_lab",
+          "type": "image",
+          "path": "assets/images/b2_lab.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b2-skeptic",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "futuristic analysis lab, magnifier over hologram benchmark charts",
+          "generation_summary": "covers b2-skeptic + b3-frang"
+        },
+        {
+          "id": "b4_arena",
+          "type": "image",
+          "path": "assets/images/b4_arena.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b4-benchmark",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "three glowing AI orbs (orange/green/violet) versus arena",
+          "generation_summary": "covers b4-benchmark + b5-pivot"
+        },
+        {
+          "id": "b6_gpu",
+          "type": "image",
+          "path": "assets/images/b6_gpu.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b6-vs-gpt",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "GPU speed arena, orange vs green racing light trails",
+          "generation_summary": "orange vs green duel maps to GROK vs GPT"
+        },
+        {
+          "id": "b7_duel",
+          "type": "image",
+          "path": "assets/images/b7_duel.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b7-vs-fable",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "orange core vs violet storybook core duel",
+          "generation_summary": "orange vs violet maps to GROK vs FABLE"
+        },
+        {
+          "id": "b8_treasure",
+          "type": "image",
+          "path": "assets/images/b8_treasure.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b8-agent",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "golden treasure chest in maze of holographic files",
+          "generation_summary": "agent treasure-hunt test"
+        },
+        {
+          "id": "b9_debug",
+          "type": "image",
+          "path": "assets/images/b9_debug.png",
+          "source_tool": "google_imagen",
+          "scene_id": "b9-debug",
+          "model": "imagen-4.0-generate-001",
+          "provider": "google_imagen",
+          "cost_usd": 0.04,
+          "resolution": "1280x896",
+          "format": "png",
+          "subtype": "generated",
+          "prompt": "neon code rain, bugs zapped by orange laser",
+          "generation_summary": "debug test"
+        },
+        {
+          "id": "kanit_fonts",
+          "type": "font",
+          "path": "../../remotion-composer/public/fonts/Kanit-ExtraBold.ttf",
+          "source_tool": "google_fonts",
+          "scene_id": "all",
+          "subtype": "stock",
+          "generation_summary": "KanitX 700/800 loaded via FontFace in Grok46Reel (headless-safe)"
+        }
+      ],
+      "metadata": {
+        "shared_support_assets": [
+          "kanit_fonts",
+          "glass+neon chip design language (Grok46Reel.tsx)"
+        ],
+        "scene_asset_index": "7 b-roll images mapped per beat; word timing artifacts/timing.json (mlx-whisper, source-derived) drives all cues",
+        "source_vs_generated_map": {
+          "source": [
+            "source_video"
+          ],
+          "source_derived": [
+            "artifacts/timing.json"
+          ],
+          "generated": [
+            "b1_hook",
+            "b2_lab",
+            "b4_arena",
+            "b6_gpu",
+            "b7_duel",
+            "b8_treasure",
+            "b9_debug"
+          ]
+        },
+        "variant_assets": [],
+        "composition": "remotion-composer/src/Grok46Reel.tsx (registered id Grok46Reel)",
+        "music": "none per decision d-004 \u2014 original audio re-muxed post-render",
+        "cost_usd": {
+          "images": 0.28,
+          "note": "7 x imagen-4.0-generate-001 @ ~$0.04"
+        }
+      }
+    }
+  },
+  "style_playbook": "flat-motion-graphics",
+  "review": {
+    "findings": [],
+    "notes": "G4 pass: 7/7 images on-disk, style-consistent (spot-checked b1/b6/b8); $0.28 of $2.00 spent"
+  },
+  "cost_snapshot": {
+    "total_spent_usd": 0.28,
+    "budget_remaining_usd": 1.72
+  }
+}

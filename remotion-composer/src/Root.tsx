@@ -16,6 +16,21 @@ import { ProductReveal, ProductRevealProps } from "./components/ProductReveal";
 import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
 import { CollageBurst, CollageBurstProps } from "./CollageBurst";
 import { LyricOverlay, LyricOverlayProps } from "./LyricOverlay";
+import {
+  ClaudeTagReel,
+  ClaudeTagReelProps,
+  calculateClaudeTagMetadata,
+} from "./ClaudeTagReel";
+import {
+  Grok46Reel,
+  Grok46ReelProps,
+  calculateGrok46Metadata,
+} from "./Grok46Reel";
+import {
+  FrangV5Reel,
+  FrangV5ReelProps,
+  calculateFrangV5Metadata,
+} from "./FrangV5Reel";
 
 // ---------------------------------------------------------------------------
 // Theme System — prevents every video from looking like dark fintech
@@ -295,6 +310,50 @@ export const Root: React.FC = () => {
           lyrics: [],
           bottomY: 0.88,
         } as LyricOverlayProps}
+      />
+      <Composition
+        id="ClaudeTagReel"
+        component={ClaudeTagReel}
+        durationInFrames={Math.ceil(48.042 * 30)}
+        fps={30}
+        width={1080}
+        height={1920}
+        defaultProps={{
+          videoSrc: "source.mp4",
+          durationSec: 48.042,
+          sceneStarts: [0, 8.042, 16.042, 24.042, 32.042, 40.042],
+          sceneEnd: 48.042,
+          phrases: [],
+          chipCues: [16780, 18280, 18960, 20020, 21340],
+          statCueMs: 34574,
+        } as ClaudeTagReelProps}
+        calculateMetadata={calculateClaudeTagMetadata}
+      />
+      <Composition
+        id="Grok46Reel"
+        component={Grok46Reel}
+        durationInFrames={Math.ceil(89.64 * 30)}
+        fps={30}
+        width={1080}
+        height={1920}
+        defaultProps={{
+          videoSrc: "grok46_source.mp4",
+          durationSec: 89.64,
+        } as Grok46ReelProps}
+        calculateMetadata={calculateGrok46Metadata}
+      />
+      <Composition
+        id="FrangV5Reel"
+        component={FrangV5Reel}
+        durationInFrames={Math.ceil(92.4 * 30)}
+        fps={30}
+        width={720}
+        height={1280}
+        defaultProps={{
+          videoSrc: "frang-v5-reel_source.mp4",
+          durationSec: 92.4,
+        } as FrangV5ReelProps}
+        calculateMetadata={calculateFrangV5Metadata}
       />
       <Composition
         id="EndTag"

@@ -1,0 +1,178 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "pipeline_type": "hybrid",
+  "stage": "edit",
+  "status": "completed",
+  "timestamp": "2026-08-13T05:33:40.268107+00:00",
+  "checkpoint_policy": "guided",
+  "human_approval_required": false,
+  "human_approved": false,
+  "artifacts": {
+    "edit_decisions": {
+      "version": "1.0",
+      "render_runtime": "remotion",
+      "renderer_family": "presenter",
+      "cuts": [
+        {
+          "id": "anchor-full",
+          "source": "assets/source.mp4",
+          "in_seconds": 0.0,
+          "out_seconds": 89.64,
+          "layer": "primary",
+          "transform": {
+            "scale": 1.0204,
+            "position": "bottom-center",
+            "crop": {
+              "x": 0,
+              "y": 60,
+              "width": 720,
+              "height": 980
+            }
+          },
+          "reason": "user directive: presenter half-body bottom half; single uncut anchor take"
+        }
+      ],
+      "overlays": [
+        {
+          "asset_id": "b1_hook",
+          "start_seconds": 0.0,
+          "end_seconds": 10.8,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "ken-burns push + claim chips @5.2/7.76/9.22"
+        },
+        {
+          "asset_id": "b2_lab",
+          "start_seconds": 10.8,
+          "end_seconds": 16.23,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "ken-burns; giant line then name tag"
+        },
+        {
+          "asset_id": "b4_arena",
+          "start_seconds": 16.23,
+          "end_seconds": 37.37,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "model chips @18.14/19.77/21.63; test cycler @25.64-33.32"
+        },
+        {
+          "asset_id": "b6_gpu",
+          "start_seconds": 37.37,
+          "end_seconds": 53.37,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "VS card; winner @41.36; bars @45.37; cost @51.68"
+        },
+        {
+          "asset_id": "b7_duel",
+          "start_seconds": 53.37,
+          "end_seconds": 66.09,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "VS card; winner @58.06; 10x @61.63; +1min @63.40"
+        },
+        {
+          "asset_id": "b8_treasure",
+          "start_seconds": 66.09,
+          "end_seconds": 82.01,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "counters 6x @72.68/75.32; checklist @77.18/80.02"
+        },
+        {
+          "asset_id": "b9_debug",
+          "start_seconds": 82.01,
+          "end_seconds": 89.64,
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 960
+          },
+          "animation": "bug counter @84.92; verdict chips @86.52/88.30"
+        },
+        {
+          "asset_id": "side_chips",
+          "start_seconds": 45.37,
+          "end_seconds": 89.64,
+          "position": {
+            "x": 22,
+            "y": 1150,
+            "width": 1036,
+            "height": 300
+          },
+          "animation": "B6 time chips, B7 cost chip, B9 bug chip"
+        }
+      ],
+      "subtitles": {
+        "enabled": false
+      },
+      "transitions": [
+        {
+          "type": "fade-from-black",
+          "at_seconds": 0.0,
+          "duration_seconds": 0.3
+        },
+        {
+          "type": "fade-to-black",
+          "at_seconds": 89.24,
+          "duration_seconds": 0.4
+        }
+      ],
+      "metadata": {
+        "anchor_cut_notes": "single uncut presenter take; story carried by VO + per-beat MG",
+        "layer_order": [
+          "presenter",
+          "b-roll+scrim",
+          "beat MG",
+          "side chips",
+          "frame polish",
+          "bug bar"
+        ],
+        "overlay_windows": "max 2 concurrent MG layers per scene_plan.overlay_density_limits",
+        "composition": "Grok46Reel @ remotion-composer, 1080x1920 30fps, 2690 frames",
+        "cue_map_source": "artifacts/timing.json (word-level, exact-script aligned)",
+        "audio_strategy": "original VO re-muxed post-render: ffmpeg -i render.mp4 -i source.mp4 -map 0:v -map 1:a -c:v copy -c:a aac -shortest (Remotion render is silent)",
+        "music_decision": "none (decision_log d-004)",
+        "subtitles_decision": "disabled \u2014 MG headlines carry text (decision_log d-005)",
+        "broll_transition_note": "b-roll crossfades 0.45s at each beat boundary; kicker swaps in bug bar"
+      }
+    }
+  },
+  "style_playbook": "flat-motion-graphics",
+  "review": {
+    "findings": [],
+    "notes": "G5 pass: anchor uncut; 6 smoke stills verified; render_runtime=remotion per d-002; renderer_family=presenter"
+  },
+  "cost_snapshot": {
+    "total_spent_usd": 0.28,
+    "budget_remaining_usd": 1.72
+  }
+}

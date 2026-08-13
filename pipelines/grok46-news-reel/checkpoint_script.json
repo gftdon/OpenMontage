@@ -1,0 +1,224 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "pipeline_type": "hybrid",
+  "stage": "script",
+  "status": "completed",
+  "timestamp": "2026-08-13T05:16:10.203280+00:00",
+  "checkpoint_policy": "guided",
+  "human_approval_required": true,
+  "human_approved": true,
+  "artifacts": {
+    "script": {
+      "version": "1.0",
+      "title": "Grok 4.6 Benchmark News Reel",
+      "total_duration_seconds": 89.64,
+      "sections": [
+        {
+          "id": "s1-hook",
+          "label": "HOOK \u2014 launch claim",
+          "text": "Grok 4.6 \u0e40\u0e1e\u0e34\u0e48\u0e07\u0e40\u0e1b\u0e34\u0e14\u0e15\u0e31\u0e27\u0e2d\u0e22\u0e48\u0e32\u0e07\u0e40\u0e1b\u0e47\u0e19\u0e17\u0e32\u0e07\u0e01\u0e32\u0e23 \u0e1e\u0e23\u0e49\u0e2d\u0e21\u0e04\u0e33\u0e01\u0e25\u0e48\u0e32\u0e27\u0e2d\u0e49\u0e32\u0e07\u0e17\u0e35\u0e48\u0e27\u0e48\u0e32 \u0e04\u0e38\u0e13\u0e20\u0e32\u0e1e\u0e40\u0e17\u0e35\u0e22\u0e1a\u0e40\u0e17\u0e48\u0e32 Frontier models \u0e41\u0e15\u0e48\u0e23\u0e32\u0e04\u0e32\u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01 \u0e41\u0e25\u0e30\u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01",
+          "start_seconds": 0.0,
+          "end_seconds": 10.8,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "broll",
+              "description": "dark neon AI launch visual (Grok-style black/orange core)",
+              "timestamp_seconds": 0.0
+            },
+            {
+              "type": "overlay",
+              "description": "headline GROK 4.6 + kicker AI NEWS",
+              "timestamp_seconds": 0.4
+            },
+            {
+              "type": "stat_card",
+              "description": "claim chips: \u0e40\u0e17\u0e35\u0e22\u0e1a\u0e40\u0e17\u0e48\u0e32 FRONTIER / \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01 / \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01 \u0e1b\u0e23\u0e32\u0e01\u0e0f\u0e15\u0e32\u0e21\u0e04\u0e33\u0e1e\u0e39\u0e14 (5.2s, 7.76s, 9.22s)",
+              "timestamp_seconds": 5.2
+            }
+          ]
+        },
+        {
+          "id": "s2-skeptic",
+          "label": "SKEPTIC \u2014 \u0e14\u0e35\u0e40\u0e01\u0e34\u0e19\u0e08\u0e23\u0e34\u0e07\u0e44\u0e2b\u0e21",
+          "text": "\u0e1f\u0e31\u0e07\u0e14\u0e39\u0e14\u0e35\u0e40\u0e01\u0e34\u0e19\u0e08\u0e23\u0e34\u0e07\u0e44\u0e2b\u0e21?",
+          "start_seconds": 10.82,
+          "end_seconds": 12.79,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "overlay",
+              "description": "giant kinetic text '\u0e14\u0e35\u0e40\u0e01\u0e34\u0e19\u0e08\u0e23\u0e34\u0e07?' + question-mark pop",
+              "timestamp_seconds": 10.9
+            }
+          ]
+        },
+        {
+          "id": "s3-frang",
+          "label": "PRESENTER \u2014 \u0e1f\u0e23\u0e31\u0e07\u0e44\u0e1b\u0e14\u0e39\u0e1c\u0e25\u0e08\u0e23\u0e34\u0e07\u0e21\u0e32\u0e43\u0e2b\u0e49",
+          "text": "\u0e1f\u0e23\u0e31\u0e07\u0e40\u0e25\u0e22\u0e44\u0e1b\u0e14\u0e39\u0e1c\u0e25\u0e17\u0e14\u0e2a\u0e2d\u0e1a\u0e08\u0e23\u0e34\u0e07\u0e21\u0e32\u0e43\u0e2b\u0e49\u0e04\u0e48\u0e30",
+          "start_seconds": 12.8,
+          "end_seconds": 16.23,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "overlay",
+              "description": "lower-third name tag \u0e1f\u0e23\u0e31\u0e07 | AI NEWS + magnifier/lab b-roll",
+              "timestamp_seconds": 12.9
+            }
+          ]
+        },
+        {
+          "id": "s4-benchmark",
+          "label": "SETUP \u2014 3 models, 5 tests",
+          "text": "\u0e21\u0e35\u0e04\u0e19\u0e17\u0e33 benchmark \u0e40\u0e1b\u0e23\u0e35\u0e22\u0e1a\u0e40\u0e17\u0e35\u0e22\u0e1a Grok 4.6 \u0e01\u0e31\u0e1a GPT-56 Soul \u0e41\u0e25\u0e30 Fable 5 \u0e43\u0e19 5 \u0e01\u0e32\u0e23\u0e17\u0e14\u0e2a\u0e2d\u0e1a\u0e17\u0e35\u0e48\u0e15\u0e48\u0e32\u0e07\u0e01\u0e31\u0e19 \u0e15\u0e31\u0e49\u0e07\u0e41\u0e15\u0e48\u0e08\u0e33\u0e25\u0e2d\u0e07\u0e23\u0e16\u0e44\u0e1f\u0e40\u0e2b\u0e32\u0e30 \u0e2a\u0e23\u0e49\u0e32\u0e07\u0e40\u0e27\u0e47\u0e1a\u0e44\u0e0b\u0e15\u0e4c Apple \u0e43\u0e2b\u0e21\u0e48 \u0e25\u0e48\u0e32\u0e2a\u0e21\u0e1a\u0e31\u0e15\u0e34\u0e08\u0e32\u0e01\u0e44\u0e1f\u0e25\u0e4c\u0e08\u0e33\u0e19\u0e27\u0e19\u0e21\u0e32\u0e01 debug \u0e42\u0e04\u0e49\u0e14 \u0e44\u0e1b\u0e08\u0e19\u0e16\u0e36\u0e07\u0e2a\u0e23\u0e49\u0e32\u0e07\u0e40\u0e01\u0e21 Flappy Birds",
+          "start_seconds": 16.24,
+          "end_seconds": 35.37,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "overlay",
+              "description": "3 model chips: GROK 4.6 / GPT-56 SOUL / FABLE 5 (18.14s, 19.77s, 21.63s)",
+              "timestamp_seconds": 17.5
+            },
+            {
+              "type": "animation",
+              "description": "5 test icon chips cycle \u0e15\u0e32\u0e21\u0e04\u0e33\u0e1e\u0e39\u0e14: \u0e23\u0e16\u0e44\u0e1f\u0e40\u0e2b\u0e32\u0e30 25.64s, \u0e40\u0e27\u0e47\u0e1a Apple 26.72s, \u0e25\u0e48\u0e32\u0e2a\u0e21\u0e1a\u0e31\u0e15\u0e34 29.14s, debug 31.27s, Flappy Birds 33.32s",
+              "timestamp_seconds": 25.6
+            }
+          ]
+        },
+        {
+          "id": "s5-pivot",
+          "label": "PIVOT \u2014 \u0e1c\u0e25\u0e25\u0e31\u0e1e\u0e18\u0e4c\u0e40\u0e1b\u0e47\u0e19\u0e22\u0e31\u0e07\u0e44\u0e07",
+          "text": "\u0e1c\u0e25\u0e25\u0e31\u0e1e\u0e18\u0e4c\u0e40\u0e1b\u0e47\u0e19\u0e22\u0e31\u0e07\u0e44\u0e07?",
+          "start_seconds": 35.38,
+          "end_seconds": 37.37,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "overlay",
+              "description": "kinetic '\u0e1c\u0e25\u0e25\u0e31\u0e1e\u0e18\u0e4c?' \u0e15\u0e31\u0e27\u0e43\u0e2b\u0e0d\u0e48 + drumroll accent line",
+              "timestamp_seconds": 35.5
+            }
+          ]
+        },
+        {
+          "id": "s6-vs-gpt",
+          "label": "RESULT 1 \u2014 Grok 4.6 vs GPT-56 Soul",
+          "text": "Grok 4.6 vs GPT-56 Soul \u0e04\u0e30\u0e41\u0e19\u0e19\u0e23\u0e27\u0e21 Grok \u0e0a\u0e19\u0e30 \u0e40\u0e27\u0e25\u0e32\u0e40\u0e2a\u0e23\u0e47\u0e08\u0e43\u0e19 18 \u0e19\u0e32\u0e17\u0e35 GPT \u0e43\u0e0a\u0e49 24 \u0e19\u0e32\u0e17\u0e35 \u0e04\u0e48\u0e32\u0e43\u0e0a\u0e49\u0e08\u0e48\u0e32\u0e22\u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e1b\u0e23\u0e30\u0e21\u0e32\u0e13 1 \u0e43\u0e19 3",
+          "start_seconds": 37.38,
+          "end_seconds": 53.37,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "stat_card",
+              "description": "VS card: GROK WINNER badge (41.36s), time bars 18 vs 24 min (45.37s), cost chip \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 ~3x (51.68s)",
+              "timestamp_seconds": 37.5
+            },
+            {
+              "type": "broll",
+              "description": "server GPU arena visual",
+              "timestamp_seconds": 37.5
+            }
+          ]
+        },
+        {
+          "id": "s7-vs-fable",
+          "label": "RESULT 2 \u2014 Grok 4.6 vs Fable 5",
+          "text": "Grok 4.6 vs Fable 5 \u0e04\u0e30\u0e41\u0e19\u0e19\u0e23\u0e27\u0e21 Grok \u0e0a\u0e19\u0e30\u0e40\u0e0a\u0e48\u0e19\u0e01\u0e31\u0e19 \u0e04\u0e48\u0e32\u0e43\u0e0a\u0e49\u0e08\u0e48\u0e32\u0e22\u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e1b\u0e23\u0e30\u0e21\u0e32\u0e13 1 \u0e43\u0e19 10 \u0e40\u0e27\u0e25\u0e32\u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 1 \u0e19\u0e32\u0e17\u0e35",
+          "start_seconds": 53.38,
+          "end_seconds": 66.09,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "stat_card",
+              "description": "VS card: GROK WINNER (58.06s), cost counter 10x \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 (61.63s), speed chip \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 1 \u0e19\u0e32\u0e17\u0e35 (63.40s)",
+              "timestamp_seconds": 53.5
+            },
+            {
+              "type": "broll",
+              "description": "purple-storybook vs orange-core duel visual",
+              "timestamp_seconds": 53.5
+            }
+          ]
+        },
+        {
+          "id": "s8-agent",
+          "label": "TEST \u2014 Agent treasure hunt",
+          "text": "\u0e01\u0e32\u0e23\u0e17\u0e14\u0e2a\u0e2d\u0e1a Agent \u0e25\u0e48\u0e32\u0e2a\u0e21\u0e1a\u0e31\u0e15\u0e34\u0e08\u0e32\u0e01\u0e44\u0e1f\u0e25\u0e4c\u0e2b\u0e25\u0e32\u0e22\u0e1b\u0e23\u0e30\u0e40\u0e20\u0e17 Grok \u0e17\u0e33\u0e44\u0e14\u0e49\u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 GPT \u0e1b\u0e23\u0e30\u0e21\u0e32\u0e13 6 \u0e40\u0e17\u0e48\u0e32 \u0e15\u0e49\u0e19\u0e17\u0e38\u0e19\u0e19\u0e49\u0e2d\u0e22\u0e01\u0e27\u0e48\u0e32\u0e1b\u0e23\u0e30\u0e21\u0e32\u0e13 6 \u0e40\u0e17\u0e48\u0e32 GPT \u0e2b\u0e32\u0e44\u0e21\u0e48\u0e40\u0e08\u0e2d\u0e16\u0e36\u0e07 2 \u0e23\u0e32\u0e22\u0e01\u0e32\u0e23 \u0e43\u0e19\u0e02\u0e13\u0e30\u0e17\u0e35\u0e48 Grok \u0e2b\u0e32\u0e40\u0e08\u0e2d\u0e04\u0e23\u0e1a",
+          "start_seconds": 66.1,
+          "end_seconds": 82.01,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "stat_card",
+              "description": "6x FASTER / 6x CHEAPER counters (72.68s, 75.32s), checklist: GPT \u0e1e\u0e25\u0e32\u0e14 2 \u0e23\u0e32\u0e22\u0e01\u0e32\u0e23 \u2717 vs GROK \u0e04\u0e23\u0e1a \u2713 (77.18s, 80.02s)",
+              "timestamp_seconds": 66.2
+            },
+            {
+              "type": "broll",
+              "description": "treasure-map file maze visual",
+              "timestamp_seconds": 66.2
+            }
+          ]
+        },
+        {
+          "id": "s9-debug",
+          "label": "TEST \u2014 debug + OUTRO",
+          "text": "\u0e01\u0e32\u0e23 debug \u0e42\u0e04\u0e49\u0e14 \u0e17\u0e31\u0e49\u0e07\u0e04\u0e39\u0e48\u0e2b\u0e32\u0e1a\u0e31\u0e4a\u0e01\u0e40\u0e08\u0e2d\u0e04\u0e23\u0e1a 13 \u0e08\u0e38\u0e14 \u0e41\u0e15\u0e48 Grok \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 \u0e41\u0e25\u0e30\u0e23\u0e32\u0e04\u0e32\u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e1b\u0e23\u0e30\u0e21\u0e32\u0e13\u0e04\u0e23\u0e36\u0e48\u0e07\u0e2b\u0e19\u0e36\u0e48\u0e07",
+          "start_seconds": 82.02,
+          "end_seconds": 89.64,
+          "source_ref": "user-supplied content brief",
+          "enhancement_cues": [
+            {
+              "type": "stat_card",
+              "description": "bug counter 13/13 \u0e17\u0e31\u0e49\u0e07\u0e04\u0e39\u0e48 (85.23s) + chips \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32/\u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 ~2x (86.52s, 88.58s)",
+              "timestamp_seconds": 82.1
+            },
+            {
+              "type": "broll",
+              "description": "code debug neon visual",
+              "timestamp_seconds": 82.1
+            },
+            {
+              "type": "overlay",
+              "description": "outro verdict line: \u0e04\u0e33\u0e40\u0e04\u0e25\u0e21\u0e40\u0e1b\u0e47\u0e19\u0e08\u0e23\u0e34\u0e07 \u2014 GROK 4.6 \u0e0a\u0e19\u0e30\u0e17\u0e38\u0e01\u0e2a\u0e19\u0e32\u0e21",
+              "timestamp_seconds": 88.0
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "anchor_sections": [
+          "s1-hook",
+          "s2-skeptic",
+          "s3-frang",
+          "s4-benchmark",
+          "s5-pivot",
+          "s6-vs-gpt",
+          "s7-vs-fable",
+          "s8-agent",
+          "s9-debug"
+        ],
+        "support_sections": "all MG overlays are support-led; VO anchor is source-led throughout",
+        "narration_sections": [],
+        "required_support_assets": [
+          "7 b-roll images",
+          "Remotion overlay composition"
+        ],
+        "timing_source": "artifacts/timing.json (mlx-whisper word-level, exact-script aligned)"
+      }
+    }
+  },
+  "style_playbook": "flat-motion-graphics",
+  "review": {
+    "findings": [],
+    "notes": "G2 pass: 9 beats, source-led VO throughout; support MG justified per beat; timings from mlx-whisper alignment"
+  },
+  "cost_snapshot": {
+    "total_spent_usd": 0.0,
+    "budget_remaining_usd": 2.0
+  }
+}

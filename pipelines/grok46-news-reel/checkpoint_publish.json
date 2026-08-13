@@ -1,0 +1,113 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "pipeline_type": "hybrid",
+  "stage": "publish",
+  "status": "awaiting_human",
+  "timestamp": "2026-08-13T06:01:42.213125+00:00",
+  "checkpoint_policy": "guided",
+  "human_approval_required": true,
+  "human_approved": false,
+  "artifacts": {
+    "publish_log": {
+      "version": "1.0",
+      "entries": [
+        {
+          "platform": "tiktok",
+          "status": "exported",
+          "export_path": "projects/grok46-news-reel/renders/Grok46_FrangNews_Reel.mp4",
+          "timestamp": "2026-08-13T06:00:08.711135+00:00",
+          "metadata_used": {
+            "title": "Grok 4.6 \u0e40\u0e04\u0e25\u0e21\u0e41\u0e23\u0e07 \u2014 \u0e40\u0e17\u0e35\u0e22\u0e1a Frontier \u0e41\u0e15\u0e48\u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32? \u0e1f\u0e23\u0e31\u0e07\u0e14\u0e39\u0e1c\u0e25\u0e40\u0e17\u0e2a\u0e08\u0e23\u0e34\u0e07\u0e21\u0e32\u0e43\u0e2b\u0e49",
+            "hashtags": [
+              "#Grok46",
+              "#AINews",
+              "#Benchmark",
+              "#\u0e1f\u0e23\u0e31\u0e07"
+            ]
+          }
+        }
+      ],
+      "metadata": {
+        "master_output": "renders/Grok46_FrangNews_Reel.mp4",
+        "derivative_outputs": [],
+        "source_mix_notes": "source-led presenter VO + generated b-roll (7 Imagen images) + Remotion MG overlays; no music; no subtitles per user decisions",
+        "platform_copy_map": {
+          "tiktok": "9:16 master as-is",
+          "instagram": "reels same master",
+          "youtube": "shorts same master"
+        }
+      }
+    },
+    "final_review": {
+      "version": "1.0",
+      "output_path": "renders/Grok46_FrangNews_Reel.mp4",
+      "status": "pass",
+      "checks": {
+        "technical_probe": {
+          "valid_container": true,
+          "duration_seconds": 89.664,
+          "resolution": "1080x1920",
+          "fps": 30,
+          "has_audio": true,
+          "codec": "h264",
+          "file_size_bytes": 44946125,
+          "issues": []
+        },
+        "visual_spotcheck": {
+          "frames_sampled": 20,
+          "frame_paths": [
+            "artifacts/qa_frames/"
+          ],
+          "black_frames_detected": false,
+          "broken_overlays": false,
+          "missing_assets": false,
+          "unreadable_text": false,
+          "issues": []
+        },
+        "audio_spotcheck": {
+          "narration_present": true,
+          "music_present": false,
+          "unexpected_silence": false,
+          "clipping_detected": false,
+          "mix_intelligible": true,
+          "issues": [
+            "music absent by user decision d-004"
+          ]
+        },
+        "promise_preservation": {
+          "delivery_promise_honored": true,
+          "renderer_family_used": "presenter",
+          "render_runtime_used": "remotion",
+          "runtime_swap_detected": false,
+          "runtime_swap_check": "ok \u2014 remotion locked at idea (d-002) = remotion rendered",
+          "issues": []
+        },
+        "subtitle_check": {
+          "enabled": false,
+          "legible": true,
+          "synced": true,
+          "issues": [
+            "subtitles disabled per decision d-005"
+          ]
+        }
+      },
+      "issues_found": [],
+      "recommended_action": "present_to_user",
+      "metadata": {
+        "qa_workflow": "13-agent adversarial QA (4 fast-worker reviewers + 9 deep-reasoner verifiers): 1 confirmed suggestion (B7 empty VS card) \u2014 fixed via cue-gated stats row, re-rendered, re-verified at t=57.5",
+        "audio_verification": "volumedetect mean -19.0 dB \u2014 original VO present (not the silent-render bug)",
+        "thai_qa_note": "8 of 9 automated Thai-text findings were vision-model OCR misreads, refuted by verifiers"
+      }
+    }
+  },
+  "style_playbook": "flat-motion-graphics",
+  "review": {
+    "findings": [],
+    "notes": "G7: master exported; metadata reflects source mix; awaiting user sign-off"
+  },
+  "cost_snapshot": {
+    "total_spent_usd": 0.28,
+    "budget_remaining_usd": 1.72
+  }
+}

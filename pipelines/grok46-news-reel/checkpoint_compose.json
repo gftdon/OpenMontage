@@ -1,0 +1,53 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "pipeline_type": "hybrid",
+  "stage": "compose",
+  "status": "completed",
+  "timestamp": "2026-08-13T05:38:48.624347+00:00",
+  "checkpoint_policy": "guided",
+  "human_approval_required": false,
+  "human_approved": false,
+  "artifacts": {
+    "render_report": {
+      "version": "1.0",
+      "outputs": [
+        {
+          "path": "renders/Grok46_FrangNews_Reel.mp4",
+          "format": "mp4",
+          "codec": "h264",
+          "audio_codec": "aac",
+          "resolution": "1080x1920",
+          "fps": 30,
+          "duration_seconds": 89.664,
+          "file_size_bytes": 43292969,
+          "platform_target": "tiktok"
+        }
+      ],
+      "render_time_seconds": 300,
+      "verification_notes": [
+        "ffprobe: 1080x1920 30fps h264+aac, duration 89.664s matches source 89.64s",
+        "audio re-muxed from source (Remotion render silent per design)",
+        "6 pre-render smoke stills + 14 post-mux QA frames extracted for review"
+      ],
+      "decision_log_ref": "pipelines/grok46-news-reel/decision_log.json",
+      "metadata": {
+        "variant_outputs": [
+          "master 1080x1920 only"
+        ],
+        "balance_checks": "presenter visible full runtime; top-zone MG max 2 layers",
+        "audio_notes": "no music per d-004; original VO preserved",
+        "render_runtime": "remotion (matches edit_decisions; no swap)"
+      }
+    }
+  },
+  "style_playbook": "flat-motion-graphics",
+  "review": {
+    "findings": [],
+    "notes": "G6 pass: ffprobe validated; runtime matches d-002; QA workflow running for final visual pass"
+  },
+  "cost_snapshot": {
+    "total_spent_usd": 0.28,
+    "budget_remaining_usd": 1.72
+  }
+}

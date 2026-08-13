@@ -1,0 +1,168 @@
+{
+  "version": "1.0",
+  "project_id": "grok46-news-reel",
+  "pipeline_type": "hybrid",
+  "stage": "scene_plan",
+  "status": "completed",
+  "timestamp": "2026-08-13T05:18:30.673915+00:00",
+  "checkpoint_policy": "guided",
+  "human_approval_required": true,
+  "human_approved": true,
+  "artifacts": {
+    "scene_plan": {
+      "version": "1.0",
+      "style_playbook": "flat-motion-graphics",
+      "scenes": [
+        {
+          "id": "b1-hook",
+          "type": "talking_head",
+          "description": "HOOK: b-roll b1_hook (dark neon AI core launch) \u0e40\u0e15\u0e47\u0e21\u0e42\u0e0b\u0e19\u0e1a\u0e19 + headline GROK 4.6 gradient pop + claim chips 3 \u0e43\u0e1a\u0e44\u0e25\u0e48\u0e15\u0e32\u0e21\u0e04\u0e33\u0e1e\u0e39\u0e14 (\u0e40\u0e17\u0e35\u0e22\u0e1a\u0e40\u0e17\u0e48\u0e32 FRONTIER 5.2s / \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01 7.76s / \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32\u0e21\u0e32\u0e01 9.22s)",
+          "start_seconds": 0.0,
+          "end_seconds": 10.8,
+          "script_section_id": "s1-hook",
+          "framing": "presenter half-body bottom zone; top zone b-roll full-bleed",
+          "movement": "Ken Burns slow push-in \u0e1a\u0e19 b-roll; chips slide-up spring",
+          "transition_in": "fade from black 0.3s",
+          "transition_out": "kicker swap",
+          "overlay_notes": "kicker AI NEWS; chips glass+neon edge, max 1 layer \u0e1e\u0e23\u0e49\u0e2d\u0e21 headline"
+        },
+        {
+          "id": "b2-skeptic",
+          "type": "talking_head",
+          "description": "SKEPTIC: kinetic text \u0e14\u0e35\u0e40\u0e01\u0e34\u0e19\u0e08\u0e23\u0e34\u0e07? \u0e15\u0e31\u0e27\u0e43\u0e2b\u0e0d\u0e48 scale-pop \u0e01\u0e25\u0e32\u0e07\u0e42\u0e0b\u0e19\u0e1a\u0e19 + b-roll b2_lab \u0e40\u0e1f\u0e14\u0e40\u0e02\u0e49\u0e32",
+          "start_seconds": 10.8,
+          "end_seconds": 12.79,
+          "script_section_id": "s2-skeptic",
+          "framing": "same zone system",
+          "movement": "text spring overshoot",
+          "transition_in": "b-roll crossfade 0.4s",
+          "transition_out": "cut to name-tag beat",
+          "overlay_notes": "single giant line only \u2014 beat \u0e2a\u0e31\u0e49\u0e19 2s \u0e2b\u0e49\u0e32\u0e21\u0e41\u0e19\u0e48\u0e19"
+        },
+        {
+          "id": "b3-frang",
+          "type": "talking_head",
+          "description": "PRESENTER INTRO: lower-third \u0e1f\u0e23\u0e31\u0e07 | AI NEWS \u0e17\u0e35\u0e48\u0e23\u0e2d\u0e22\u0e15\u0e48\u0e2d\u0e42\u0e0b\u0e19 + magnifier sweep \u0e1a\u0e19 b-roll b2_lab",
+          "start_seconds": 12.79,
+          "end_seconds": 16.23,
+          "script_section_id": "s3-frang",
+          "framing": "same zone system",
+          "movement": "name tag slide-in left, hold ~4.5s",
+          "transition_in": "cut",
+          "transition_out": "cut",
+          "overlay_notes": "name tag \u0e40\u0e1b\u0e47\u0e19 persistent identity cue \u0e0a\u0e48\u0e27\u0e07\u0e41\u0e23\u0e01\u0e40\u0e17\u0e48\u0e32\u0e19\u0e31\u0e49\u0e19"
+        },
+        {
+          "id": "b4-benchmark",
+          "type": "talking_head",
+          "description": "SETUP: b-roll b4_arena (3 AI cores) + model chips 3 \u0e43\u0e1a pop \u0e15\u0e32\u0e21\u0e04\u0e33\u0e1e\u0e39\u0e14 (GROK 18.14s / GPT-56 SOUL 19.77s / FABLE 5 21.63s) \u0e41\u0e25\u0e49\u0e27 5-test cycler (\u0e23\u0e16\u0e44\u0e1f\u0e40\u0e2b\u0e32\u0e30 25.64s \u2192 \u0e40\u0e27\u0e47\u0e1a Apple 26.72s \u2192 \u0e25\u0e48\u0e32\u0e2a\u0e21\u0e1a\u0e31\u0e15\u0e34 29.14s \u2192 debug 31.27s \u2192 Flappy Birds 33.32s) \u0e1e\u0e23\u0e49\u0e2d\u0e21 progress dots",
+          "start_seconds": 16.23,
+          "end_seconds": 35.37,
+          "script_section_id": "s4-benchmark",
+          "framing": "same zone system",
+          "movement": "chips spring pop; cycler swaps with scale spring",
+          "transition_in": "cut",
+          "transition_out": "cut",
+          "overlay_notes": "kicker BENCHMARK; model chips \u0e14\u0e49\u0e32\u0e19\u0e1a\u0e19, test cycler \u0e01\u0e25\u0e32\u0e07 \u2014 \u0e44\u0e21\u0e48\u0e17\u0e31\u0e1a\u0e01\u0e31\u0e19"
+        },
+        {
+          "id": "b5-pivot",
+          "type": "talking_head",
+          "description": "PIVOT: kinetic \u0e1c\u0e25\u0e25\u0e31\u0e1e\u0e18\u0e4c\u0e40\u0e1b\u0e47\u0e19\u0e22\u0e31\u0e07\u0e44\u0e07? \u0e15\u0e31\u0e27\u0e43\u0e2b\u0e0d\u0e48 + accent sweep",
+          "start_seconds": 35.37,
+          "end_seconds": 37.37,
+          "script_section_id": "s5-pivot",
+          "framing": "same zone system",
+          "movement": "text pop + underline sweep",
+          "transition_in": "cut",
+          "transition_out": "cut",
+          "overlay_notes": "beat \u0e2a\u0e31\u0e49\u0e19 \u2014 text \u0e40\u0e14\u0e35\u0e22\u0e27"
+        },
+        {
+          "id": "b6-vs-gpt",
+          "type": "talking_head",
+          "description": "RESULT 1: b-roll b6_gpu + VS card GROK 4.6 vs GPT-56 SOUL; WINNER badge 41.36s; time bars 18 vs 24 \u0e19\u0e32\u0e17\u0e35 animate 45.37s; cost chip \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 ~3x 51.68s; side chips 18min/24min \u0e02\u0e49\u0e32\u0e07\u0e1e\u0e23\u0e35\u0e40\u0e0b\u0e19\u0e40\u0e15\u0e2d\u0e23\u0e4c",
+          "start_seconds": 37.37,
+          "end_seconds": 53.37,
+          "script_section_id": "s6-vs-gpt",
+          "framing": "same zone system",
+          "movement": "bars grow spring; badge pop",
+          "transition_in": "cut + card slide-up",
+          "transition_out": "card swap",
+          "overlay_notes": "kicker RESULT 1/2"
+        },
+        {
+          "id": "b7-vs-fable",
+          "type": "talking_head",
+          "description": "RESULT 2: b-roll b7_duel + VS card GROK 4.6 vs FABLE 5; WINNER \u0e40\u0e0a\u0e48\u0e19\u0e01\u0e31\u0e19 58.06s; big counter \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 10x 61.63s; chip \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 1 \u0e19\u0e32\u0e17\u0e35 63.40s; side chip 1/10 COST",
+          "start_seconds": 53.37,
+          "end_seconds": 66.09,
+          "script_section_id": "s7-vs-fable",
+          "framing": "same zone system",
+          "movement": "counter roll-up; chip pop",
+          "transition_in": "card swap",
+          "transition_out": "card swap",
+          "overlay_notes": "kicker RESULT 2/2"
+        },
+        {
+          "id": "b8-agent",
+          "type": "talking_head",
+          "description": "AGENT TEST: b-roll b8_treasure + headline \u0e25\u0e48\u0e32\u0e2a\u0e21\u0e1a\u0e31\u0e15\u0e34\u0e08\u0e32\u0e01\u0e44\u0e1f\u0e25\u0e4c\u0e2b\u0e25\u0e32\u0e22\u0e1b\u0e23\u0e30\u0e40\u0e20\u0e17; counters 6x \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 72.68s / 6x \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 75.32s; checklist GPT \u2717 \u0e1e\u0e25\u0e32\u0e14 2 \u0e23\u0e32\u0e22\u0e01\u0e32\u0e23 77.18s vs GROK \u2713 \u0e04\u0e23\u0e1a 80.02s",
+          "start_seconds": 66.09,
+          "end_seconds": 82.01,
+          "script_section_id": "s8-agent",
+          "framing": "same zone system",
+          "movement": "counters roll; checklist rows slide",
+          "transition_in": "cut",
+          "transition_out": "cut",
+          "overlay_notes": "kicker AGENT TEST"
+        },
+        {
+          "id": "b9-debug",
+          "type": "talking_head",
+          "description": "DEBUG + OUTRO: b-roll b9_debug + bug counter 13/13 \u0e17\u0e31\u0e49\u0e07\u0e04\u0e39\u0e48 84.92s; chips GROK \u0e40\u0e23\u0e47\u0e27\u0e01\u0e27\u0e48\u0e32 86.52s + \u0e16\u0e39\u0e01\u0e01\u0e27\u0e48\u0e32 ~2x 88.58s; verdict banner \u0e04\u0e33\u0e40\u0e04\u0e25\u0e21\u0e40\u0e1b\u0e47\u0e19\u0e08\u0e23\u0e34\u0e07 88.8s",
+          "start_seconds": 82.01,
+          "end_seconds": 89.64,
+          "script_section_id": "s9-debug",
+          "framing": "same zone system",
+          "movement": "counter pop; verdict slide-up",
+          "transition_in": "cut",
+          "transition_out": "fade out 0.4s",
+          "overlay_notes": "kicker DEBUG TEST"
+        }
+      ],
+      "metadata": {
+        "anchor_rules": "presenter visible 100% of runtime, bottom zone, half-body crop (source y 60\u20131040 of 1280), seamless on black",
+        "support_rules": "top zone = 1 b-roll + 1 MG layer max; side chips \u0e40\u0e09\u0e1e\u0e32\u0e30 result beats",
+        "safe_zones": "text \u0e2b\u0e49\u0e32\u0e21\u0e15\u0e48\u0e33\u0e01\u0e27\u0e48\u0e32 y=900 (blend band); presenter head top \u2248 y=960; side chips x<170 / x>910, y 1050\u20131550",
+        "variant_rules": "single deliverable 1080x1920",
+        "overlay_density_limits": "max 2 concurrent MG layers (headline + one stat system)",
+        "zone_system": {
+          "canvas": "1080x1920 @30fps",
+          "top_zone": "y 0\u2013940 b-roll + MG",
+          "blend_band": "y 860\u2013960 gradient to black",
+          "presenter_zone": "y 920\u20131920, crop src y60\u20131040, scale 1.0204, width 735 centered x=172"
+        },
+        "broll_assets": [
+          "b1_hook",
+          "b2_lab",
+          "b4_arena",
+          "b6_gpu",
+          "b7_duel",
+          "b8_treasure",
+          "b9_debug"
+        ],
+        "cue_source": "artifacts/timing.json word timeline"
+      }
+    }
+  },
+  "style_playbook": "flat-motion-graphics",
+  "review": {
+    "findings": [],
+    "notes": "G3 pass: source primary (presenter 100% runtime bottom zone); max 2 MG layers; single variant; safe zones explicit"
+  },
+  "cost_snapshot": {
+    "total_spent_usd": 0.0,
+    "budget_remaining_usd": 2.0
+  }
+}
