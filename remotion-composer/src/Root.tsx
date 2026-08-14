@@ -31,6 +31,12 @@ import {
   FrangV5ReelProps,
   calculateFrangV5Metadata,
 } from "./FrangV5Reel";
+import {
+  DeepseekV4Reel,
+  DeepseekV4ReelProps,
+  calculateDeepseekV4Metadata,
+} from "./DeepseekV4Reel";
+import { AvatarTutorial } from "./avatarTutorial/AvatarTutorial";
 
 // ---------------------------------------------------------------------------
 // Theme System — prevents every video from looking like dark fintech
@@ -354,6 +360,27 @@ export const Root: React.FC = () => {
           durationSec: 92.4,
         } as FrangV5ReelProps}
         calculateMetadata={calculateFrangV5Metadata}
+      />
+      <Composition
+        id="DeepseekV4Reel"
+        component={DeepseekV4Reel}
+        durationInFrames={Math.ceil(28.0 * 30)}
+        fps={30}
+        width={720}
+        height={1280}
+        defaultProps={{
+          videoSrc: "deepseek_v4_source.mp4",
+          durationSec: 28.0,
+        } as DeepseekV4ReelProps}
+        calculateMetadata={calculateDeepseekV4Metadata}
+      />
+      <Composition
+        id="AvatarTutorial"
+        component={AvatarTutorial}
+        durationInFrames={2729}
+        fps={30}
+        width={1080}
+        height={1920}
       />
       <Composition
         id="EndTag"
