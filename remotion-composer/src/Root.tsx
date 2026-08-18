@@ -36,6 +36,11 @@ import {
   DeepseekV4ReelProps,
   calculateDeepseekV4Metadata,
 } from "./DeepseekV4Reel";
+import {
+  HermesBotReel,
+  HermesBotReelProps,
+  calculateHermesBotMetadata,
+} from "./HermesBotReel";
 import { AvatarTutorial } from "./avatarTutorial/AvatarTutorial";
 
 // ---------------------------------------------------------------------------
@@ -373,6 +378,18 @@ export const Root: React.FC = () => {
           durationSec: 28.0,
         } as DeepseekV4ReelProps}
         calculateMetadata={calculateDeepseekV4Metadata}
+      />
+      <Composition
+        id="HermesBotReel"
+        component={HermesBotReel}
+        durationInFrames={Math.ceil(118.0 * 30)}
+        fps={30}
+        width={720}
+        height={1280}
+        defaultProps={{
+          durationSec: 118.0,
+        } as HermesBotReelProps}
+        calculateMetadata={calculateHermesBotMetadata}
       />
       <Composition
         id="AvatarTutorial"
