@@ -91,6 +91,8 @@ remotion-composer/public/*
 remotion-composer/public/demo-props/test-*
 remotion-composer/public/demo-props/talking-head-*
 remotion-composer/public/demo-props/caption-burn-*
+# Hermes bot mode reel source assets (tracked — consumed by HermesBotReel composition)
+!remotion-composer/public/hermes-bot-mode-reel/
 
 venv/
 .venv/
