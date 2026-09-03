@@ -99,3 +99,5 @@ venv/
 
 # Backlot local cache (thumbnails)
 .backlot/
+.mcp.json
+.playwright-mcp/

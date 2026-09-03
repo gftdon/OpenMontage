@@ -41,6 +41,26 @@ import {
   HermesBotReelProps,
   calculateHermesBotMetadata,
 } from "./HermesBotReel";
+import {
+  HermesBotReelV2,
+  HermesBotReelV2Props,
+  calculateHermesBotV2Metadata,
+} from "./HermesBotReelV2";
+import {
+  GoogleFlowYT,
+  GoogleFlowYTProps,
+  calculateGoogleFlowYTMetadata,
+} from "./GoogleFlowYT";
+import {
+  KaraokeOverlayV2,
+  KaraokeOverlayV2Props,
+  calculateKaraokeOverlayV2Metadata,
+} from "./KaraokeOverlayV2";
+import {
+  V260821Reel,
+  V260821ReelProps,
+  calculateV260821Metadata,
+} from "./V260821Reel";
 import { AvatarTutorial } from "./avatarTutorial/AvatarTutorial";
 
 // ---------------------------------------------------------------------------
@@ -390,6 +410,56 @@ export const Root: React.FC = () => {
           durationSec: 118.0,
         } as HermesBotReelProps}
         calculateMetadata={calculateHermesBotMetadata}
+      />
+      <Composition
+        id="HermesBotReelV2"
+        component={HermesBotReelV2}
+        durationInFrames={Math.ceil(114.0 * 30)}
+        fps={30}
+        width={1080}
+        height={1920}
+        defaultProps={{
+          durationSec: 114.0,
+        } as HermesBotReelV2Props}
+        calculateMetadata={calculateHermesBotV2Metadata}
+      />
+      <Composition
+        id="GoogleFlowYT"
+        component={GoogleFlowYT}
+        durationInFrames={Math.ceil(230.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 230.0,
+        } as GoogleFlowYTProps}
+        calculateMetadata={calculateGoogleFlowYTMetadata}
+      />
+      <Composition
+        id="KaraokeOverlayV2"
+        component={KaraokeOverlayV2}
+        durationInFrames={Math.ceil(25 * 110.12)}
+        fps={25}
+        width={1080}
+        height={1920}
+        defaultProps={{
+          videoSrc: "Hermes_Bot_Mode_Final.mp4",
+          bottomPx: 300,
+        } as KaraokeOverlayV2Props}
+        calculateMetadata={calculateKaraokeOverlayV2Metadata}
+      />
+      <Composition
+        id="V260821Reel"
+        component={V260821Reel}
+        durationInFrames={Math.ceil(25 * 105.88)}
+        fps={25}
+        width={1080}
+        height={1920}
+        defaultProps={{
+          videoSrc: "V260821_001_30_Merged.mp4",
+          bottomPx: 300,
+        } as V260821ReelProps}
+        calculateMetadata={calculateV260821Metadata}
       />
       <Composition
         id="AvatarTutorial"
