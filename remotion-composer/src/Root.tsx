@@ -52,6 +52,44 @@ import {
   calculateGoogleFlowYTMetadata,
 } from "./GoogleFlowYT";
 import {
+  FableNewsYT,
+  FableNewsYTProps,
+  calculateFableNewsYTMetadata,
+} from "./FableNewsYT";
+import {
+  TripoYTNewsV1,
+  TripoYTNewsV1Props,
+  calculateTripoYTNewsV1Metadata,
+} from "./TripoYTNewsV1";
+import {
+  FableNewsYTV2,
+  FableNewsYTV2Props,
+  calculateFableNewsYTV2Metadata,
+  FableNewsThumb,
+  FableNewsThumbProps,
+} from "./FableNewsYTV2";
+import {
+  FuguNewsYTV2,
+  FuguNewsYTV2Props,
+  calculateFuguNewsYTV2Metadata,
+  FuguNewsThumb,
+  FuguNewsThumbProps,
+} from "./FuguNewsYTV2";
+import {
+  AiAgencyNewsYTV2,
+  AiAgencyNewsYTV2Props,
+  calculateAiAgencyNewsYTV2Metadata,
+  AiAgencyNewsThumb,
+  AiAgencyNewsThumbProps,
+} from "./AiAgencyNewsYTV2";
+import {
+  TripoGameNewsYTV2,
+  TripoGameNewsYTV2Props,
+  calculateTripoGameNewsYTV2Metadata,
+  TripoGameNewsThumb,
+  TripoGameNewsThumbProps,
+} from "./TripoGameNewsYTV2";
+import {
   KaraokeOverlayV2,
   KaraokeOverlayV2Props,
   calculateKaraokeOverlayV2Metadata,
@@ -434,6 +472,106 @@ export const Root: React.FC = () => {
           durationSec: 230.0,
         } as GoogleFlowYTProps}
         calculateMetadata={calculateGoogleFlowYTMetadata}
+      />
+      <Composition
+        id="FableNewsYT"
+        component={FableNewsYT}
+        durationInFrames={Math.ceil(460.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 460.0,
+        } as FableNewsYTProps}
+        calculateMetadata={calculateFableNewsYTMetadata}
+      />
+      <Composition
+        id="TripoYTNewsV1"
+        component={TripoYTNewsV1}
+        durationInFrames={Math.ceil(374.5 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 374.5,
+        } as TripoYTNewsV1Props}
+        calculateMetadata={calculateTripoYTNewsV1Metadata}
+      />
+      <Composition
+        id="FableNewsYTV2"
+        component={FableNewsYTV2}
+        durationInFrames={Math.ceil(480.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{} as FableNewsYTV2Props}
+        calculateMetadata={calculateFableNewsYTV2Metadata}
+      />
+      <Composition
+        id="FableNewsThumb"
+        component={FableNewsThumb}
+        durationInFrames={2}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{ variant: "A", avatarSec: 3.0 } as FableNewsThumbProps}
+      />
+      <Composition
+        id="FuguNewsYTV2"
+        component={FuguNewsYTV2}
+        durationInFrames={Math.ceil(240.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{} as FuguNewsYTV2Props}
+        calculateMetadata={calculateFuguNewsYTV2Metadata}
+      />
+      <Composition
+        id="FuguNewsThumb"
+        component={FuguNewsThumb}
+        durationInFrames={2}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{ variant: "A", avatarSec: 3.0 } as FuguNewsThumbProps}
+      />
+      <Composition
+        id="AiAgencyNewsYTV2"
+        component={AiAgencyNewsYTV2}
+        durationInFrames={Math.ceil(240.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{} as AiAgencyNewsYTV2Props}
+        calculateMetadata={calculateAiAgencyNewsYTV2Metadata}
+      />
+      <Composition
+        id="AiAgencyNewsThumb"
+        component={AiAgencyNewsThumb}
+        durationInFrames={2}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{ variant: "A", avatarSec: 3.0 } as AiAgencyNewsThumbProps}
+      />
+      <Composition
+        id="TripoGameNewsYTV2"
+        component={TripoGameNewsYTV2}
+        durationInFrames={Math.ceil(400.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{} as TripoGameNewsYTV2Props}
+        calculateMetadata={calculateTripoGameNewsYTV2Metadata}
+      />
+      <Composition
+        id="TripoGameNewsThumb"
+        component={TripoGameNewsThumb}
+        durationInFrames={2}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{ variant: "A", avatarSec: 3.0 } as TripoGameNewsThumbProps}
       />
       <Composition
         id="KaraokeOverlayV2"

@@ -1,0 +1,50 @@
+{
+  "url": "https://www.anthropic.com/claude-fable-and-mythos-5-1",
+  "viewport": 1100,
+  "dpr": 2,
+  "outDir": "projects/fable-mythos-news-yt/assets/web",
+  "tsOut": "remotion-composer/src/fableNewsWeb.ts",
+  "hideSelectors": ["[class*=\"ConsentContainer\"]"],
+  "sections": [
+    { "name": "hero", "y": 0, "h": 840, "phrases": { "hero_title": "Fable 5.1" } },
+    { "name": "intro", "anchor": "We're introducing", "offset": -40, "h": 1080,
+      "phrases": { "intro_same_model": "are the same model, but with different levels of safeguards", "intro_price": "cost an estimated 25% less than Fable 5", "intro_efs": "Enterprise Frontier Safeguards (EFS)" } },
+    { "name": "millennium", "anchor": "Fable 5.1 avoids shortcuts", "offset": -40, "h": 240,
+      "phrases": { "mill_avoid": "Fable 5.1 avoids shortcuts that result in poorer-quality work", "mill_root": "fix the root causes of software issues", "mill_none": "none of its engineers (or any other model) had been able to explain after several years of trying" } },
+    { "name": "table", "anchor": "Here, you can see", "offset": -40, "h": 800, "phrases": { "table_gpt": "GPT-5.6 Sol" } },
+    { "name": "science", "anchor": "Scientific research", "offset": -40, "h": 900,
+      "phrases": { "sci_title": "Molecular design.", "sci_10x": "its binding affinities were 10 times higher than the best designs", "sci_50": "it reached nearly 50% across 12 targets", "sci_1015": "Hit rates of 10-15% are typical in protein design today" } },
+    { "name": "venus", "anchor": "Computational analysis and modeling", "offset": -40, "h": 560,
+      "phrases": { "venus_25": "up to 25% more accurately than before", "venus_release": "releasing this map", "venus_cc": "under a Creative Commons license" } },
+    { "name": "compbio", "anchor": "Computational biology", "offset": -40, "h": 480,
+      "phrases": { "bio_slow": "The speed of these models is therefore a bottleneck to research progress", "bio_kernels": "by writing custom GPU kernels and caching their intermediate results", "bio_weeks": "would normally take a team of performance engineers weeks", "bio_open": "We plan to open-source these optimizations soon" } },
+    { "name": "safety", "anchor": "Safety, security, and alignment", "offset": -40, "h": 900,
+      "phrases": { "safety_testing": "subjected the models to extensive testing for risks across many areas" } },
+    { "name": "cyber", "anchor": "Cyber risks", "offset": -40, "h": 460,
+      "phrases": { "cyber_external": "we commissioned external testing from two organizations", "cyber_gray": "Gray Swan", "cyber_jailbreak": "critical-severity jailbreak" } },
+    { "name": "efs", "anchor": "Automated safeguards for enterprises", "offset": -40, "h": 460,
+      "phrases": { "efs_title": ["Enterprise Frontier Safeguards", 1], "efs_store": "customers store their data on their own cloud infrastructure, rather than on Anthropic's systems" } },
+    { "name": "precise", "anchor": "More precise safeguards", "offset": -40, "h": 760,
+      "phrases": { "precise_benign": "less likely to flag benign content", "precise_85": "fire 85% less often for benign requests", "precise_60": "around 60% fewer interventions per session" } },
+    { "name": "trusted", "anchor": "Trusted access for Claude Mythos 5.1", "offset": -40, "h": 640,
+      "phrases": { "trusted_identical": "Claude Mythos 5.1 is identical to Fable 5.1, but it offers more permissive safeguards for vetted individuals and organizations" } },
+    { "name": "cost", "anchor": "Cost and availability", "offset": -40, "h": 1200,
+      "phrases": { "cost_25": "costs are reduced by around 25% relative to Fable 5", "cost_45": "the savings could be up to around 45%", "cost_chart": "Indexed cost of Fable usage" } }
+  ],
+  "tables": [ { "name": "table", "section": "table", "selector": "table" } ],
+  "tabs": [
+    { "name": "chart", "buttonSelector": "button[class*=\"ViewSwitcher\"]", "labels": ["Agentic scientific research", "Agentic terminal coding", "Multidisciplinary reasoning", "Agentic coding"], "minHeight": 500 },
+    { "name": "bio_chart", "buttonSelector": "button[class*=\"ViewSwitcher\"]", "labels": ["Inference speedup", "Estimated cost savings"], "minHeight": 500 }
+  ],
+  "carousel": {
+    "name": "quote", "nextSelector": "button[class*=\"pagination-button\"]", "nextText": "Next", "h": 340,
+    "items": [
+      { "index": 0, "phrases": { "q_js_readable": "Fable 5.1 remains readable over long, multi-step tasks" } },
+      { "index": 2, "phrases": { "q_mill_million": "about one in a million runs", "q_mill_years": "nobody on our team had explained in four to five years", "q_mill_first": "Claude Fable 5.1 was the first to find it" } },
+      { "index": 3, "phrases": { "q_mongo_3days": "built a complex prototype in about three days" } },
+      { "index": 7, "phrases": { "q_rak_three": "three other frontier models" } },
+      { "index": 10, "phrases": { "q_canva_writing": "more understandable, more meaningful" } },
+      { "index": 17, "phrases": { "q_shop_long": "long, unattended work" } }
+    ]
+  }
+}

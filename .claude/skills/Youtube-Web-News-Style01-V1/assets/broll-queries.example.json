@@ -1,0 +1,21 @@
+{
+  "_format": "key -> [pixabay search query, pixabay category]. Keys become public/<mediaDir>/broll/<key>.mp4 and BROLL_DUR keys. Categories: backgrounds fashion nature science education feelings health people religion places animals industry computer food sports transportation travel buildings business music",
+  "abstract":      ["abstract technology particles blue", "backgrounds"],
+  "chat_ai":       ["artificial intelligence chatbot typing", "computer"],
+  "office":        ["business analyst office documents", "business"],
+  "coding":        ["programmer coding laptop screen", "computer"],
+  "brain":         ["neural network brain digital", "science"],
+  "trading":       ["stock market trading screens finance", "business"],
+  "datacenter":    ["data center server room", "computer"],
+  "microscope":    ["scientist microscope laboratory", "science"],
+  "warehouse":     ["warehouse packages conveyor delivery", "industry"],
+  "lab":           ["laboratory scientist pipette research", "science"],
+  "molecule":      ["molecule structure science 3d", "science"],
+  "venus":         ["planet space rotating", "science"],
+  "dna":           ["dna molecule animation", "science"],
+  "server_lights": ["server data flow network cables", "computer"],
+  "cyber":         ["cyber security digital lock network", "computer"],
+  "city_night":    ["city skyline night timelapse", "places"],
+  "typing":        ["hands typing keyboard close up", "computer"],
+  "handshake":     ["business meeting handshake office", "business"]
+}

@@ -1,0 +1,18 @@
+{
+  "style": "Cinematic, premium, deep navy (#0B0E17) background, warm amber (#F2B34C) light as the only warm accent, soft cream rim light, shallow depth of field, volumetric haze, 16:9. No text, no letters, no logos, no people.",
+  "shots": {
+    "gen_glitch": {
+      "image": "Extreme close-up of a dark monitor wall in a server room showing dense scrolling code as dim cream monospace glyph shapes on near-black navy; one single line of code glows hot amber and fractures with digital glitch artifacts and chromatic aberration.",
+      "motion": "Slow push-in toward the glowing amber line; code lines drift upward slowly; the amber line flickers and glitches with brief chromatic aberration; subtle handheld micro-shake; cinematic, moody, no text."
+    },
+    "gen_protein": {
+      "image": "Macro 3D render of a glowing amber protein molecule shaped like an ornate key sliding into a translucent frosted-grey receptor pocket shaped like a lock; fine floating particles; scientific visualization.",
+      "motion": "The amber key-shaped protein slowly rotates and docks into the receptor pocket; particles drift; gentle slow orbit camera; soft glow pulses when it locks in; cinematic, no text."
+    },
+    "gen_ident": {
+      "image": "Abstract nebula of amber and clay-orange light threads flowing through deep navy space, fine cream particles, elegant premium tech brand background, wide shot, soft focus.",
+      "motion": "Light threads flow slowly and continuously; particles drift; camera static; seamless gentle motion, loopable; no text."
+    }
+  },
+  "_notes": "Roles per episode: one hook shot for the teaser (the story's image), one concept shot (the hardest idea in the script), one ident/typo background. EP.1 (2026-09-03): Kling v3/standard text-to-video via fal, 720p24 5.04 s, $0.10 each."
+}
