@@ -1,0 +1,183 @@
+// Fixture: verbatim excerpt of TripoYTNewsV1.tsx (assetDir line + interface Beat .. BEATS) — text only, no media.
+const EPISODE = {
+  assetDir: "tripoGameNews", // public/<assetDir>/{avatar_source.mp4, broll/, web/}
+};
+
+interface Beat {
+  t: number;
+  mode: "full" | "pip";
+  media?: "web" | "broll" | "clip" | "typo" | "none";
+  kicker?: string;
+  // web
+  file?: string; // e.g. "sec_hero" | "quote_02" | "chart_1"
+  cssH?: number; // capture CSS height when not in WEB_CLIPS
+  cam?: CamKey[];
+  hl?: Highlight[];
+  // footage
+  src?: string; // broll key
+  from?: number;
+  headline?: string;
+  sub?: string;
+  subT?: number;
+  idx?: string;
+  clipFit?: "cover" | "contain"; // `clip` beats: cover for full-bleed footage, contain for light renders
+  // typo
+  typo?: "summary3" | "vs" | "final4";
+  // overlays
+  stats?: Stat[];
+  lower?: { title: string; sub: string; t?: number; dur?: number };
+}
+
+const R = (k: string): WebRect => WEB_RECTS[k] || { x: 230, y: 0, w: 600, h: 40 };
+const rowRect = (includes: string): WebRect => {
+  const k = Object.keys(WEB_RECTS).find(
+    (kk) => kk.startsWith("table_row") && (WEB_RECTS[kk].text || "").includes(includes) && WEB_RECTS[kk].w > 0
+  );
+  return k ? WEB_RECTS[k] : { x: 110, y: 216, w: 880, h: 72 };
+};
+const colRect = (includes: string, rowKey: WebRect): WebRect => {
+  const k = Object.keys(WEB_RECTS).find(
+    (kk) => kk.startsWith("table_col") && (WEB_RECTS[kk].text || "").includes(includes)
+  );
+  const c = k ? WEB_RECTS[k] : { x: 330, w: 170, y: 0, h: 0 };
+  return { x: c.x, y: rowKey.y, w: c.w, h: rowKey.h };
+};
+
+const BEATS: Beat[] = [
+  // ---- cold open (full frame) ------------------------------------------
+  { t: 0.0, mode: "full", lower: { title: "4 AI ช่วยกันสร้างเกมจากศูนย์", sub: "ไม่ต้องเขียนโค้ดแม้แต่บรรทัดเดียว — เรื่องจริงที่เกิดขึ้นแล้ว", t: 1.2, dur: 6.5 } },
+  {
+    t: 10.48, mode: "pip", media: "broll", src: "yt_fight", kicker: "คำตอบคือ…ได้แล้วในยุคนี้",
+    headline: "AI 4 ตัว สร้างเกมทั้งเกม", sub: "จากศูนย์ — ไม่ต้องเขียนโค้ดเอง", subT: 12.77,
+    stats: [{ t: 14.52, big: "4 AI", label: "ช่วยกันสร้างเกมจากศูนย์", tone: "mint" }],
+  },
+  {
+    t: 20.88, mode: "pip", media: "clip", src: "yt_pipeline", clipFit: "contain", kicker: "ไม่ต้องเขียนโค้ดแม้แต่บรรทัดเดียว",
+    headline: "pipeline สร้างเกมด้วย AI ล้วน ๆ", sub: "ที่มา: คลิปต้นฉบับ RemakeBench", subT: 24.6,
+  },
+  { t: 29.2, mode: "full" },
+  // ---- overview: ทีมงาน 4 คน --------------------------------------------
+  {
+    t: 31.26, mode: "pip", media: "broll", src: "office", kicker: "ภาพรวมการสร้างเกม",
+    headline: "การสร้างเกมแบบเดิม", sub: "ต้องใช้คนหลายฝ่าย แต่ละส่วนใช้ทักษะเฉพาะทาง", subT: 34.6,
+    stats: [{ t: 38.3, label: "🎨 คนออกแบบตัวละคร" }, { t: 43.28, label: "💻 คนเขียนโปรแกรม" }, { t: 44.8, label: "🔊 คนทำเสียงและเอฟเฟกต์" }],
+  },
+  {
+    t: 50.02, mode: "pip", media: "broll", src: "yt_pipeline", from: 10, kicker: "ตอนนี้ AI ทำแทนได้เกือบทั้งหมด",
+    headline: "เหมือนมีทีมงาน 4 คน", sub: "พร้อมทำตามคำสั่งเราตลอดเวลา", subT: 55.24,
+    stats: [{ t: 55.24, big: "4 ทีมงาน", label: "พร้อมรับคำสั่ง 24 ชม.", tone: "mint" }],
+  },
+  {
+    t: 58.08, mode: "pip", media: "broll", src: "ai_network", kicker: "การแบ่งหน้าที่",
+    headline: "AI 4 ตัว คนละหน้าที่", sub: "เราแค่บอกว่าอยากได้อะไร AI ก็ไปทำให้", subT: 64.5,
+    stats: [{ t: 59.5, label: "🗿 ปั้นโมเดล 3D" }, { t: 61.0, label: "💻 เขียนโค้ด" }, { t: 62.6, label: "🎨 วาดภาพฉาก" }, { t: 64.2, label: "🎵 เสียงและดนตรี" }],
+  },
+  {
+    t: 68.14, mode: "pip", media: "broll", src: "studio", kicker: "บทบาทใหม่ของเรา",
+    headline: "เราคือผู้กำกับหนัง", sub: "ไม่ต้องถือกล้องเอง ไม่ต้องแต่งหน้าเอง", subT: 71.2,
+    stats: [{ t: 74.2, label: "🗣️ แค่บอกว่าอยากได้ฉากแบบไหน" }, { t: 78.0, label: "⚡ ทีมงาน AI ไปจัดการให้" }],
+  },
+  { t: 78.32, mode: "full" },
+  // ---- AI ตัวที่ 1: Tripo 3D ---------------------------------------------
+  {
+    t: 81.62, mode: "pip", media: "clip", src: "yt_tripo_home", clipFit: "cover", idx: "AI 1", kicker: "AI ตัวที่ 1 · โมเดลสามมิติ",
+    headline: "Tripo — AI ปั้นโมเดล 3D", sub: "บอกหน้าตาที่อยากได้ มันปั้นให้เลย", subT: 91.31,
+    stats: [{ t: 88.48, big: "Tripo", label: "AI สร้างโมเดลสามมิติ", tone: "mint" }],
+  },
+  {
+    t: 96.58, mode: "pip", media: "clip", src: "yt_tripo_model", clipFit: "cover", kicker: "เหมือนมีช่างปั้นส่วนตัว",
+    headline: "พิมพ์บอก แล้วได้โมเดล 3D", sub: "อยากได้มังกร มันก็ปั้นมังกรให้", subT: 104.6,
+    stats: [{ t: 107.42, label: "🐉 มังกร" }, { t: 110.0, label: "🗡️ ดาบวิเศษ" }],
+  },
+  {
+    t: 112.74, mode: "pip", media: "clip", src: "yt_rig", clipFit: "cover", kicker: "หมุนดูได้รอบด้านเหมือนของจริง",
+    headline: "Tripo P2.0", sub: "ละเอียดและสวยงามกว่าเดิมเยอะ", subT: 118.21,
+    stats: [{ t: 115.88, big: "P2.0", label: "เวอร์ชันล่าสุด", tone: "mint" }, { t: 125.92, label: "🎮 เกม · แอนิเมชัน · งานออกแบบ" }],
+  },
+  { t: 127.36, mode: "full" },
+  // ---- AI ตัวที่ 2: เขียนโค้ด ---------------------------------------------
+  {
+    t: 129.6, mode: "pip", media: "broll", src: "coding", idx: "AI 2", kicker: "AI ตัวที่ 2 · เขียนโค้ด",
+    headline: "ทำให้เกมทำงานได้", sub: "ถ้าโมเดล 3D คือตัวละคร โค้ดคือสิ่งที่ทำให้ขยับได้", subT: 133.02,
+    stats: [{ t: 136.0, big: "Coding AI", label: "ช่วยเขียนโปรแกรมระบบเกม", tone: "mint" }],
+  },
+  {
+    t: 139.6, mode: "pip", media: "broll", src: "yt_gameplay", kicker: "โค้ดคืออะไร",
+    headline: "วิ่งได้ กระโดดได้", sub: "กดปุ่มแล้วตัวละครทำตาม — นั่นคือโค้ด", subT: 143.12,
+    stats: [{ t: 143.12, label: "🏃 วิ่งได้" }, { t: 143.93, label: "🦘 กระโดดได้" }],
+  },
+  {
+    t: 148.6, mode: "pip", media: "broll", src: "typing", kicker: "คนที่ไม่เคยเขียนโปรแกรมเลย",
+    headline: "พิมพ์บอก AI ก็เขียนให้หมด", sub: "อยากให้กดปุ่มแล้ววิ่งไปข้างหน้า บอกแค่นั้น", subT: 155.0,
+    stats: [{ t: 158.0, label: "✅ AI เขียนคำสั่งให้ครบ" }],
+  },
+  {
+    t: 161.28, mode: "pip", media: "clip", src: "yt_judge", clipFit: "cover", kicker: "แต่ก่อนต้องเรียนหลายเดือน",
+    headline: "ตอนนี้ไม่กี่นาที", sub: "ที่มา: คลิปต้นฉบับ — AI ตรวจคุณภาพงานของตัวเอง", subT: 168.38,
+    stats: [{ t: 168.38, big: "ไม่กี่นาที", label: "จากเดิมหลายเดือน", tone: "mint" }],
+  },
+  // ---- AI ตัวที่ 3 + 4: ภาพและเสียง ---------------------------------------
+  {
+    t: 171.58, mode: "pip", media: "clip", src: "yt_refart", clipFit: "contain", idx: "AI 3", kicker: "AI ตัวที่ 3 · สร้างภาพ",
+    headline: "วาดฉากหลังให้ทั้งเกม", sub: "ป่าไม้ ภูเขา ท้องฟ้า หรือฉากในเมือง", subT: 179.44,
+    stats: [{ t: 175.08, big: "Image AI", label: "สร้างภาพพื้นหลังและฉาก", tone: "mint" }],
+  },
+  {
+    t: 184.1, mode: "pip", media: "broll", src: "cyber", kicker: "พิมพ์บอกบรรยากาศที่อยากได้",
+    headline: "ไม่ต้องจ้างนักวาด", sub: "ได้ภาพที่ไม่เหมือนใคร เป็นของเราเอง 100%", subT: 189.36,
+    stats: [{ t: 194.28, label: "✨ เอกลักษณ์ของเราเอง 100%" }],
+  },
+  {
+    t: 196.5, mode: "pip", media: "clip", src: "yt_audio", clipFit: "cover", idx: "AI 4", kicker: "AI ตัวที่ 4 · เสียงและดนตรี",
+    headline: "เอฟเฟกต์และเพลงประกอบ", sub: "เสียงดาบฟัน เสียงระเบิด เพลงฉากต่อสู้", subT: 204.04,
+    stats: [{ t: 200.92, big: "Audio AI", label: "สร้างเสียงและดนตรี", tone: "mint" }],
+  },
+  {
+    t: 210.16, mode: "pip", media: "broll", src: "office", from: 7, kicker: "รวม 4 ตัวเข้าด้วยกัน",
+    headline: "ทีมสร้างเกมครบวงจร", sub: "โดยไม่ต้องจ้างใครเลยสักคนเดียว", subT: 214.48,
+    stats: [{ t: 211.54, big: "ครบวงจร", label: "4 AI ทำงานเป็นทีม", tone: "mint" }],
+  },
+  { t: 217.04, mode: "full" },
+  // ---- เกี่ยวอะไรกับเรา ---------------------------------------------------
+  {
+    t: 222.42, mode: "pip", media: "broll", src: "brain", kicker: "คำถามที่สำคัญที่สุด",
+    headline: "ถ้าไม่ได้อยากสร้างเกมล่ะ?", sub: "เทคโนโลยีนี้ยังมีประโยชน์กับเราไหม", subT: 225.5,
+    stats: [{ t: 227.0, big: "มีประโยชน์มาก", label: "คำตอบ", tone: "mint" }],
+  },
+  {
+    t: 228.72, mode: "pip", media: "clip", src: "yt_arena", clipFit: "cover", kicker: "ไม่ได้จำกัดแค่การสร้างเกม",
+    headline: "สร้างอย่างอื่นได้เหมือนกัน", sub: "ที่มา: คลิปต้นฉบับ — โคลอสเซียมที่ AI สร้าง", subT: 235.02,
+  },
+  {
+    t: 239.5, mode: "pip", media: "broll", src: "shopping", kicker: "ขายของออนไลน์",
+    headline: "ภาพสินค้า 3 มิติสวย ๆ", sub: "AI ก็ทำให้ได้", subT: 243.0,
+    stats: [{ t: 239.5, label: "🛍️ ขายของออนไลน์" }],
+  },
+  {
+    t: 247.2, mode: "pip", media: "broll", src: "typing", from: 6, kicker: "ทุกอาชีพใช้ได้",
+    headline: "ครู · นักออกแบบ · ครีเอเตอร์", sub: "สื่อการสอน 3D · ต้นแบบในไม่กี่นาที · คอนเทนต์โซเชียล", subT: 250.0,
+    stats: [{ t: 247.2, label: "📚 ครู — สื่อการสอน 3D" }, { t: 254.6, label: "📐 นักออกแบบ — ต้นแบบไว" }, { t: 261.0, label: "📱 ครีเอเตอร์ — คอนเทนต์ครบ" }],
+  },
+  { t: 264.8, mode: "full" },
+  // ---- ทักษะยุค AI ---------------------------------------------------------
+  {
+    t: 267.3, mode: "pip", media: "broll", src: "gaming", kicker: "สิ่งที่น่าทึ่งที่สุดของยุคนี้",
+    headline: "AI ลดอุปสรรคเรื่องทักษะ", sub: "เมื่อก่อนต้องเรียนก่อน ฝึกก่อน — บางอย่างหลายปี", subT: 272.0,
+    stats: [{ t: 282.46, big: "ลดอุปสรรค", label: "ไม่จำเป็นต้องเก่งทุกอย่าง", tone: "mint" }],
+  },
+  { t: 284.17, mode: "pip", media: "typo", typo: "vs", src: "abstract", kicker: "ทักษะที่สำคัญที่สุดในยุคนี้" },
+  { t: 304.38, mode: "full" },
+  // ---- สรุป -----------------------------------------------------------------
+  { t: 307.54, mode: "pip", media: "typo", typo: "final4", src: "abstract", from: 12, kicker: "สรุป 4 ข้อคิดสำคัญ" },
+  {
+    t: 345.0, mode: "pip", media: "clip", src: "yt_rounds", clipFit: "contain", kicker: "เรื่องจริงจากคลิปต้นฉบับ",
+    headline: "AI ปรับเกมถึง 95 รอบ", sub: "ที่มา: คลิปต้นฉบับ RemakeBench", subT: 348.0,
+    stats: [{ t: 348.8, big: "95 รอบ", label: "ปรับปรุงจนกว่าจะสมบูรณ์", tone: "mint" }],
+  },
+  {
+    t: 351.5, mode: "pip", media: "broll", src: "brain", from: 5, kicker: "ลองเปิดใจเรียนรู้",
+    headline: "AI ออกแบบมาให้ใช้ง่าย", sub: "ไม่ต้องกลัวว่ามันจะยากเกินไป", subT: 354.8,
+    stats: [{ t: 358.9, label: "💡 ใช้ง่ายสำหรับทุกคน" }],
+  },
+  { t: 361.18, mode: "full" },
+];

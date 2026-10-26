@@ -1,0 +1,22 @@
+{
+  "_note":                  "FORMAT example only - do NOT reuse these keys or queries. Write episode-specific queries from the script lines, with descriptive key names. Keys starting with _ are ignored by fetch_broll.py.",
+  "_format":                "key -> [pixabay search query, pixabay category]. Keys become public/<mediaDir>/broll/<key>.mp4 and BROLL_DUR keys. Categories: backgrounds fashion nature science education feelings health people religion places animals industry computer food sports transportation travel buildings business music",
+  "example_abstract":       ["abstract technology particles blue", "backgrounds"],
+  "example_chat_ai":        ["artificial intelligence chatbot typing", "computer"],
+  "example_office":         ["business analyst office documents", "business"],
+  "example_coding":         ["programmer coding laptop screen", "computer"],
+  "example_brain":          ["neural network brain digital", "science"],
+  "example_trading":        ["stock market trading screens finance", "business"],
+  "example_datacenter":     ["data center server room", "computer"],
+  "example_microscope":     ["scientist microscope laboratory", "science"],
+  "example_warehouse":      ["warehouse packages conveyor delivery", "industry"],
+  "example_lab":            ["laboratory scientist pipette research", "science"],
+  "example_molecule":       ["molecule structure science 3d", "science"],
+  "example_venus":          ["planet space rotating", "science"],
+  "example_dna":            ["dna molecule animation", "science"],
+  "example_server_lights":  ["server data flow network cables", "computer"],
+  "example_cyber":          ["cyber security digital lock network", "computer"],
+  "example_city_night":     ["city skyline night timelapse", "places"],
+  "example_typing":         ["hands typing keyboard close up", "computer"],
+  "example_handshake":      ["business meeting handshake office", "business"]
+}
