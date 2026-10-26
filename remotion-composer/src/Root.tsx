@@ -62,6 +62,36 @@ import {
   calculateTripoYTNewsV1Metadata,
 } from "./TripoYTNewsV1";
 import {
+  KimiK31NewsYTV1,
+  KimiK31NewsYTV1Props,
+  calculateKimiK31NewsYTV1Metadata,
+} from "./KimiK31NewsYTV1";
+import {
+  ClaudeTop1NewsYTV1,
+  ClaudeTop1NewsYTV1Props,
+  calculateClaudeTop1NewsYTV1Metadata,
+} from "./ClaudeTop1NewsYTV1";
+import {
+  JevYTNewsV1,
+  JevYTNewsV1Props,
+  calculateJevYTNewsV1Metadata,
+} from "./JevYTNewsV1";
+import {
+  Haiku55NewsYTV1,
+  Haiku55NewsYTV1Props,
+  calculateHaiku55NewsYTV1Metadata,
+} from "./Haiku55NewsYTV1";
+import {
+  Opus55NewsYTV1,
+  Opus55NewsYTV1Props,
+  calculateOpus55NewsYTV1Metadata,
+} from "./Opus55NewsYTV1";
+import {
+  OmarchyOsNewsYT,
+  OmarchyOsNewsYTProps,
+  calculateOmarchyOsNewsYTMetadata,
+} from "./OmarchyOsNewsYT";
+import {
   FableNewsYTV2,
   FableNewsYTV2Props,
   calculateFableNewsYTV2Metadata,
@@ -89,6 +119,20 @@ import {
   TripoGameNewsThumb,
   TripoGameNewsThumbProps,
 } from "./TripoGameNewsYTV2";
+import {
+  Gpt6NewsYTV2,
+  Gpt6NewsYTV2Props,
+  calculateGpt6NewsYTV2Metadata,
+  Gpt6NewsThumb,
+  Gpt6NewsThumbProps,
+} from "./Gpt6NewsYTV2";
+import {
+  Haiku55NewsYTV2,
+  Haiku55NewsYTV2Props,
+  calculateHaiku55NewsYTV2Metadata,
+  Haiku55NewsYTV2Thumb,
+  Haiku55NewsYTV2ThumbProps,
+} from "./Haiku55NewsYTV2";
 import {
   KaraokeOverlayV2,
   KaraokeOverlayV2Props,
@@ -498,6 +542,78 @@ export const Root: React.FC = () => {
         calculateMetadata={calculateTripoYTNewsV1Metadata}
       />
       <Composition
+        id="KimiK31NewsYTV1"
+        component={KimiK31NewsYTV1}
+        durationInFrames={Math.ceil(436.4 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 436.4,
+        } as KimiK31NewsYTV1Props}
+        calculateMetadata={calculateKimiK31NewsYTV1Metadata}
+      />
+      <Composition
+        id="ClaudeTop1NewsYTV1"
+        component={ClaudeTop1NewsYTV1}
+        durationInFrames={Math.ceil(473.9 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 473.9,
+        } as ClaudeTop1NewsYTV1Props}
+        calculateMetadata={calculateClaudeTop1NewsYTV1Metadata}
+      />
+      <Composition
+        id="JevYTNewsV1"
+        component={JevYTNewsV1}
+        durationInFrames={Math.ceil(391.5 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 391.5,
+        } as JevYTNewsV1Props}
+        calculateMetadata={calculateJevYTNewsV1Metadata}
+      />
+      <Composition
+        id="Haiku55NewsYTV1"
+        component={Haiku55NewsYTV1}
+        durationInFrames={Math.ceil(614.52 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 614.52,
+        } as Haiku55NewsYTV1Props}
+        calculateMetadata={calculateHaiku55NewsYTV1Metadata}
+      />
+      <Composition
+        id="Opus55NewsYTV1"
+        component={Opus55NewsYTV1}
+        durationInFrames={Math.ceil(303.4 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 303.4,
+        } as Opus55NewsYTV1Props}
+        calculateMetadata={calculateOpus55NewsYTV1Metadata}
+      />
+      <Composition
+        id="OmarchyOsNewsYT"
+        component={OmarchyOsNewsYT}
+        durationInFrames={Math.ceil(428.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 428.0,
+        } as OmarchyOsNewsYTProps}
+        calculateMetadata={calculateOmarchyOsNewsYTMetadata}
+      />
+      <Composition
         id="FableNewsYTV2"
         component={FableNewsYTV2}
         durationInFrames={Math.ceil(480.0 * 25)}
@@ -572,6 +688,44 @@ export const Root: React.FC = () => {
         width={1920}
         height={1080}
         defaultProps={{ variant: "A", avatarSec: 3.0 } as TripoGameNewsThumbProps}
+      />
+      <Composition
+        id="Gpt6NewsYTV2"
+        component={Gpt6NewsYTV2}
+        durationInFrames={Math.ceil(480.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{} as Gpt6NewsYTV2Props}
+        calculateMetadata={calculateGpt6NewsYTV2Metadata}
+      />
+      <Composition
+        id="Gpt6NewsThumb"
+        component={Gpt6NewsThumb}
+        durationInFrames={2}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{ variant: "A", avatarSec: 3.0 } as Gpt6NewsThumbProps}
+      />
+      <Composition
+        id="Haiku55NewsYTV2"
+        component={Haiku55NewsYTV2}
+        durationInFrames={Math.ceil(480.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{} as Haiku55NewsYTV2Props}
+        calculateMetadata={calculateHaiku55NewsYTV2Metadata}
+      />
+      <Composition
+        id="Haiku55NewsYTV2Thumb"
+        component={Haiku55NewsYTV2Thumb}
+        durationInFrames={2}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{ variant: "A", avatarSec: 3.0 } as Haiku55NewsYTV2ThumbProps}
       />
       <Composition
         id="KaraokeOverlayV2"

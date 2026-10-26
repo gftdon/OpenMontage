@@ -3,7 +3,10 @@ const { chromium } = await loadPlaywright();
 // usage: node explore_page.mjs <url>
 const URL_ARG = process.argv[2];
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+const page = await browser.newPage({
+  viewport: { width: 1100, height: 900 },
+  userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+});
 await page.goto(URL_ARG, { waitUntil: 'networkidle', timeout: 90000 });
 const info = await page.evaluate(() => {
   const vids = [...document.querySelectorAll('video')].map(v => ({ src: v.currentSrc || v.src, poster: v.poster, sources: [...v.querySelectorAll('source')].map(s => s.src), w: v.videoWidth, h: v.videoHeight, rect: v.getBoundingClientRect().toJSON() }));

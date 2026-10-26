@@ -40,7 +40,11 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch();
-const ctx = await browser.newContext({ viewport: { width: VW, height: 900 }, deviceScaleFactor: cfg.dpr || 2 });
+const ctx = await browser.newContext({
+  viewport: { width: VW, height: 900 },
+  deviceScaleFactor: cfg.dpr || 2,
+  userAgent: cfg.userAgent || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+});
 const page = await ctx.newPage();
 await page.goto(cfg.url, { waitUntil: cfg.waitUntil || 'networkidle', timeout: 120000 });
 await page.waitForTimeout(1500);
@@ -57,7 +61,7 @@ await page.evaluate(() => {
   // dashes (incl. U+2011 non-breaking hyphen) normalised on both sides.
   window.__findRect = (phrase, nth = 0) => {
     const target = clean(phrase.replace(/\s+/g, ' ').replace(/ /g, ' '));
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement && !['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(n.parentElement.tagName) && n.parentElement.closest('footer') == null) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement && !['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(n.parentElement.tagName) && n.parentElement.closest('footer') == null && n.parentElement.closest('nav') == null) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
     const nodes = []; let n; while ((n = walker.nextNode())) nodes.push(n);
     let raw = ''; const map = [];
     for (const nd of nodes) { for (let i = 0; i < nd.nodeValue.length; i++) map.push([nd, i]); raw += nd.nodeValue; }
@@ -81,7 +85,7 @@ await page.evaluate(() => {
   // Anchor = first element (default: headings / paragraphs / bold leads) whose text
   // starts with the given words. Quotes/dashes normalised (pages use curly ’).
   // Keep the selector narrow: adding `li`/`a` matches table-of-contents entries.
-  window.__anchor = (t, selector = 'h1,h2,p,strong') => { const T = clean(t.replace(/\s+/g, ' ')); const el = [...document.querySelectorAll(selector)].find((e) => e.innerText && clean(e.innerText.trim().replace(/\s+/g, ' ')).startsWith(T)); return el ? el.getBoundingClientRect().top + window.scrollY : null; };
+  window.__anchor = (t, selector = 'h1,h2,h3,h4,p,strong') => { const T = clean(t.replace(/\s+/g, ' ')); const el = [...document.querySelectorAll(selector)].find((e) => e.innerText && clean(e.innerText.trim().replace(/\s+/g, ' ')).startsWith(T)); return el ? el.getBoundingClientRect().top + window.scrollY : null; };
 });
 
 const clips = {}; const rel = {};
@@ -102,7 +106,7 @@ const addRects = async (section, phrases) => {
 // ---- sections ------------------------------------------------------------
 for (const s of cfg.sections || []) {
   let y = s.y ?? 0;
-  if (s.anchor) { const a = await page.evaluate(([t, sel]) => window.__anchor(t, sel), [s.anchor, s.anchorSelector || 'h1,h2,p,strong']); if (a == null) { console.log('ANCHOR MISS', s.name, s.anchor); continue; } y = Math.round(a + (s.offset ?? -40)); }
+  if (s.anchor) { const a = await page.evaluate(([t, sel]) => window.__anchor(t, sel), [s.anchor, s.anchorSelector || 'h1,h2,h3,h4,p,strong']); if (a == null) { console.log('ANCHOR MISS', s.name, s.anchor); continue; } y = Math.round(a + (s.offset ?? -40)); }
   clips[s.name] = { y, h: s.h };
   await addRects(s.name, s.phrases);
   await shot(`sec_${s.name}.png`, y, s.h);
@@ -111,7 +115,7 @@ for (const s of cfg.sections || []) {
 
 // ---- tables: row / column rects (relative to their section) ---------------
 for (const t of cfg.tables || []) {
-  const info = await page.evaluate((sel) => { const tb = document.querySelector(sel); if (!tb) return null; const rows = [...tb.querySelectorAll('tr')].map((tr) => { const r = tr.getBoundingClientRect(); return { text: tr.innerText.replace(/\s+/g, ' ').trim().slice(0, 60), x: r.x, y: r.y + window.scrollY, w: r.width, h: r.height }; }).filter((r) => r.w > 0); const cols = [...tb.querySelectorAll('tr:first-child th, tr:first-child td')].map((c) => { const r = c.getBoundingClientRect(); return { text: c.innerText.trim(), x: r.x, w: r.width }; }); const tr = tb.getBoundingClientRect(); return { rows, cols, box: { x: tr.x, y: tr.y + window.scrollY, w: tr.width, h: tr.height } }; }, t.selector || 'table');
+  const info = await page.evaluate((sel) => { const tb = sel.startsWith('index:') ? document.querySelectorAll('table')[+sel.slice(6)] : document.querySelector(sel); if (!tb) return null; const rows = [...tb.querySelectorAll('tr')].map((tr) => { const r = tr.getBoundingClientRect(); return { text: tr.innerText.replace(/\s+/g, ' ').trim().slice(0, 60), x: r.x, y: r.y + window.scrollY, w: r.width, h: r.height }; }).filter((r) => r.w > 0); const cols = [...tb.querySelectorAll('tr:first-child th, tr:first-child td')].map((c) => { const r = c.getBoundingClientRect(); return { text: c.innerText.trim(), x: r.x, w: r.width }; }); const tr = tb.getBoundingClientRect(); return { rows, cols, box: { x: tr.x, y: tr.y + window.scrollY, w: tr.width, h: tr.height } }; }, t.selector || 'table');
   if (!info || !clips[t.section]) { console.log('TABLE MISS', t.name); continue; }
   const cy = clips[t.section].y;
   rel[`${t.name}_box`] = { x: info.box.x, y: +(info.box.y - cy).toFixed(1), w: info.box.w, h: info.box.h };
