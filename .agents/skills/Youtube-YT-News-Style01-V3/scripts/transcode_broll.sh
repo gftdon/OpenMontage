@@ -8,16 +8,29 @@
 # Output: 1920x1080 (cover-crop, so vertical clips are usable), 25 fps, h264 CRF 19,
 # silent, max 30 s. Skips outputs that already exist, are >= 7 s long AND are not older
 # than their raw input (a re-fetched raw file is re-encoded, never silently kept stale).
-set -uo pipefail
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$1"; OUT="$2"; shift 2
 mkdir -p "$OUT"
-if [ $# -eq 0 ]; then set -- $(cd "$SRC" && ls *.mp4 *.webm 2>/dev/null | sed 's/\.[^.]*$//'); fi
+shopt -s nullglob
+if [ $# -eq 0 ]; then
+  names=()
+  for path in "$SRC"/*.mp4 "$SRC"/*.webm; do
+    name="${path##*/}"; name="${name%.*}"; found=false
+    for existing in ${names[@]+"${names[@]}"}; do [ "$existing" = "$name" ] && found=true; done
+    if [ "$found" = false ]; then names+=("$name"); fi
+  done
+  set -- ${names[@]+"${names[@]}"}
+fi
 for f in "$@"; do
-  in=$(ls "$SRC/$f".mp4 "$SRC/$f".webm 2>/dev/null | head -1)
-  [ -z "$in" ] && { echo "missing $f"; continue; }
-  if ! [ "$in" -nt "$OUT/$f.mp4" ] && ffprobe -v error "$OUT/$f.mp4" >/dev/null 2>&1 && [ "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUT/$f.mp4" | cut -d. -f1)" -ge 7 ]; then echo "ok $f"; continue; fi
+  if [ -f "$SRC/$f.mp4" ]; then in="$SRC/$f.mp4"
+  elif [ -f "$SRC/$f.webm" ]; then in="$SRC/$f.webm"
+  else echo "missing $f" >&2; exit 1
+  fi
+  if ! [ "$in" -nt "$OUT/$f.mp4" ] && ffprobe -v error "$OUT/$f.mp4" >/dev/null 2>&1 && [ "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUT/$f.mp4" | cut -d. -f1)" -ge 7 ]; then python3 -I "$SCRIPT_DIR/media_manifest.py" "$SRC" "$OUT" "$f"; echo "ok $f"; continue; fi
   ffmpeg -v error -y -i "$in" -t 30 -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=25" \
     -c:v libx264 -preset veryfast -crf 19 -pix_fmt yuv420p -an "$OUT/$f.mp4" && echo "done $f"
+  python3 -I "$SCRIPT_DIR/media_manifest.py" "$SRC" "$OUT" "$f"
 done
 echo "--- durations (paste into BROLL_DUR) ---"
 for m in "$OUT"/*.mp4; do printf "  %s: %s,\n" "$(basename "$m" .mp4)" "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$m")"; done

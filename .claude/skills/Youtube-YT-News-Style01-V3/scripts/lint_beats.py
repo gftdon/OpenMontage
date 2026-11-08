@@ -41,14 +41,14 @@ def lint_beats(beats, end_card_seconds, thresholds):
             src=b.get('src')
             if not isinstance(src,str) or isinstance(src,bl.Raw) or not src: issue('metadata',t,'missing literal src')
             origin=b.get('origin')
-            if origin not in ('source','stock') or (isinstance(src,str) and src.startswith('yt_') != (origin=='source')):
-                issue('origin',t,'origin must match yt_ source convention')
+            if origin not in ('source','stock','ai') or (isinstance(src,str) and (src.startswith('yt_') != (origin=='source') or src.startswith('ai_') != (origin=='ai'))):
+                issue('origin',t,'origin must match yt_ source / ai_ AI convention')
             if b.get('layout') not in ('stage','full'): issue('metadata',t,'missing layout')
             chrome=b.get('chrome')
             # The tokenizer represents true/false as Raw, never eval source expressions.
             if isinstance(chrome,bl.Raw): chrome={'true':True,'false':False}.get(str(chrome))
             if type(chrome) is not bool: issue('metadata',t,'chrome must be literal boolean')
-            if origin=='stock' and chrome is True: issue('stock-chrome',t,'stock must not show source chrome')
+            if origin in ('stock','ai') and chrome is True: issue('stock-chrome',t,'stock/AI must not show source chrome')
         target='avatar' if b.get('mode')=='full' else 'source' if media in ('broll','clip') and b.get('origin')=='source' else None
         if b.get('mode')=='pip' and not media:issue('metadata',t,'pip requires rendered media')
         punches=b.get('punch',[])

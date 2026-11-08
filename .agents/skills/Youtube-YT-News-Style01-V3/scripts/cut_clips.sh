@@ -11,10 +11,11 @@
 #   - pad the in-point 2-3 s before the visual you want; survey frames and the
 #     renderer can disagree by about a second, and a beat that opens on a
 #     transition/title card looks like a mistake
-#   - make the clip LONGER than its beat (ClipStage loops from 0 and ignores
-#     `from`; only broll/Footage beats honour `from`)
+#   - make available duration after `from` LONGER than the beat; V3 broll/clip
+#     both honor `from` and Loop uses floor((BROLL_DUR-from)*25)-2 frames
 #   - skip the source's sponsor/promo-code segments entirely
 set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 SRC="$1"; OUT="$2"; shift 2
 mkdir -p "$OUT"
 for spec in "$@"; do
@@ -24,6 +25,7 @@ for spec in "$@"; do
     -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -movflags +faststart \
     "$OUT/$name.mp4" -y
 done
+python3 -I "$SCRIPT_DIR/cut_manifest.py" "$SRC" "$OUT" "$@"
 echo "--- paste into BROLL_DUR ---"
 for spec in "$@"; do
   name="${spec%%:*}"

@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useState } from "react";
 import {
   OffthreadVideo,
   Loop,
+  Sequence,
   interpolate,
   spring,
   staticFile,
@@ -47,7 +48,7 @@ const MODE_BLEND_SEC = 0.55;
 
 // ---- Episode config (swap per episode — every on-screen string lives here) --
 const EPISODE = {
-  assetDir: "ytNewsV3Test", // public/<assetDir>/{avatar_source.mp4, broll/, web/}
+  assetDir: "ytNewsV3BrollTest", // public/<assetDir>/{avatar_source.mp4, broll/, web/}
   brand: "AI TECH NEWS",
   dateLabel: "7 พ.ย. 2026",
   page: { domain: "youtube.com", path: "/watch?v=9ZxCOHkfn_8" },
@@ -67,31 +68,28 @@ const W = 1920;
 const H = 1080;
 // ---- B-roll durations (public/<assetDir>/broll, 1080p25) -------------------
 const BROLL_DUR: Record<string, number> = {
-  architect_concept_draft: 30.00,
-  artist_pencil_sketch: 15.04,
-  boutique_customer_sale: 19.44,
-  creative_vision_light: 8.40,
-  digital_art_creative: 30.00,
-  drinking_water_glass: 30.00,
-  ecommerce_package_order: 14.00,
-  fast_city_traffic: 8.28,
-  fine_oil_painter: 9.00,
-  graphic_designer_ui: 17.96,
-  hourglass_sand_time: 10.04,
-  photo_studio_lights: 9.76,
-  printing_posters_press: 11.44,
-  social_creator_workspace: 19.64,
-  software_engineer_code: 10.00,
-  team_brainstorming_board: 14.48,
-  yt_api_docs: 10.04,
-  yt_complexity_levels: 11.04,
-  yt_intro_banner: 6.00,
-  yt_looping_gif: 7.04,
-  yt_markup_refine: 13.04,
-  yt_prompt_koi: 8.00,
-  yt_sprite_sheet: 9.04,
-  yt_svg_icons: 9.00,
-  yt_svg_origami: 9.00,
+  "ai_layout_draft_final": 9.2,
+  "artist_drawing_notebook": 15.04,
+  "boutique_customer_sale": 19.44,
+  "coding_developer_illustration": 10.0,
+  "content_editor_workflow": 26.32,
+  "developer_api_integration": 12.32,
+  "developer_new_function": 30.0,
+  "drinking_water_glass": 30.0,
+  "hourglass_waiting": 14.88,
+  "painter_detail_brush": 9.0,
+  "photographer_for_images": 10.04,
+  "printing_posters_press": 11.44,
+  "product_shot_milk": 27.48,
+  "rough_layout_pencil": 17.48,
+  "tablet_photo_editing": 12.4,
+  "team_brainstorming_board": 14.48,
+  "yt_complexity_variants": 7.68,
+  "yt_intro_title": 4.52,
+  "yt_markup_experiment": 6.6,
+  "yt_prompt_create": 5.52,
+  "yt_prompt_iteration": 5.68,
+  "yt_table_texture": 3.2
 };
 
 // ---- Beat model -----------------------------------------------------------
@@ -102,7 +100,7 @@ interface Stat { t: number; big?: string; label: string; tone?: "amber" | "mint"
 interface Beat {
   captionLane?: "top" | "bottom";
   cards?: {t:number;lines:string[]}[];
-  origin?: "source" | "stock";
+  origin?: "source" | "stock" | "ai";
   layout?: "stage" | "full";
   chrome?: boolean;
   punch?: {t:number;z:number;fx?:number;fy?:number}[];
@@ -133,7 +131,7 @@ const BEATS: Beat[] = [
     "mode": "full",
     "lower": {
       "title": "GPT-IMAGE-2.6 IS HERE",
-      "sub": "FASTER IMAGE GENERATION WITH FLARE & SUNBURST",
+      "sub": "GPT-Image-2.6",
       "t": 1.0,
       "dur": 5.5
     }
@@ -142,174 +140,110 @@ const BEATS: Beat[] = [
     "t": 6.84,
     "mode": "pip",
     "media": "broll",
-    "src": "ecommerce_package_order",
-    "kicker": "IMAGE PROBLEM",
-    "headline": "อยากได้รูปภาพไปใช้งาน",
-    "sub": "ขายของออนไลน์ ทำโปสเตอร์ หรืองานนำเสนอ",
-    "stats": [
-      {
-        "t": 8.4,
-        "big": "COMMERCE",
-        "label": "ใช้ลงขายของ",
-        "tone": "amber"
-      },
-      {
-        "t": 9.5,
-        "big": "POSTER",
-        "label": "ทำโปสเตอร์งาน",
-        "tone": "mint"
-      }
-    ],
+    "src": "photographer_for_images",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "หารูปภาพไปประกอบงาน",
+    "sub": "เลือกรูปให้เหมาะกับงานที่ต้องการสื่อ"
   },
   {
     "t": 14.34,
     "mode": "pip",
     "media": "broll",
-    "src": "artist_pencil_sketch",
-    "kicker": "TRADITIONAL DRAWING",
-    "headline": "ถ้าจ้างคนวาดก็รอนาน",
-    "sub": "ต้องใช้เวลาหลายวันหรือสัปดาห์กว่าจะได้รูป",
-    "stats": [
-      {
-        "t": 15.1,
-        "big": "HIRE ARTIST",
-        "label": "จ้างคนวาด",
-        "tone": "clay"
-      },
-      {
-        "t": 16.1,
-        "big": "WAIT TIME",
-        "label": "ต้องใช้เวลารอ",
-        "tone": "amber"
-      }
-    ],
+    "src": "artist_drawing_notebook",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "งานวาดภาพด้วยมือ",
+    "sub": "เริ่มลงมือวาดภาพด้วยดินสอ"
   },
   {
     "t": 17.98,
-    "mode": "pip",
-    "media": "broll",
-    "src": "digital_art_creative",
-    "kicker": "AI IMAGE ERA",
-    "headline": "AI วาดรูปเข้ามามีบทบาท",
-    "sub": "แค่พิมพ์ข้อความสั่ง ตัวระบบก็สร้างภาพออกมาให้",
-    "stats": [
-      {
-        "t": 19.2,
-        "big": "AI ART",
-        "label": "ปัญญาประดิษฐ์วาดรูป",
-        "tone": "amber"
-      },
-      {
-        "t": 24.3,
-        "big": "PROMPT",
-        "label": "พิมพ์ข้อความสั่งงาน",
-        "tone": "mint"
-      }
-    ],
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false
+    "mode": "full"
   },
   {
-    "t": 25.98,
-    "mode": "full"
+    "t": 23.48,
+    "mode": "pip",
+    "media": "clip",
+    "src": "yt_prompt_create",
+    "origin": "source",
+    "layout": "full",
+    "chrome": true,
+    "captionLane": "top",
+    "kicker": "SOURCE DEMO",
+    "headline": "จากข้อความสู่ภาพ",
+    "sub": "พิมพ์สิ่งที่อยากเห็น แล้วดูภาพที่ได้"
   },
   {
     "t": 28.76,
     "mode": "pip",
     "media": "broll",
-    "src": "hourglass_sand_time",
-    "kicker": "THE WAITING PROBLEM",
-    "headline": "ปัญหาที่เจอบ่อยคือ การรอคอย",
-    "sub": "บางครั้งต้องนั่งจ้องหน้าจอรอนาทีสองนาทีกว่าภาพจะขึ้น",
-    "stats": [
-      {
-        "t": 30.9,
-        "big": "WAITING",
-        "label": "ปัญหาการรอคอย",
-        "tone": "clay"
-      },
-      {
-        "t": 35.8,
-        "big": "1-2 MIN",
-        "label": "รอนาทีสองนาทีต่อภาพ",
-        "tone": "amber"
-      }
-    ],
+    "src": "hourglass_waiting",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "ช่วงเวลาที่ต้องรอภาพ",
+    "sub": "การรอภาพเป็นส่วนหนึ่งของการทำงาน"
   },
   {
     "t": 36.76,
-    "mode": "full"
-  },
-  {
-    "t": 44.18,
     "mode": "full",
-    "punch": [{"t":44.76,"z":1.2,"fx":0.5,"fy":0.5}]
+    "punch": [
+      {
+        "t": 44.76,
+        "z": 1.2,
+        "fx": 0.5,
+        "fy": 0.5
+      }
+    ]
   },
   {
     "t": 47.82,
     "mode": "pip",
     "media": "clip",
-    "src": "yt_intro_banner",
-    "clipFit": "contain",
-    "kicker": "NEW ANNOUNCEMENT",
-    "headline": "เปิดตัว GPT-Image-2.6",
-    "sub": "ระบบสร้างภาพรุ่นใหม่ล่าสุดจาก OpenAI",
-    "stats": [
-      {
-        "t": 49.5,
-        "big": "GPT-IMAGE 2.6",
-        "label": "โมเดลรุ่นใหม่ล่าสุด",
-        "tone": "amber"
-      }
-    ],
-    "captionLane": "top",
+    "src": "yt_intro_title",
     "origin": "source",
     "layout": "full",
-    "chrome": true
+    "chrome": true,
+    "captionLane": "top",
+    "kicker": "SOURCE DEMO",
+    "headline": "GPT-Image-2.6",
+    "sub": "ทำความรู้จัก Flare และ Sunburst"
   },
   {
     "t": 52.14,
     "mode": "pip",
-    "media": "clip",
-    "src": "yt_prompt_koi",
-    "clipFit": "contain",
-    "kicker": "API & CODEX RELEASE",
-    "headline": "นำมาใส่ใน API และ Codex",
-    "sub": "ความเร็วสร้างภาพเพิ่มขึ้นจากเดิมถึง 50%",
-    "stats": [
+    "media": "broll",
+    "src": "developer_api_integration",
+    "origin": "stock",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "API และเครื่องมือเขียนโปรแกรม",
+    "sub": "เชื่อมงานภาพเข้ากับเครื่องมือพัฒนา"
+  },
+  {
+    "t": 59.78,
+    "mode": "pip",
+    "media": "typo",
+    "src": "speed_overview",
+    "origin": "stock",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "IDEA TO IMAGE",
+    "headline": "จากไอเดียสู่ภาพ",
+    "sub": "ลองเปลี่ยนความคิดให้เป็นภาพ",
+    "cards": [
       {
-        "t": 56.2,
-        "big": "API + CODEX",
-        "label": "เชื่อมต่อในระบบ",
-        "tone": "mint"
-      },
-      {
-        "t": 63.9,
-        "big": "+50% FASTER",
-        "label": "ความเร็วเพิ่มขึ้น",
-        "tone": "amber"
-      }
-    ],
-    "captionLane": "top",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "punch": [
-      {
-        "t": 60.14,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
+        "t": 59.78,
+        "lines": [
+          "พิมพ์สิ่งที่อยากเห็น",
+          "ดูภาพ แล้วทดลองต่อ"
+        ]
       }
     ]
   },
@@ -328,58 +262,39 @@ const BEATS: Beat[] = [
   {
     "t": 74.68,
     "mode": "pip",
-    "media": "clip",
-    "src": "yt_complexity_levels",
-    "clipFit": "contain",
-    "kicker": "TWO NEW ENGINES",
-    "headline": "2 เครื่องมือใหม่: Flare & Sunburst",
-    "sub": "ออกแบบมาเพื่อทำหน้าที่คนละบทบาทอย่างชัดเจน",
-    "stats": [
+    "media": "typo",
+    "src": "model_names",
+    "origin": "stock",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "IDEA TO IMAGE",
+    "headline": "Flare และ Sunburst",
+    "sub": "ระบบสร้างภาพในตระกูล GPT-Image",
+    "cards": [
       {
-        "t": 79.2,
-        "big": "FLARE",
-        "label": "ตัวแรกชื่อ Flare",
-        "tone": "amber"
-      },
-      {
-        "t": 81.0,
-        "big": "SUNBURST",
-        "label": "อีกตัวชื่อ Sunburst",
-        "tone": "mint"
-      }
-    ],
-    "captionLane": "top",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "punch": [
-      {
-        "t": 82.68,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
+        "t": 74.68,
+        "lines": [
+          "GPT-Image-2.6",
+          "Flare · Sunburst"
+        ]
       }
     ]
+  },
+  {
+    "t": 82.2,
+    "mode": "full"
   },
   {
     "t": 88.62,
     "mode": "pip",
     "media": "broll",
-    "src": "architect_concept_draft",
-    "kicker": "FLARE · CONCEPT SKETCH",
-    "headline": "Flare: ช่างสเก็ตช์ภาพร่าง",
-    "sub": "ขึ้นโครงสร้างคร่าวๆ เพื่อดูแสง องค์ประกอบ และตำแหน่ง",
-    "stats": [
-      {
-        "t": 90.2,
-        "big": "SKETCH",
-        "label": "ช่างสเก็ตช์ภาพ",
-        "tone": "amber"
-      }
-    ],
+    "src": "rough_layout_pencil",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "เริ่มจากภาพร่างและองค์ประกอบ",
+    "sub": "ลองตำแหน่งและองค์ประกอบก่อนลงรายละเอียด"
   },
   {
     "t": 96.62,
@@ -389,37 +304,40 @@ const BEATS: Beat[] = [
     "t": 104.68,
     "mode": "pip",
     "media": "broll",
-    "src": "fine_oil_painter",
-    "kicker": "SUNBURST · FINE DETAILS",
-    "headline": "Sunburst: ช่างลงสีรายละเอียดสูง",
-    "sub": "รับหน้าที่เก็บพื้นผิว แสงเงา และความคมชัดของภาพ",
-    "stats": [
-      {
-        "t": 107.1,
-        "big": "COLORIST",
-        "label": "ช่างลงสีละเอียด",
-        "tone": "mint"
-      },
-      {
-        "t": 111.0,
-        "big": "TEXTURE",
-        "label": "เก็บแสงเงาพื้นผิว",
-        "tone": "amber"
-      }
-    ],
+    "src": "painter_detail_brush",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "รายละเอียดในงานภาพ",
+    "sub": "ค่อยๆ เติมสีและเก็บรายละเอียดของภาพ"
+  },
+  {
+    "t": 108.64,
+    "mode": "pip",
+    "media": "clip",
+    "src": "yt_table_texture",
+    "origin": "source",
+    "layout": "full",
+    "chrome": true,
+    "captionLane": "top",
+    "kicker": "SOURCE DEMO",
+    "headline": "พื้นผิว แสง และองค์ประกอบ",
+    "sub": "มองแสงเงาและพื้นผิวในภาพให้ชัดขึ้น"
+  },
+  {
+    "t": 111.64,
+    "mode": "full"
   },
   {
     "t": 114.66,
     "mode": "pip",
     "media": "typo",
     "typo": "vs",
-    "src": "creative_vision_light",
+    "src": "workflow_cards",
     "kicker": "WORKFLOW COMPARISON",
-    "headline": "Flare vs Sunburst: ผสานพลัง 2 ขั้นตอน",
-    "sub": "วาดโครงร่างรอบแรกด้วย Flare แล้วส่งต่อให้ Sunburst จัดการความสวยงาม",
+    "headline": "มองภาพรวม แล้วพิจารณารายละเอียด",
+    "sub": "เริ่มจากภาพรวม แล้วค่อยปรับส่วนต่างๆ",
     "origin": "stock",
     "layout": "stage",
     "chrome": false,
@@ -427,22 +345,22 @@ const BEATS: Beat[] = [
       {
         "t": 114.66,
         "lines": [
-          "FLARE · ช่างสเก็ตช์ร่าง",
-          "ขึ้นโครงสร้าง แสง และองค์ประกอบ"
+          "ภาพร่างและองค์ประกอบ",
+          "เริ่มจากสิ่งที่อยากสื่อ"
         ]
       },
       {
-        "t": 122.0,
+        "t": 122,
         "lines": [
-          "SUNBURST · เก็บรายละเอียด",
-          "พื้นผิว แสงเงา และความคมชัด"
+          "พื้นผิวและแสงเงา",
+          "พิจารณารายละเอียดของภาพ"
         ]
       },
       {
-        "t": 129.0,
+        "t": 129,
         "lines": [
-          "FLARE → SUNBURST",
-          "ร่างโครงสร้าง แล้วเก็บรายละเอียด"
+          "ทดลอง แล้วปรับไอเดีย",
+          "เลือกภาพที่สื่อสารงานได้"
         ]
       }
     ]
@@ -454,167 +372,115 @@ const BEATS: Beat[] = [
   {
     "t": 143.62,
     "mode": "pip",
-    "media": "broll",
-    "src": "fast_city_traffic",
-    "kicker": "SPEED MATTERS",
-    "headline": "ความเร็วเพิ่ม 50% ลดเวลารอครึ่งหนึ่ง",
-    "sub": "จากเดิม 10 วินาทีต่อภาพ ลดลงเหลือเพียง 5 วินาที",
-    "stats": [
-      {
-        "t": 146.0,
-        "big": "10 SEC",
-        "label": "ระบบเดิม 10 วินาที",
-        "tone": "clay"
-      },
-      {
-        "t": 152.2,
-        "big": "5 SEC",
-        "label": "ระบบใหม่เหลือ 5 วิ",
-        "tone": "mint"
-      }
-    ],
+    "media": "typo",
+    "src": "speed_neutral",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "IDEA TO IMAGE",
+    "headline": "จากไอเดียสู่ภาพได้เร็วขึ้น",
+    "sub": "ทดลองภาพ แล้วปรับไอเดียต่อ",
+    "cards": [
+      {
+        "t": 143.62,
+        "lines": [
+          "ทดลองภาพจากข้อความ",
+          "ปรับไอเดียแล้วดูผล"
+        ]
+      }
+    ]
   },
   {
     "t": 153.02,
+    "mode": "full"
+  },
+  {
+    "t": 156.84,
     "mode": "pip",
     "media": "clip",
-    "src": "yt_markup_refine",
-    "clipFit": "contain",
-    "kicker": "6-SECOND GENERATION",
-    "headline": "Flare คุณภาพเริ่มต้น เสร็จใน 6 วินาที",
-    "sub": "ทดลองสร้างและแก้ไขภาพได้ในเสี้ยวเวลา",
-    "stats": [
-      {
-        "t": 158.0,
-        "big": "FLARE FAST",
-        "label": "ระดับคุณภาพเริ่มต้น",
-        "tone": "amber"
-      },
-      {
-        "t": 164.3,
-        "big": "6 SECONDS",
-        "label": "เสร็จในเวลา 6 วินาที",
-        "tone": "mint"
-      }
-    ],
-    "captionLane": "top",
+    "src": "yt_prompt_iteration",
     "origin": "source",
     "layout": "full",
     "chrome": true,
-    "punch": [
-      {
-        "t": 161.02,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
+    "captionLane": "top",
+    "kicker": "SOURCE DEMO",
+    "headline": "ลองสร้างภาพจาก prompt",
+    "sub": "พิมพ์คำอธิบายเพื่อทดลองภาพที่ต้องการ"
+  },
+  {
+    "t": 162.34,
+    "mode": "full"
   },
   {
     "t": 166.26,
     "mode": "pip",
     "media": "broll",
     "src": "drinking_water_glass",
-    "kicker": "BLINK OF AN EYE",
-    "headline": "เร็วเท่าเวลาก้มหยิบแก้วน้ำ",
-    "sub": "เวลาระดับ 6 วินาที แทบจะเท่ากับเวลาที่เรากะพริบตา",
-    "stats": [
-      {
-        "t": 167.1,
-        "big": "6 SEC",
-        "label": "สปีดระดับกะพริบตา",
-        "tone": "amber"
-      },
-      {
-        "t": 171.1,
-        "big": "NO DELAY",
-        "label": "ก้มหยิบแก้วน้ำก็ได้ภาพ",
-        "tone": "mint"
-      }
-    ],
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "ภาพเปรียบในชีวิตประจำวัน",
+    "sub": "นึกถึงจังหวะสั้นๆ ในชีวิตประจำวัน"
   },
   {
     "t": 171.8,
     "mode": "pip",
-    "media": "broll",
-    "src": "graphic_designer_ui",
-    "kicker": "CREATIVE TESTING",
-    "headline": "ประโยชน์สูงสุดช่วงทดลองไอเดีย",
-    "sub": "ลองเปลี่ยนสีพื้นหลังหรือมุมกล้องของสินค้าได้ทันที",
-    "stats": [
-      {
-        "t": 176.5,
-        "big": "EXPERIMENT",
-        "label": "ทดลองไอเดียใหม่ๆ",
-        "tone": "amber"
-      }
-    ],
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false
+    "media": "clip",
+    "src": "yt_markup_experiment",
+    "origin": "source",
+    "layout": "full",
+    "chrome": true,
+    "captionLane": "top",
+    "kicker": "SOURCE DEMO",
+    "headline": "ทดลองปรับภาพด้วย markup",
+    "sub": "เลือกจุดที่ต้องการแก้ แล้วดูผลลัพธ์"
   },
   {
-    "t": 179.8,
+    "t": 178.2,
     "mode": "full",
     "punch": [
       {
-        "t": 187.8,
+        "t": 186.2,
         "z": 1.2,
+        "fx": 0.5,
+        "fy": 0.5
+      },
+      {
+        "t": 194.2,
+        "z": 1,
         "fx": 0.5,
         "fy": 0.5
       }
     ]
   },
   {
-    "t": 192.46,
+    "t": 197.12,
     "mode": "pip",
     "media": "clip",
-    "src": "yt_svg_origami",
-    "clipFit": "contain",
-    "kicker": "RAPID ITERATION",
-    "headline": "ได้ภาพตัวอย่างหลายแบบใน 1 นาที",
-    "sub": "ระยะเวลาเหลือหลักวินาที ความคิดสร้างสรรค์ไม่สะดุด",
-    "stats": [
-      {
-        "t": 197.1,
-        "big": "NO BLOCK",
-        "label": "ไอเดียไม่สะดุด",
-        "tone": "mint"
-      },
-      {
-        "t": 202.6,
-        "big": "< 1 MIN",
-        "label": "ได้หลายแบบใน 1 นาที",
-        "tone": "amber"
-      }
-    ],
-    "captionLane": "top",
+    "src": "yt_complexity_variants",
     "origin": "source",
     "layout": "full",
     "chrome": true,
-    "punch": [
-      {
-        "t": 200.46,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
+    "captionLane": "top",
+    "kicker": "SOURCE DEMO",
+    "headline": "ลองตัวเลือกภาพหลายแบบ",
+    "sub": "เปรียบเทียบภาพจากตัวเลือกที่ต่างกัน"
   },
   {
-    "t": 207.86,
+    "t": 204.6,
     "mode": "full",
     "punch": [
       {
-        "t": 215.86,
+        "t": 212.6,
         "z": 1.2,
-        "fx": 0.65,
+        "fx": 0.5,
+        "fy": 0.5
+      },
+      {
+        "t": 220.6,
+        "z": 1,
+        "fx": 0.5,
         "fy": 0.5
       }
     ]
@@ -623,21 +489,13 @@ const BEATS: Beat[] = [
     "t": 222.76,
     "mode": "pip",
     "media": "broll",
-    "src": "photo_studio_lights",
-    "kicker": "PRODUCT PHOTOGRAPHY",
-    "headline": "ภาพถ่ายสินค้าและโปรดักต์ช็อต",
-    "sub": "พ่อค้าแม่ค้าออนไลน์จำลองฉากหลังใหม่ได้ทันใจตามเทศกาล",
-    "stats": [
-      {
-        "t": 228.2,
-        "big": "PRODUCT SHOT",
-        "label": "ภาพถ่ายสินค้า",
-        "tone": "amber"
-      }
-    ],
+    "src": "product_shot_milk",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "ภาพสินค้าและการจัดฉาก",
+    "sub": "ลองคิดฉากและองค์ประกอบสำหรับสินค้า"
   },
   {
     "t": 230.76,
@@ -656,76 +514,36 @@ const BEATS: Beat[] = [
     "mode": "pip",
     "media": "broll",
     "src": "printing_posters_press",
-    "kicker": "POSTERS & MEDIA",
-    "headline": "งานโปสเตอร์ ใบปลิว และสื่อประชาสัมพันธ์",
-    "sub": "ขึ้นภาพร่างแล้วเห็นตำแหน่งสำหรับจัดวางตัวหนังสือได้ทันที",
-    "stats": [
-      {
-        "t": 247.6,
-        "big": "POSTER/FLYER",
-        "label": "แผ่นพับ ใบปลิว นำเสนอ",
-        "tone": "amber"
-      }
-    ],
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "งานพิมพ์และสื่อประชาสัมพันธ์",
+    "sub": "เตรียมภาพไปใช้กับสื่อสิ่งพิมพ์"
   },
   {
     "t": 250.96,
     "mode": "pip",
-    "media": "clip",
-    "src": "yt_svg_icons",
-    "clipFit": "contain",
-    "kicker": "VECTOR & ICONS",
-    "headline": "ขึ้นภาพร่างสำหรับจัดวางตัวหนังสือ",
-    "sub": "เห็นตำแหน่งว่างสำหรับใส่ข้อความและไอคอนทันที",
-    "stats": [
-      {
-        "t": 255.5,
-        "big": "TEXT LAYOUT",
-        "label": "เห็นตำแหน่งวางข้อความ",
-        "tone": "mint"
-      },
-      {
-        "t": 258.0,
-        "big": "SVG ICONS",
-        "label": "ไอคอนคมชัดทุกขนาด",
-        "tone": "amber"
-      }
-    ],
-    "captionLane": "top",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "punch": [
-      {
-        "t": 258.96,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
+    "media": "broll",
+    "src": "ai_layout_draft_final",
+    "origin": "ai",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE CONCEPT",
+    "headline": "ภาพร่างสำหรับจัดวางข้อความ",
+    "sub": "เห็นพื้นที่ว่างสำหรับเติมข้อความ"
   },
   {
     "t": 259.4,
     "mode": "pip",
     "media": "broll",
     "src": "team_brainstorming_board",
-    "kicker": "TEAM COLLABORATION",
-    "headline": "ประชุมกลุ่ม ทุกคนเห็นภาพตรงกันทันที",
-    "sub": "สั่งสร้างภาพขึ้นมาดูพร้อมกันในไม่กี่วินาที ไม่ต้องอธิบายยืดยาว",
-    "stats": [
-      {
-        "t": 263.1,
-        "big": "BRAINSTORM",
-        "label": "ประชุมงานเป็นกลุ่ม",
-        "tone": "mint"
-      }
-    ],
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "นำภาพมาคุยร่วมกันในทีม",
+    "sub": "ใช้ภาพช่วยแลกเปลี่ยนไอเดียในทีม"
   },
   {
     "t": 267.4,
@@ -735,165 +553,79 @@ const BEATS: Beat[] = [
     "t": 277.1,
     "mode": "pip",
     "media": "broll",
-    "src": "software_engineer_code",
-    "kicker": "CODEX INTEGRATION",
-    "headline": "นำระบบเข้าไปใส่ใน Codex",
-    "sub": "เครื่องมือช่วยเขียนโค้ด ทำให้นักพัฒนาสร้างฟังก์ชันใหม่ๆ ได้ง่ายขึ้น",
-    "stats": [
-      {
-        "t": 281.6,
-        "big": "CODEX",
-        "label": "เครื่องมือช่วยเขียนโค้ด",
-        "tone": "amber"
-      },
-      {
-        "t": 288.5,
-        "big": "DEV SPEED",
-        "label": "สร้างฟังก์ชันใหม่ได้ง่ายขึ้น",
-        "tone": "mint"
-      }
-    ],
+    "src": "coding_developer_illustration",
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "นำระบบภาพไปใช้ในงานพัฒนา",
+    "sub": "ต่อยอดระบบภาพในงานเขียนโปรแกรม"
   },
   {
     "t": 285.86,
     "mode": "pip",
-    "media": "clip",
-    "src": "yt_api_docs",
-    "clipFit": "contain",
-    "kicker": "API DEVELOPERS",
-    "headline": "นักพัฒนาสร้างฟังก์ชันภาพในแอปได้ทันที",
-    "sub": "รองรับการเชื่อมต่อผ่าน API พารามิเตอร์ใหม่ใช้งานได้แล้ววันนี้",
-    "stats": [
-      {
-        "t": 288.0,
-        "big": "API INTEGRATION",
-        "label": "เชื่อมต่อง่าย",
-        "tone": "mint"
-      }
-    ],
-    "captionLane": "top",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "punch": [
-      {
-        "t": 293.86,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
+    "media": "broll",
+    "src": "developer_new_function",
+    "origin": "stock",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "พัฒนาฟังก์ชันเกี่ยวกับภาพ",
+    "sub": "สร้างเครื่องมือให้ทำงานกับภาพได้"
   },
   {
     "t": 294.66,
     "mode": "pip",
-    "media": "clip",
-    "src": "yt_sprite_sheet",
-    "clipFit": "contain",
-    "kicker": "FASTER APPS",
-    "headline": "แอปแต่งรูปโหลดเร็วขึ้นอย่างเห็นได้ชัด",
-    "sub": "หน้าจอหมุนรอประมวลผลสั้นลง รองรับ Sprite Sheet แอนิเมชัน",
-    "stats": [
-      {
-        "t": 298.2,
-        "big": "SPEED UP",
-        "label": "แอปโหลดเร็วขึ้น",
-        "tone": "mint"
-      },
-      {
-        "t": 303.3,
-        "big": "NO WAITING",
-        "label": "หน้าจอหมุนรอสั้นลง",
-        "tone": "amber"
-      }
-    ],
-    "captionLane": "top",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "punch": [
-      {
-        "t": 302.66,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
+    "media": "broll",
+    "src": "tablet_photo_editing",
+    "origin": "stock",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "งานปรับแต่งภาพในแอป",
+    "sub": "ปรับส่วนต่างๆ ของภาพบนหน้าจอ"
+  },
+  {
+    "t": 303.3,
+    "mode": "full"
   },
   {
     "t": 306.46,
     "mode": "pip",
-    "media": "clip",
-    "src": "yt_looping_gif",
-    "clipFit": "contain",
-    "kicker": "CONTENT CREATORS",
-    "headline": "ทำคอนเทนต์ลงสื่อสังคมออนไลน์ได้ไวขึ้น",
-    "sub": "เตรียมภาพประกอบบทความหรือโปรโมชันเสร็จไว มีลูกเล่น GIF",
-    "stats": [
-      {
-        "t": 311.9,
-        "big": "CONTENT",
-        "label": "คนทำคอนเทนต์ประหยัดเวลา",
-        "tone": "mint"
-      },
-      {
-        "t": 316.0,
-        "big": "LOOP GIF",
-        "label": "แอนิเมชันลูปต่อเนื่อง",
-        "tone": "amber"
-      }
-    ],
-    "captionLane": "top",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "punch": [
-      {
-        "t": 314.46,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
+    "media": "broll",
+    "src": "content_editor_workflow",
+    "origin": "stock",
+    "layout": "stage",
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "เวิร์กโฟลว์ของคนทำคอนเทนต์",
+    "sub": "เตรียมสื่อสำหรับงานคอนเทนต์"
+  },
+  {
+    "t": 311.92,
+    "mode": "full"
   },
   {
     "t": 316.54,
     "mode": "pip",
     "media": "broll",
     "src": "boutique_customer_sale",
-    "kicker": "MORE TIME FOR BUSINESS",
-    "headline": "มีเวลาเหลือไปดูแลการขายและลูกค้า",
-    "sub": "ไม่ต้องเสียเวลากับงานภาพ เอาเวลาไปสร้างรายได้และพูดคุยกับลูกค้า",
-    "stats": [
-      {
-        "t": 318.0,
-        "big": "BUSINESS",
-        "label": "โฟกัสเรื่องการขาย",
-        "tone": "amber"
-      },
-      {
-        "t": 320.5,
-        "big": "CUSTOMERS",
-        "label": "ดูแลลูกค้าได้เต็มที่",
-        "tone": "mint"
-      }
-    ],
     "origin": "stock",
     "layout": "stage",
-    "chrome": false
+    "chrome": false,
+    "kicker": "ILLUSTRATIVE FOOTAGE",
+    "headline": "งานขายและการดูแลร้าน",
+    "sub": "แบ่งเวลาไปดูแลงานขายและร้านค้า"
   },
   {
     "t": 322.68,
     "mode": "pip",
     "media": "typo",
     "typo": "summary3",
-    "src": "social_creator_workspace",
+    "src": "summary_cards",
     "kicker": "FINAL RECAP",
-    "headline": "3 จุดเปลี่ยนสำคัญของ GPT-Image-2.6",
-    "sub": "ลดระยะเวลารอ เปลี่ยนความคิดในหัวเป็นภาพได้อย่างลื่นไหล",
+    "headline": "GPT-Image-2.6 กับงานภาพ",
+    "sub": "ทดลองไอเดียและสร้างสื่อประกอบ",
     "origin": "stock",
     "layout": "stage",
     "chrome": false,
@@ -901,15 +633,15 @@ const BEATS: Beat[] = [
       {
         "t": 322.68,
         "lines": [
-          "Flare + Sunburst",
-          "แยกการร่างภาพและเก็บรายละเอียด"
+          "Flare · Sunburst",
+          "ชื่อโมเดลจากต้นทาง"
         ]
       },
       {
         "t": 329.5,
         "lines": [
-          "การสร้างภาพในงานประจำวัน",
-          "ทดลองไอเดีย และสร้างสื่อประกอบ"
+          "ภาพประกอบในงานประจำวัน",
+          "ทดลองไอเดียและสื่อสารร่วมกัน"
         ]
       }
     ]
@@ -967,8 +699,8 @@ const CaptionLane: React.FC<{t:number;lane:"top"|"bottom"}> = ({t,lane}) => {
   const page=CAPTION_PAGES.find(p=>t>=p.start&&t<p.end);
   if(!page)return null;
   return <div style={{position:"absolute",left:116,right:lane==="top"?undefined:116,width:lane==="top"?650:undefined,bottom:lane==="bottom"?66:undefined,top:lane==="top"?248:undefined,display:"flex",justifyContent:lane==="top"?"flex-start":"center",zIndex:60}}>
-    <div data-qc-backing="solid" data-qc-occluder="caption-pill" data-qc-field="caption" data-qc-role="read" style={{fontFamily:FONT,fontSize:32,fontWeight:800,lineHeight:1.65,background:"rgba(11,14,23,.92)",padding:"6px 26px",borderRadius:18,maxWidth:lane==="top"?598:1500,display:"flex",flexWrap:"wrap",justifyContent:lane==="top"?"flex-start":"center",gap:6}}>
-      {page.words.map((w,i)=><span key={i} style={{color:t>=w.s&&t<w.e?GOLD_LIGHT:CREAM,textShadow:t>=w.s&&t<w.e?`0 0 12px ${GOLD}`:"none"}}>{w.w}</span>)}
+    <div data-qc-backing="solid" data-qc-occluder="caption-pill" data-qc-field="caption" data-qc-role="read" data-qc-caption-display={page.displayText} style={{fontFamily:FONT,fontSize:32,fontWeight:800,lineHeight:1.65,background:"rgba(11,14,23,.92)",padding:"6px 26px",borderRadius:18,maxWidth:lane==="top"?598:1500,textAlign:lane==="top"?"left":"center",whiteSpace:"pre-wrap",overflowWrap:"normal"}}>
+      {page.chunks.map((chunk,i)=><React.Fragment key={i}>{chunk.displaySpaceBefore}<span style={{display:"inline-block",whiteSpace:"pre",color:t>=chunk.displayStart&&t<chunk.displayEnd?GOLD_LIGHT:CREAM,textShadow:t>=chunk.displayStart&&t<chunk.displayEnd?`0 0 12px ${GOLD}`:"none"}}>{chunk.text}</span></React.Fragment>)}
     </div>
   </div>;
 };
@@ -981,6 +713,7 @@ const EndCard: React.FC = () => <div style={{position:"absolute",inset:0,backgro
 
 // QC is observation-only: production has no layout injection or media substitution.
 const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat}> = ({enabled,plan,frame,beat}) => {
+  const {fps}=useVideoConfig();
   useLayoutEffect(() => {
     if (!enabled && !plan) return;
     const handle=delayRender("V3 DOM measurement");
@@ -992,7 +725,11 @@ const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat}> =
         BEATS.forEach((b,i)=>{const end=BEATS[i+1]?.t??VO_END_SEC; [b.t,b.t+0.12,b.t+0.36,b.t+0.56,(b.t+end)/2,end-0.04].forEach(t=>times.add(t)); b.stats?.forEach(st=>[st.t,st.t+0.12,st.t+0.32,st.t+0.64].forEach(t=>times.add(t))); b.cards?.forEach(c=>[c.t,c.t+0.12,c.t+0.36,c.t+0.64].forEach(t=>times.add(t))); b.punch?.forEach(p=>[p.t-0.04,p.t,p.t+0.04].forEach(t=>times.add(t)));if(b.lower)[b.lower.t??b.t,(b.lower.t??b.t)+0.32,(b.lower.t??b.t)+(b.lower.dur??6)-0.04].forEach(t=>times.add(t));});
         CAPTION_PAGES.forEach(p=>times.add((p.start+p.end)/2));
         [CTA_T,CTA_T+0.12,CTA_T+0.32,CTA_T+0.64].forEach(t=>times.add(t));
-        console.log("__QC_PLAN__"+JSON.stringify({frames:[...new Set([...times].filter(t=>t>=0&&t<TOTAL_DURATION_SEC).map(t=>Math.round(t*25)))].sort((a,b)=>a-b)}));
+        const rectFor=(b:Beat)=>b.mode==="full"?[116,128,1688,744,1]:b.layout==="full"?[1340,128,464,690,0]:[1340,128,464,690,1];
+        const sweepWindows=BEATS.flatMap((b,i)=>i&&JSON.stringify(rectFor(BEATS[i-1]))!==JSON.stringify(rectFor(b))?[{id:`avatar-${i}`,beatT:b.t,startFrame:Math.ceil(b.t*fps),endFrame:Math.min(Math.ceil(TOTAL_DURATION_SEC*fps)-1,Math.ceil((b.t+MODE_BLEND_SEC)*fps)+3)}]:[]);
+        const frames=new Set([...times].filter(t=>t>=0&&t<TOTAL_DURATION_SEC).map(t=>Math.round(t*fps)));
+        sweepWindows.forEach(w=>{for(let f=w.startFrame;f<=w.endFrame;f++)frames.add(f);});
+        console.log("__QC_PLAN__"+JSON.stringify({frames:[...frames].sort((a,b)=>a-b),fps,sweepWindows,sweepVersion:"avatar-empty-backing-1"}));
       }
       if(enabled){
         const root=document.querySelector('[data-qc-root]') as HTMLElement;
@@ -1035,7 +772,10 @@ const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat}> =
           const cs=getComputedStyle(el);let scale=1;
           const backing=el.closest<HTMLElement>('[data-qc-backing]');const bg=backing?getComputedStyle(backing).backgroundColor:'';const rgba=bg.match(/[\d.]+/g)?.map(Number)??[];const alpha=rgba.length===4?rgba[3]:rgba.length===3?1:0;const backingBox=backing?rect(backing.getBoundingClientRect()):null;const backingOpacity=backing?opacityOf(backing):0;const backed=!!backing&&alpha>=.9&&backingOpacity>0&&backing.contains(el)&&!!backingBox&&inkRects.length>0&&inkRects.every(r=>r.x>=backingBox.x-.5&&r.y>=backingBox.y-.5&&r.x+r.width<=backingBox.x+backingBox.width+.5&&r.y+r.height<=backingBox.y+backingBox.height+.5);
           for(let a:HTMLElement|null=el;a&&a!==root.parentElement;a=a.parentElement){const tr=getComputedStyle(a).transform;if(tr!=='none'){const m=new DOMMatrixReadOnly(tr);scale*=Math.hypot(m.a,m.b);}}
-          return {id:el.dataset.qcField??'auto-'+i,role:el.dataset.qcRole??'read',layer:'current',text:el.textContent?.trim(),fontSize:parseFloat(cs.fontSize)*scale,opacity:opacityOf(el),rects,inkRects,box:rect(el.getBoundingClientRect()),clipBoxes,clipped:false,backed,backing:backingBox?{alpha,opacity:backingOpacity,sameVisibilityAncestry:backing!.contains(el),box:backingBox}:null};
+          const lineYs=[...new Set(rects.map(r=>Math.round(r.y)))];
+          const firstTextY=Math.min(...rects.map(r=>r.y));
+          const blankFirstLine=el.dataset.qcField==='caption'&&firstTextY-el.getBoundingClientRect().y>parseFloat(cs.lineHeight)*.8;
+          return {captionBlankFirstLine:blankFirstLine,captionLineCount:lineYs.length,captionExpectedText:el.dataset.qcCaptionDisplay,id:el.dataset.qcField??'auto-'+i,role:el.dataset.qcRole??'read',layer:'current',text:el.textContent?.trim(),fontSize:parseFloat(cs.fontSize)*scale,opacity:opacityOf(el),rects,inkRects,box:rect(el.getBoundingClientRect()),clipBoxes,clipped:false,backed,backing:backingBox?{alpha,opacity:backingOpacity,sameVisibilityAncestry:backing!.contains(el),box:backingBox}:null};
         });
         const tagged=Array.from(root.querySelectorAll<HTMLElement>('[data-qc-occluder]'));
         const saved=tagged.map(el=>[el,el.style.pointerEvents] as const);
@@ -1057,9 +797,54 @@ const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat}> =
           return {id:el.dataset.qcOccluder,kind:el.tagName.toLowerCase(),box,opacity:opacityOf(el),frontOf,pointerEvents:getComputedStyle(el).pointerEvents};
         });
         saved.forEach(([el,value])=>el.style.pointerEvents=value);
+        const avatar=root.querySelector<HTMLElement>('[data-qc-occluder="avatar"]');
+        if(!avatar&&frame/fps<VO_END_SEC)throw Error('missing avatar measurement');
+        type MeasuredRect={x:number;y:number;width:number;height:number};
+        const intersectRect=(a:MeasuredRect,b:MeasuredRect):MeasuredRect|null=>{const x=Math.max(a.x,b.x),y=Math.max(a.y,b.y),right=Math.min(a.x+a.width,b.x+b.width),bottom=Math.min(a.y+a.height,b.y+b.height);return right>x&&bottom>y?{x,y,width:right-x,height:bottom-y}:null;};
+        const subtractRects=(box:MeasuredRect,protect:MeasuredRect[])=>{let regions=[box];for(const p of protect){const next:MeasuredRect[]=[];for(const r of regions){const overlap=intersectRect(r,p);if(!overlap){next.push(r);continue;}const right=overlap.x+overlap.width,bottom=overlap.y+overlap.height;for(const q of [{x:r.x,y:r.y,width:r.width,height:overlap.y-r.y},{x:r.x,y:bottom,width:r.width,height:r.y+r.height-bottom},{x:r.x,y:overlap.y,width:overlap.x-r.x,height:overlap.height},{x:right,y:overlap.y,width:r.x+r.width-right,height:overlap.height}])if(q.width>0&&q.height>0)next.push(q);}regions=next;}return regions;};
+        const stablePath=(el:HTMLElement)=>{const parts:string[]=[];for(let a:HTMLElement|null=el;a&&a!==root;a=a.parentElement){const parent=a.parentElement;if(!parent)throw Error('detached candidate');parts.unshift(a.tagName.toLowerCase()+':'+(Array.from(parent.children).indexOf(a)+1));}return parts.join('/');};
+        const all=Array.from(root.querySelectorAll<HTMLElement>('*'));
+        const hitSaved=all.map(el=>[el,el.style.pointerEvents] as const);
+        let avatarBacking:unknown={applicable:false,reason:'endcard',avatar:null,candidates:[]};
+        if(avatar){
+        try{
+          all.forEach(el=>el.style.pointerEvents='auto');
+          const avatarBox=rect(avatar.getBoundingClientRect()),avatarOpacity=opacityOf(avatar);
+          const candidates=all.flatMap(el=>{
+            if(el===avatar||avatar.contains(el)||el.contains(avatar))return [];
+            const cs=getComputedStyle(el),rgba=cs.backgroundColor.match(/[\d.]+/g)?.map(Number)??[];
+            const alpha=rgba.length===4?rgba[3]:rgba.length===3?1:0,opacity=opacityOf(el),image=cs.backgroundImage;
+            if(!(alpha>.05||image!=='none')||opacity<.05||avatarOpacity<.05)return [];
+            const box=rect(el.getBoundingClientRect());
+            if(![box.x,box.y,box.width,box.height,opacity,alpha].every(Number.isFinite)||box.width<=0||box.height<=0)throw Error('invalid background geometry');
+            let intersection=intersectRect(box,avatarBox);
+            for(let a=el.parentElement;a&&a!==root&&intersection;a=a.parentElement){const style=getComputedStyle(a);if(['hidden','clip','scroll','auto'].some(v=>style.overflowX===v||style.overflowY===v))intersection=intersectRect(intersection,rect(a.getBoundingClientRect()));}
+            if(!intersection)return [];
+            const padding={top:parseFloat(cs.paddingTop),right:parseFloat(cs.paddingRight),bottom:parseFloat(cs.paddingBottom),left:parseFloat(cs.paddingLeft)};
+            if(!Object.values(padding).every(Number.isFinite))throw Error('missing background padding');
+            const protectedRects=fields.flatMap((f,i)=>{
+              if(!el.contains(entries[i][0])||f.opacity<.05)return [];
+              if(!f.inkRects.length)throw Error('missing protected glyph ink');
+              const x=Math.min(...f.inkRects.map(r=>r.x))-padding.left-4,y=Math.min(...f.inkRects.map(r=>r.y))-padding.top-4;
+              const right=Math.max(...f.inkRects.map(r=>r.x+r.width))+padding.right+4,bottom=Math.max(...f.inkRects.map(r=>r.y+r.height))+padding.bottom+4;
+              return [{x,y,width:right-x,height:bottom-y}];
+            });
+            const emptyRegions=subtractRects(intersection,protectedRects).map(region=>{
+              const points=[[.5,.5],[.1,.1],[.9,.1],[.1,.9],[.9,.9]].map(([fx,fy])=>{
+                const x=region.x+region.width*fx,y=region.y+region.height*fy,stack=document.elementsFromPoint(x,y);
+                const candidateIndex=stack.indexOf(el),avatarIndex=stack.findIndex(x=>x===avatar||avatar.contains(x));
+                return {x,y,candidateIndex,avatarIndex,above:candidateIndex>=0&&avatarIndex>=0&&candidateIndex<avatarIndex};
+              });
+              return {...region,paintOrderEvidence:{...(points.find(p=>p.above)??points[0]),samples:points}};
+            });
+            return [{id:stablePath(el),box,opacity,background:{color:cs.backgroundColor,alpha,image},padding,protectedRects,intersection,emptyRegions}];
+          });
+          avatarBacking={avatar:{box:avatarBox,opacity:avatarOpacity},candidates};
+        }finally{hitSaved.forEach(([el,value])=>el.style.pointerEvents=value);}
+        }
         const footageEl=root.querySelector<HTMLElement>('[data-qc-footage]');
         const actualSrc=footageEl?.dataset.qcFootage;
-        console.log('__QC__'+JSON.stringify({schemaVersion:2,captionLane:beat.captionLane??'bottom',frame,width:1920,height:1080,fontsOk:document.fonts.check('800 28px KanitX')&&document.fonts.check('700 28px KanitX'),fields,occluders,transition:frame/25-beat.t<MODE_BLEND_SEC,footage:{origin:frame/25>=VO_END_SEC?'endcard':beat.mode==='full'?'avatar':beat.media==='typo'?'typo':actualSrc?.startsWith('yt_')?'source':'stock',layout:beat.layout,src:actualSrc,credit:false,chrome:false}}));
+        console.log('__QC__'+JSON.stringify({schemaVersion:2,captionLane:beat.captionLane??'bottom',frame,width:1920,height:1080,fontsOk:document.fonts.check('800 28px KanitX')&&document.fonts.check('700 28px KanitX'),fields,occluders,avatarBacking,transition:frame/25-beat.t<MODE_BLEND_SEC,footage:{origin:frame/25>=VO_END_SEC?'endcard':beat.mode==='full'?'avatar':beat.media==='typo'?'typo':actualSrc?.startsWith('yt_')?'source':actualSrc?.startsWith('ai_')?'ai':'stock',layout:beat.layout,src:actualSrc,credit:false,chrome:false}}));
       }
       continueRender(handle);
     }).catch(cancelRender);
@@ -1090,6 +875,7 @@ export const YtNewsStyle01V3: React.FC<YtNewsStyle01V3Props> = ({qcPlan=false,qc
   const frame=useCurrentFrame();const {fps}=useVideoConfig();const t=frame/fps;
   let index=0;BEATS.forEach((b,i)=>{if(t>=b.t)index=i;});const beat=BEATS[index];
   const punches=beat.punch?.filter(p=>t>=p.t)??[];const punch=punches[punches.length-1];const z=punch?.z??1;
+  const beatStartFrame=Math.ceil(beat.t*fps); // Cutaway starts at first selected frame; avatar stays global.
   const isEnd=t>=VO_END_SEC;const source=beat.origin==="source";const full=beat.layout==="full";
   const showLower=beat.lower&&t>=(beat.lower.t??beat.t)&&t<(beat.lower.t??beat.t)+(beat.lower.dur??6);
   const activeStats=beat.stats?.filter(st=>t>=st.t)??[];
@@ -1101,6 +887,10 @@ export const YtNewsStyle01V3: React.FC<YtNewsStyle01V3Props> = ({qcPlan=false,qc
   const cardScale=card.h/H;const avatarWidth=W*cardScale;
   const avatarPunch=beat.mode==="full"?z:1;
   const cardList=beat.cards?.filter(c=>t>=c.t)??[];const typoCard=cardList[cardList.length-1];
+  // Primary typography must wait until the full avatar has cleared its lane.
+  const typoEntranceStart=Math.max(typoCard?.t??beat.t,beat.t+(previous.mode==="full"?MODE_BLEND_SEC:0));
+  const delayPanelEntrance=(previous.mode==="full"&&beat.mode!=="full")||from.opacity>to.opacity;
+  const panelEntranceStart=beat.t+(delayPanelEntrance?MODE_BLEND_SEC:0);
   const stageMotion={opacity:clamp01((t-beat.t)/.35),transform:`translateX(${(1-blend)*8}px)`};
   return <div data-qc-root style={{width:W,height:H,position:"relative",overflow:"hidden",background:NAVY}}>
     <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat}/>
@@ -1112,19 +902,20 @@ export const YtNewsStyle01V3: React.FC<YtNewsStyle01V3Props> = ({qcPlan=false,qc
       {beat.mode!=="full"&&<>
         <div style={{position:"absolute",left:full?0:116,top:full?0:128,width:full?1920:1190,height:full?1080:520,overflow:"hidden",borderRadius:full?0:18,background:NAVY_2,...(full?{opacity:stageMotion.opacity}:stageMotion)}}>
 
-          {beat.media!=="typo"&&beat.src&&<div data-qc-footage={beat.src} style={{position:"absolute",inset:0,top:!full&&source&&beat.chrome?52:0,overflow:"hidden"}}><div style={{position:"absolute",inset:0,transform:`scale(${z})`,transformOrigin:`${(punch?.fx??.5)*100}% ${(punch?.fy??.5)*100}%`}}><Loop durationInFrames={Math.max(1,Math.floor(((BROLL_DUR[beat.src]??10)-(beat.from??0))*fps)-2)} layout="none"><OffthreadVideo data-qc-footage={beat.src} muted src={staticFile(`${EPISODE.assetDir}/broll/${beat.src}.mp4`)} startFrom={Math.round((beat.from??0)*fps)} style={{width:"100%",height:"100%",objectFit:source&&!full?"contain":"cover"}}/></Loop></div></div>}
-          {beat.media==="typo"&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",justifyContent:"center",gap:24,padding:"45px 85px",...boundedEntrance(t,typoCard?.t??beat.t,fps)}}>
+          {beat.media!=="typo"&&beat.src&&<div data-qc-footage={beat.src} style={{position:"absolute",inset:0,top:!full&&source&&beat.chrome?52:0,overflow:"hidden"}}><div style={{position:"absolute",inset:0,transform:`scale(${z})`,transformOrigin:`${(punch?.fx??.5)*100}% ${(punch?.fy??.5)*100}%`}}><Sequence from={beatStartFrame} layout="none"><Loop durationInFrames={Math.max(1,Math.floor(((BROLL_DUR[beat.src]??10)-(beat.from??0))*fps)-2)} layout="none"><OffthreadVideo data-qc-footage={beat.src} muted src={staticFile(`${EPISODE.assetDir}/broll/${beat.src}.mp4`)} startFrom={Math.round((beat.from??0)*fps)} style={{width:"100%",height:"100%",objectFit:source&&!full?"contain":"cover"}}/></Loop></Sequence></div></div>}
+          {beat.media==="typo"&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",justifyContent:"center",gap:24,padding:"45px 85px",...boundedEntrance(t,typoEntranceStart,fps)}}>
             {(typoCard?.lines??[]).map((line,i)=><TextField id={`typo-${i}`} key={i} style={{fontSize:30,color:i%2?MINT:AMBER}}>{line}</TextField>)}
           </div>}
         </div>
 
-          {source&&beat.chrome&&<div data-qc-chrome data-qc-backing="solid" data-qc-occluder="chrome" style={{position:"absolute",left:116,right:full?116:614,top:full?112:128,height:52,background:NAVY_2,zIndex:32,padding:"6px 24px",...stageMotion,boxSizing:"border-box"}}><TextField id="source-url" role="label">{EPISODE.page.domain}{EPISODE.page.path}</TextField></div>}
+          {source&&beat.chrome&&<div data-qc-chrome data-qc-backing="solid" data-qc-occluder="chrome" style={{position:"absolute",left:116,width:"max-content",maxWidth:full?1688:1190,top:full?112:128,height:52,background:NAVY_2,zIndex:32,padding:"6px 24px",...stageMotion,boxSizing:"border-box"}}><TextField id="source-url" role="label">{EPISODE.page.domain}{EPISODE.page.path}</TextField></div>}
+        {beat.origin==="ai"&&<div data-qc-backing="solid" data-qc-occluder="ai-label-backing" style={{background:"rgba(11,14,23,.92)",padding:"0 12px",borderRadius:8,position:"absolute",left:116,zIndex:35,top:full?186:658}}><TextField id="ai-label" role="label" style={{color:AMBER}}>ภาพประกอบ AI</TextField></div>}
         {source&&<div data-qc-credit data-qc-backing="solid" data-qc-occluder="credit-backing" style={{background:full?"rgba(11,14,23,.9)":undefined,padding:full?"0 12px":undefined,borderRadius:8,position:"absolute",left:116,zIndex:35,top:full?186:658}}><TextField id="source-credit" role="label" style={{color:AMBER}}>{EPISODE.officialTag}</TextField></div>}
-        <div data-qc-backing="solid" style={{position:"absolute",zIndex:30,left:116,top:full?704:712,width:full?1688:1190,display:"flex",flexDirection:"column",gap:6,background:full?"rgba(11,14,23,.95)":"linear-gradient(0deg,rgba(11,14,23,.95),rgba(11,14,23,.6),transparent)",padding:full?"0 12px 8px":"0 0 8px",boxSizing:"border-box"}}>
+        <div data-qc-backing="solid" style={{position:"absolute",zIndex:30,left:116,top:full?704:712,width:full?1688:1190,display:"flex",flexDirection:"column",gap:6,background:full?"rgba(11,14,23,.95)":"linear-gradient(0deg,rgba(11,14,23,.95),rgba(11,14,23,.6),transparent)",padding:full?"0 12px 8px":"0 0 8px",boxSizing:"border-box",...(delayPanelEntrance?boundedEntrance(t,panelEntranceStart,fps):{})}}>
           <TextField id="headline" style={{fontSize:36,lineHeight:1.45}}>{beat.headline}</TextField>
           {!full&&<TextField id="description" style={{fontSize:28,lineHeight:1.5,color:CREAM_DIM}}>{beat.sub}</TextField>}
         </div>
-        {<div style={{position:"absolute",zIndex:30,left:116,top:850,width:1688,display:"flex",gap:24}}>{activeStats.map((st,i)=><div data-qc-backing="solid" data-qc-occluder={`chip-${i}`} key={i} style={{background:full?"rgba(11,14,23,.92)":undefined,borderRadius:12,...boundedEntrance(t,st.t,fps)}}><TextField id={`stat-${i}`} role="label" key={i} style={{fontSize:24,padding:"8px 18px",border:`1px solid ${tone(st.tone)}`,borderRadius:12,color:tone(st.tone)}}>{st.big} · {st.label}</TextField></div>)}</div>}
+        {<div style={{position:"absolute",zIndex:30,left:116,top:850,width:1688,display:"flex",gap:24}}>{activeStats.map((st,i)=><div data-qc-backing="solid" data-qc-occluder={`chip-${i}`} key={i} style={{background:full?"rgba(11,14,23,.92)":undefined,borderRadius:12,...boundedEntrance(t,Math.max(st.t,panelEntranceStart),fps)}}><TextField id={`stat-${i}`} role="label" key={i} style={{fontSize:24,padding:"8px 18px",border:`1px solid ${tone(st.tone)}`,borderRadius:12,color:tone(st.tone)}}>{st.big} · {st.label}</TextField></div>)}</div>}
       </>}
       <div data-qc-occluder="avatar" style={{position:"absolute",left:card.x,top:card.y,width:card.w,height:card.h,opacity:card.opacity,overflow:"hidden",borderRadius:22,zIndex:20}}>
         <OffthreadVideo muted src={staticFile(`${EPISODE.assetDir}/avatar_source.mp4`)} style={{position:"absolute",height:card.h,width:avatarWidth,left:(card.w-avatarWidth)/2,objectFit:"cover",transform:`scale(${avatarPunch})`,transformOrigin:`${(punch?.fx??.5)*100}% ${(punch?.fy??.5)*100}%`}}/>

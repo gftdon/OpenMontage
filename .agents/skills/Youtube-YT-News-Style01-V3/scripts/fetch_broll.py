@@ -138,13 +138,28 @@ def _existing(out: Path, key: str):
     return [out / f"{key}{e}" for e in bl.MEDIA_EXTS if (out / f"{key}{e}").exists()]
 
 
+def queries_from_plan(plan,context):
+    from broll_plan import validate_plan
+    errors=validate_plan(plan,context)
+    if errors:raise ValueError('; '.join(errors))
+    queries={}
+    for beat in plan['beats']:
+        selected=beat['selected']
+        if selected['tier']!='stock':continue
+        path=Path(selected['path']);key=path.stem
+        if path.name!=selected['path'] or not __import__('re').fullmatch(r'[A-Za-z0-9_-]+',key):raise ValueError('stock filename must be a safe basename')
+        spec=[beat['query'],beat.get('category','')]
+        if key in queries and queries[key]!=spec:raise ValueError('conflicting per-beat stock query')
+        queries[key]=spec
+    return queries
+
 def fetch_videos(queries_path, out_dir, ledger_path=bl.DEFAULT_LEDGER, api_key="",
                  per_page=30, dry_run=False, public_root=bl.DEFAULT_PUBLIC_ROOT,
                  projects_root=bl.DEFAULT_PROJECTS_ROOT) -> int:
     """Returns the process exit code (0 = all keys ok, 1 = at least one key failed)."""
     out = Path(out_dir)
     slug = bl.slug_from_raw_dir(out)
-    queries = json.loads(Path(queries_path).read_text(encoding="utf-8"))
+    queries = queries_path if isinstance(queries_path,dict) else json.loads(Path(queries_path).read_text(encoding="utf-8"))
     bl.auto_seed(ledger_path, public_root, projects_root)
     ledger = bl.load_ledger(ledger_path)
     manifest_path = out / "_manifest.json"
@@ -262,7 +277,11 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="search and print the chosen candidates; download nothing")
     ap.add_argument("--music", nargs=2, metavar=("QUERY", "MUSIC_OUT"),
                     help='also fetch a Pixabay music track, e.g. --music "calm tech" music.mp3')
+    ap.add_argument('--plan');ap.add_argument('--context')
     args = ap.parse_args(argv)
+    if args.plan:
+        if not args.context or not args.out_dir:ap.error('--plan requires --context and OUT_DIR')
+        args.queries=queries_from_plan(json.loads(Path(args.plan).read_text()),json.loads(Path(args.context).read_text()))
     if not args.music and not (args.queries and args.out_dir):
         ap.error("QUERIES.json and OUT_DIR are required (or use --music)")
 

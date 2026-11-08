@@ -62,8 +62,10 @@ def check(beats, media_dir, public_root, ledger, max_old, manifest, raw_dir, slu
                 violations.append(f"composition assetDir is `{d}` but --media-dir is `{media_dir}` — "
                                   "renders would play another episode's folder")
 
+    # Engine cards and presenter tracks are not cutaway B-roll.
+    eligible = [b for b in beats if b.get('mode') != 'full' and b.get('media') != 'typo']
     uses: dict[str, list] = {}
-    for fb in bl.footage_beats(beats):
+    for fb in bl.footage_beats(eligible):
         if fb["src"] is None:
             violations.append(
                 f"beat t={fb['t']} (media={fb['media']}) has no `src` — the component silently "
@@ -100,6 +102,15 @@ def check(beats, media_dir, public_root, ledger, max_old, manifest, raw_dir, slu
         is_yt = bl.is_yt_key(src)
         reasons: list[str] = []
         others = bl.other_episodes(idx, md5s[src], own) if src in md5s else set()
+        if bl.is_ai_key(src):
+            record = manifest.get(src, {})
+            if record.get('origin') != 'ai' or not record.get('image_sha256') or not record.get('sha256'):
+                violations.append(f'`{src}`: missing AI image/mp4 provenance (not stock freshness)')
+            elif src in md5s:
+                import hashlib
+                if hashlib.sha256((broll_dir / f'{src}.mp4').read_bytes()).hexdigest() != record['sha256']:
+                    violations.append(f'`{src}`: stale AI mp4 hash')
+            continue
         if is_yt:
             if others:
                 bad_yt.add(src)
@@ -168,6 +179,8 @@ def main(argv=None) -> int:
     ap.add_argument("--public-root", default=bl.DEFAULT_PUBLIC_ROOT)
     ap.add_argument("--projects-root", default=bl.DEFAULT_PROJECTS_ROOT)
     ap.add_argument("--ledger", default=bl.DEFAULT_LEDGER)
+    ap.add_argument('--cuts', required=True, help='_cuts.json with actual source ranges and hashes')
+    ap.add_argument('--usage-report', help='isolated A44 underlying-identity report')
     ap.add_argument("--max-old", type=_max_old, default=2,
                     help=f"max old stock files per video, 0..{bl.MAX_OLD_CAP} (default 2)")
     args = ap.parse_args(argv)
@@ -190,6 +203,30 @@ def main(argv=None) -> int:
         violations, rows, warnings = check(
             beats, args.media_dir, args.public_root, ledger, args.max_old, manifest, mpath.parent, slug,
             comp_name=Path(args.composition).name, asset_dirs=asset_dirs)
+        import broll_plan as bp
+        import re
+        cuts = json.loads(Path(args.cuts).read_text())
+        records = {**manifest, **cuts.get('clips', cuts)}
+        match = re.search(r'const\s+VO_END_SEC\s*=\s*([\d.]+)', text)
+        if not match: raise ValueError('missing VO_END_SEC')
+        actual_durations={}
+        for b in beats:
+            if b.get('mode')!='full' and b.get('media') in ('broll','clip'):
+                file=Path(args.public_root)/args.media_dir/'broll'/(b['src']+'.mp4')
+                actual_durations[b['src']]=bp.probe_duration(file)
+        beats = bp.normalize_beats(beats)
+        usages = bp.derive_usage(beats, records, float(match[1]), actual_durations, bp.parse_renderer_durations(text))
+        for u in usages:
+            file = Path(args.public_root) / args.media_dir / 'broll' / (u['src']+'.mp4')
+            record = records.get(u['src'], {})
+            if not record.get('sha256') or bp.file_sha256(file) != record['sha256']:
+                violations.append(f"{u['src']}: missing/stale public mp4 identity hash")
+            if file.exists():
+                u['decoded_sha256'] = bp.decoded_fingerprint(file, u['shown_timing']['source_start'], u['shown_timing']['shown_frames']/25)
+        identity = bp.check_usage(usages)
+        violations.extend(identity['violations']); warnings.extend(identity['warnings'])
+        if args.usage_report:
+            Path(args.usage_report).write_text(json.dumps({**identity,'usages':usages,'pass':not violations},ensure_ascii=False,indent=2))
     except (OSError, bl.BeatsParseError, ValueError) as e:  # json errors are ValueErrors
         print(f"ERROR: {e}", file=sys.stderr)
         return 2

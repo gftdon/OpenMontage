@@ -69,6 +69,18 @@ def is_yt_key(key: str) -> bool:
     return key.startswith("yt_")
 
 
+def is_ai_key(key: str) -> bool:
+    """ai_* is an image-derived mp4, never stock or official source."""
+    return key.startswith('ai_')
+
+
+def media_identity(record: dict):
+    if record.get('source_sha256'): return 'source:'+record['source_sha256']
+    if record.get('image_sha256'): return 'image-sha256:'+record['image_sha256']
+    if record.get('pixabay_id') is not None: return 'pixabay:'+str(record['pixabay_id'])
+    return record.get('identity')
+
+
 def file_md5(ledger: dict, path) -> str:
     """md5 of a file, cached in ledger["files"] by (path, size, mtime_ns)."""
     p = Path(path)

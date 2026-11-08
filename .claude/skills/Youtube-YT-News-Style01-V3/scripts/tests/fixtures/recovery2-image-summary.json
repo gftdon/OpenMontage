@@ -1,0 +1,36 @@
+{
+  "modelVersion": "gemini-3.1-flash-image",
+  "usageMetadata": {
+    "promptTokenCount": 178,
+    "candidatesTokenCount": 1547,
+    "totalTokenCount": 1725,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 178
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "IMAGE",
+        "tokenCount": 1120
+      }
+    ],
+    "serviceTier": "standard"
+  },
+  "candidates": [
+    {
+      "finishReason": "MAX_TOKENS",
+      "parts": [
+        {
+          "mimeType": "image/jpeg",
+          "bytes": 746425,
+          "sha256": "f5413e996fe9623859f690663be63dee3839b7e69297f14e726531cece5bab5f"
+        }
+      ]
+    }
+  ],
+  "promptFeedback": null,
+  "network_calls": 1,
+  "payload_sha256": "3180509f1f1aa912bc8c7ce6dea47cb3d9564ad32f756b8edfa699df3a5dfe45"
+}

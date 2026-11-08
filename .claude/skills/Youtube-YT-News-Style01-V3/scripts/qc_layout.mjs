@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {beginReport,writeReport,makeReport,hashSources,createRunDirectory} from './qc_report.mjs';
 import {createRequire} from 'node:module';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import {evaluateLayout,validateSamples} from './qc_layout_eval.mjs';
+import {evaluateLayout,validateSamples,evaluateAvatarBackingSweep} from './qc_layout_eval.mjs';
 const [id,outArg,composerArg,...args]=process.argv.slice(2);
 if(!id||!outArg||!composerArg)throw Error('qc_layout.mjs <comp-id> <out-dir> <composer-dir> [--frames 225,2225]');
 const out=path.resolve(outArg),composer=path.resolve(composerArg);
@@ -22,6 +22,13 @@ try {
  const text=await fs.readFile(source,'utf8');
  const helpers=[...text.matchAll(/from ["'](\.\/[^"']*Captions)["']/g)].map(m=>path.join(composer,'src',m[1]+'.ts'));
  meta.sourceHashes=await hashSources([source,...helpers,path.join(composer,'src/Root.tsx'),path.join(composer,'src/index.tsx'),path.join(scriptDir,'lint_beats.py'),...(await fs.readdir(scriptDir)).filter(f=>f.startsWith('qc_')&&(f.endsWith('.mjs')||f.endsWith('.json'))).map(f=>path.join(scriptDir,f))]);
+ meta.contractVersion='a44-caption-identity-1';
+ Object.assign(meta.sourceHashes,await hashSources(['caption_join.mjs','broll_plan.py','source_context.py','check_broll.py','cut_manifest.py'].map(f=>path.join(scriptDir,f))));
+ const artifactFlag=args.indexOf('--artifacts');
+ if(artifactFlag>=0){
+  const projectArtifacts=path.resolve(args[artifactFlag+1]);
+  Object.assign(meta.sourceHashes,await hashSources(['broll_plan.json','source_context.json','caption-joined.json'].map(name=>path.join(projectArtifacts,name))));
+ }
  const thresholds=JSON.parse(await fs.readFile(path.join(scriptDir,'qc_thresholds.json')));
  const browserExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
  const serveUrl=await bundle({entryPoint:path.join(composer,'src/index.tsx'),publicDir:path.join(composer,'public'),outDir:path.join(runOut,'bundle')});
@@ -51,7 +58,12 @@ try {
  for(const frame of frames){samples.push(frame===0?first:await capture(frame));console.log(`QC_FRAME ${frame}`);}
  const issues=validateSamples(frames,samples);
  for(const s of samples)for(const i of evaluateLayout(s,thresholds).issues)issues.push({frame:s.frame,...i});
- const report=makeReport({...meta,endedAt:new Date().toISOString(),fullPlanFrames:plan.frames,requestedFrames:frames,issues});
+ const sweepFrames=new Set((plan.sweepWindows??[]).flatMap(w=>Array.from({length:w.endFrame-w.startFrame+1},(_,i)=>w.startFrame+i)));
+ const temporalSweep=evaluateAvatarBackingSweep(plan.sweepWindows,samples.filter(s=>sweepFrames.has(s.frame)),plan.fps,thresholds,{requireComplete:explicit<0});
+ issues.push(...temporalSweep.issues);
+ const sweepPlan={version:plan.sweepVersion,fps:plan.fps,windows:plan.sweepWindows};
+ const sweepPlanSha256=createHash('sha256').update(JSON.stringify(sweepPlan)).digest('hex');
+ const report=makeReport({...meta,endedAt:new Date().toISOString(),fullPlanFrames:plan.frames,requestedFrames:frames,issues,temporalSweep,sweepPlan,sweepPlanSha256});
  await writeReport(runOut,report);await writeReport(out,report);
  console.log(JSON.stringify({acceptancePass:report.pass,diagnosticPass:report.diagnosticPass,complete:report.complete,samples:frames.length,issues:issues.length}));
  process.exitCode=report.diagnosticPass?0:1;

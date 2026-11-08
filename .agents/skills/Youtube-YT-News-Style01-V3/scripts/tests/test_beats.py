@@ -18,6 +18,14 @@ class BeatTests(unittest.TestCase):
     def beat(self, t=0, end=10, **kw):
         return dict(t=t,end=end,mode='pip',media='broll',src='desk',origin='stock',layout='stage',chrome=False,**kw)
 
+    def test_ai_origin_is_distinct_and_does_not_evade_gates(self):
+        b={**self.beat(),'src':'ai_concept','origin':'ai'}
+        self.assertEqual(self.lint([b]),[])
+        self.assertIn('origin',[x['code'] for x in self.lint([{**b,'src':'desk'}])])
+        self.assertTrue(self.lint([{**b,'chrome':True}]))
+        self.assertIn('punch-origin',[x['code'] for x in self.lint([{**b,'punch':[{'t':5,'z':1.2}]}])])
+        self.assertIn('hold',[x['code'] for x in self.lint([{**b,'end':12}])])
+
     def test_hold_over_limit(self):
         self.assertIn('hold', [x['code'] for x in self.lint([self.beat(end=10.01)])])
 
