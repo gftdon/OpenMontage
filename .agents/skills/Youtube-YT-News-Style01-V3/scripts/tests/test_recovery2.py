@@ -7,8 +7,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import broll_costs as bc
 import native_paid as n
-ROOT=Path(__file__).resolve().parents[5]
-PROJECT=ROOT/'projects/v261107-001-yt-news-v3-broll-test'
+FIXTURES=Path(__file__).parent/'fixtures'
 class Recovery2Tests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.p=Path(self.tmp.name).resolve();self.c=bc.load_config();self.a={'approved':True,'project':str(self.p),'config_sha256':bc.config_sha256(),'caps':self.c['caps'],**{k:{x:self.c[k][x] for x in ('provider','model')} for k in ('image','relevance')}};self.b=bc.Budget(self.p,self.a,today='2026-11-08')
@@ -41,7 +40,7 @@ class Recovery2Tests(unittest.TestCase):
   with self.b.locked() as j:j['attempts'].append({'id':'budget-near','kind':'relevance','status':'ok','config_sha256':bc.config_sha256(),'reserved_usd':1.95-sum(e['reserved_usd'] for e in j['attempts'])-.13})
   with self.assertRaises(bc.StopPaid):self.b.reserve('image',input_tokens=178)
  def test_old_relevance_exact_payload_rebinds_new_hash(self):
-  p=PROJECT/'qc/recovery-precheck';binding=n.bind_count_receipt(p/'relevance-generate-request.json',p/'relevance-count-result.json',self.c,'relevance','same-key')
+  p=FIXTURES;binding=n.bind_count_receipt(p/'relevance-generate-request.json',p/'relevance-count-result.json',self.c,'relevance','same-key')
   self.assertEqual(binding['input_tokens'],1198);self.assertEqual(binding['payload_sha256'],'0b135a4fe7f748b578af753fae6785009eb60e035e1a464866c9aa9054535220');self.assertEqual(binding['config_sha256'],bc.config_sha256())
  def test_image_all_output_maxrate_and_incomplete_breakdown_no_inference(self):
   self.recover();r=self.b.reserve('relevance',input_tokens=1);self.b.receipt(r['id'],'ok',{'input_tokens':1,'output_tokens':1});image=self.b.reserve('image',input_tokens=178)
@@ -49,7 +48,7 @@ class Recovery2Tests(unittest.TestCase):
   self.assertEqual(usage['output_tokens'],2059);self.assertTrue(usage['breakdown_unknown']);self.assertIsNone(self.b.receipt(image['id'],'native_image_ok',usage));row=json.loads(self.b.path.read_text())['attempts'][-1];self.assertTrue(row['output_cap_warning']);self.assertFalse(row['exposure_exceeded']);self.assertAlmostEqual(row['estimated_usd'],.123629)
  def test_native_relevance_first_actual_receipt_unlocks_image_missing_breakdown(self):
   import base64
-  self.recover();pre=PROJECT/'qc/recovery-precheck';request=pre/'relevance-generate-request.json';bound=n.bind_count_receipt(request,pre/'relevance-count-result.json',self.c,'relevance','same-key')
+  self.recover();pre=FIXTURES;request=pre/'relevance-generate-request.json';bound=n.bind_count_receipt(request,pre/'relevance-count-result.json',self.c,'relevance','same-key')
   response={'candidates':[{'content':{'parts':[{'text':'{"score":2,"reason":"relevant"}'}]}}],'usageMetadata':{'promptTokenCount':1198,'candidatesTokenCount':73,'totalTokenCount':1271}}
   result=n.execute_exact(self.b,'relevance',request,bound,'same-key',lambda *_:response,identity={'origin':'stock','identity':'pixabay:1','cue_ids':['c1'],'context_sha256':'a'*64})
   self.assertEqual(result['score'],2);self.assertEqual(result['budget_status'],'reserved_with_usage')

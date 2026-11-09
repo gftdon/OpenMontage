@@ -9,7 +9,7 @@ import broll_costs as bc
 import native_paid as n
 import score_relevance as s
 JPEG=b'\xff\xd8\xff\xc0\x00\x0b\x08\x02\x40\x04\x00\x01\x01\x11\x00\xff\xd9'
-ROOT=Path(__file__).resolve().parents[5]
+FIXTURES=Path(__file__).parent/'fixtures'
 class B3Tests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.p=Path(self.tmp.name).resolve();c=bc.load_config();a={'approved':True,'project':str(self.p),'config_sha256':bc.config_sha256(),'caps':c['caps'],**{k:{x:c[k][x] for x in ('provider','model')} for k in ('image','relevance')}};self.b=bc.Budget(self.p,a,today='2026-11-08')
@@ -48,7 +48,7 @@ class B3Tests(unittest.TestCase):
   report=b.run_rows(self.b,rows,self.p/'batch',count_runner=count,generate_runner=generate,key_identity='same-key',complete=True)
   self.assertEqual(calls,['count','generate']);self.assertEqual(report['results'][0]['status'],'warning');self.assertFalse(report['pass']);self.assertFalse(report['complete'])  # plain rows are diagnostic, not reconciled acceptance
  def test_native_base_canonical_bytes_match_observed_old_request(self):
-  p=ROOT/'projects/v261107-001-yt-news-v3-broll-test/qc/recovery-precheck';raw=(p/'relevance-generate-request.json').read_bytes();body=json.loads(raw);frame=base64.b64decode(body['contents'][0]['parts'][1]['inlineData']['data']);spoken=json.loads(body['contents'][0]['parts'][0]['text'])['spoken']
+  p=FIXTURES;raw=(p/'relevance-generate-request.json').read_bytes();body=json.loads(raw);frame=base64.b64decode(body['contents'][0]['parts'][1]['inlineData']['data']);spoken=json.loads(body['contents'][0]['parts'][0]['text'])['spoken']
   self.assertEqual(s.native_request_bytes(frame,spoken,self.b.config,'stock'),raw)
   base=s.request_body(JPEG,'spoken',self.b.config);self.assertEqual(base['system_instruction'],s.SYSTEM);self.assertEqual(set(base['response_format']['schema']['properties']),{'score','reason'})
  def test_ai_schema_count_mismatch_rejected(self):
