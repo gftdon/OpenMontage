@@ -715,6 +715,68 @@ class SimpleCheckTests(unittest.TestCase):
         self.assertNotIn('source-reuse', codes(self.lint(beats, inp=inp)))
 
 
+class CropTrimsSourceTests(unittest.TestCase):
+    """crop-trims-source: warning-only, a srcCrop that trims an edge by more than 2 % of that side of the 1920x1080 frame."""
+
+    def lint(self, crop, asset_dir='demo', **kw):
+        beat = pip(5.0, **kw)
+        if crop is not None:
+            beat['srcCrop'] = crop
+        inp = make_inputs([at_time(0, ['คำพูด', 'ทดสอบ'])])
+        ep = episode([dict(t=0, mode='full'), beat, dict(t=15.0, mode='full')])
+        if asset_dir is not None:
+            ep['assetDir'] = asset_dir
+        return lc.lint_content(ep, inp, {})[0]
+
+    def hits(self, crop, **kw):
+        return [i for i in self.lint(crop, **kw) if i['code'] == 'crop-trims-source']
+
+    def test_command_uses_public_clip_path_and_falls_back_without_asset_dir(self):
+        crop = {'x': 60, 'y': 120, 'w': 1440, 'h': 810}
+        self.assertIn('-i remotion-composer/public/demo/broll/yt_a.mp4 ', self.hits(crop)[0]['detail'])
+        for bad in (None, 5, ''):
+            with self.subTest(asset_dir=bad):
+                msg = self.hits(crop, asset_dir=bad)[0]['detail']
+                self.assertIn('-i yt_a.mp4 ', msg)
+                self.assertNotIn('remotion-composer', msg)
+
+    def test_trimmed_crop_warns_with_percentages_and_command(self):
+        crop = {'x': 60, 'y': 120, 'w': 1440, 'h': 810}
+        got = self.hits(crop)
+        self.assertEqual(1, len(got), got)
+        self.assertEqual('warn', got[0]['severity'])
+        self.assertEqual(5.0, got[0]['t'])
+        msg = got[0]['detail']
+        for part in ('left 3.1%', 'right 21.9%', 'top 11.1%', 'bottom 13.9%', 'yt_a', 'drawbox=x=60:y=120:w=1440:h=810', 'beat 1', 't=5.00', 'no gate can tell'):
+            self.assertIn(part, msg)
+        self.assertIn('ffmpeg -ss 5.0 -i remotion-composer/public/demo/broll/yt_a.mp4 -frames:v 1', msg)
+        self.assertIn('-frames:v 1', msg)
+        self.assertIn('crop_check.jpg', msg)
+        self.assertNotIn('\n', msg)
+
+    def test_warning_never_changes_errors_or_pass(self):
+        with_crop = self.lint({'x': 60, 'y': 120, 'w': 1440, 'h': 810})
+        without = self.lint(None)
+        errs = lambda issues: sorted(i['code'] for i in issues if i['severity'] == 'error')
+        self.assertEqual(errs(without), errs(with_crop))
+        self.assertEqual([], [i for i in with_crop if i['code'] == 'crop-trims-source' and i['severity'] != 'warn'])
+
+    def test_full_frame_crop_does_not_warn(self):
+        self.assertEqual([], self.hits({'x': 0, 'y': 0, 'w': 1920, 'h': 1080}))
+
+    def test_threshold_is_strictly_greater_than_two_percent(self):
+        self.assertEqual([], self.hits({'x': 38, 'y': 0, 'w': 1882, 'h': 1080}))        # 1.98 % left
+        self.assertEqual(1, len(self.hits({'x': 39, 'y': 0, 'w': 1881, 'h': 1080})))    # 2.03 % left
+
+    def test_beat_without_src_crop_does_not_warn(self):
+        self.assertEqual([], self.hits(None))
+
+    def test_malformed_src_crop_is_skipped_without_exception(self):
+        for crop in ({'x': 'a'}, {'x': 0, 'y': 0, 'w': 1920}, {'x': 0, 'y': 0, 'w': 'b', 'h': 1080}, 'oops', [1, 2, 3, 4], {'x': True, 'y': 0, 'w': 1920, 'h': 1080}):
+            with self.subTest(crop=crop):
+                self.assertEqual([], self.hits(crop))
+
+
 class LoaderTests(unittest.TestCase):
     def test_v4_object_json_is_primary(self):
         ep = ed.load_episode(FIX / 'episode_object.json')
@@ -1214,6 +1276,13 @@ class CliTests(unittest.TestCase):
         self.assertIn('presenter', rep['metrics'])
         self.assertEqual({'editorial': 0, 'dataBearing': 0, 'warn': 0, 'error': 0}, rep['metrics']['latin'])
         self.assertEqual(0, rep['metrics']['evidence']['windowUnavailable'])
+
+    def test_cli_crop_warning_reads_asset_dir_from_episode_file(self):
+        proc, rep = self.run_cli()
+        msgs = [i['detail'] for i in rep['issues'] if i['code'] == 'crop-trims-source']
+        self.assertTrue(msgs)
+        self.assertIn('-i remotion-composer/public/mini/broll/', msgs[0])
+        self.assertTrue(all(i['severity'] == 'warn' for i in rep['issues'] if i['code'] == 'crop-trims-source'))
 
     def test_errors_exit_1_and_warn_alone_passes(self):
         proc, rep = self.run_cli('--set', 'maxCtaChars=3')

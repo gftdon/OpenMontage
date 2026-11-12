@@ -23,6 +23,7 @@ import atexit
 import concurrent.futures
 import datetime
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -65,6 +66,14 @@ REQUIRED_TOOLS = TOOL_NAMES      # all of them: swift = macOS Vision OCR of the 
 ENGINE_REL = 'src/YtNewsStyle01V4.tsx'
 ENTRY_REL = 'src/ytNewsStyle01V4.entry.tsx'
 EXPECTED_PIX_FMT = 'yuv420p'
+# environment (the same checks run first in a real run and in `--preflight`)
+PY_MODULES = ('numpy', 'PIL', 'pythainlp')          # the gates run under THIS interpreter (sys.executable)
+# what qc_layout.mjs / render_episode.mjs load lazily from <composer>/node_modules (createRequire(<composer>/package.json)(name))
+# plus `remotion` itself, imported by the engine bundle; each must be installed as <composer>/node_modules/<name>/package.json
+COMPOSER_PACKAGES = ('remotion', '@remotion/bundler', '@remotion/renderer')
+# the exact files YtNewsStyle01V4.tsx loads (render-blocking; a failed load cancels the render), relative to <composer>/public
+FONT_FILES = ('fonts/Kanit-Bold.ttf', 'fonts/Kanit-ExtraBold.ttf')
+WHISPER_DEFAULT_MODEL = 'mlx-community/whisper-large-v3-mlx'      # word_timing.sh default
 
 # =================================================================================================================
 # CONTRACT with the other team's scripts (CF-A66, commit 5fe7699).  EVERY field / flag name of those scripts that
@@ -134,6 +143,9 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    final go into the delivery receipt
 # -- frame_checks.py cutaways : needs swift/swiftc (Vision OCR); without it the command exits 4 ("OCR is never skipped
 #    silently"), and finalize refuses to start without `swift` on PATH (REQUIRED_TOOLS)
+# -- environment_checks() : tools, python modules, composer packages, fonts, gate lock are checked first by a real run, by
+#    `--check` and by `--preflight` (same function).  ONE intentional difference: `word-timing` (venv / extractor / cached
+#    whisper model of word_timing.sh) is `--preflight`-only; finalize never runs word_timing.sh.
 # -- fetch_broll.py --music : <bed>.source.json {schema "yt-news-v4-music-source", provider, track_id, track_title, url,
 #    query, sha256, fetched_at}; sha256 must equal the bed file's sha256
 # =================================================================================================================
@@ -339,7 +351,9 @@ STOP = threading.Event()          # set by SIGTERM/SIGINT: no child may be start
 
 
 class Terminated(Exception):
-    pass
+    def __init__(self, message='terminated', signum=None):
+        super().__init__(message)
+        self.signum = signum
 
 
 class BudgetExceeded(Exception):
@@ -364,7 +378,7 @@ atexit.register(kill_all)
 def _on_signal(signum, _frame):
     STOP.set()
     kill_all()
-    raise Terminated('terminated by signal %d' % signum)
+    raise Terminated('terminated by signal %d' % signum, signum)
 
 
 class Deadline:
@@ -541,29 +555,76 @@ class Ctx:
 
 
 # ---------------------------------------------------------------- reports: issue summaries
+ISSUE_CODE_KEYS = ('code', 'rule', 'id', 'kind')
+ISSUE_TEXT_KEYS = ('detail', 'message', 'reason')
+ISSUE_TIME_KEYS = ('startSec', 'start_sec', 't', 'sec', 'time', 'start', 'at')
+ISSUE_COMMAND_KEYS = ('command', 'rerun', 'cmd')
+DETAIL_MAX = 300            # free-text details only; a command is never shortened
+OCCURRENCES_SHOWN = 3
+
+
+def _scalar(v):
+    if isinstance(v, bool):
+        return 'true' if v else 'false'
+    if isinstance(v, float):
+        return ('%.2f' % v).rstrip('0').rstrip('.')
+    if isinstance(v, (int, str)):
+        return str(v) if not isinstance(v, str) else (v if len(v) <= 60 else v[:57] + '...')
+    return None
+
+
+def _occurrence(it, skip):
+    """One issue without detail text as a compact `@12.3s key=value ...` (scalar fields only, the time first)."""
+    parts = []
+    t_key = next((k for k in ISSUE_TIME_KEYS if isinstance(it.get(k), (int, float)) and not isinstance(it.get(k), bool)), None)
+    if t_key:
+        parts.append('@%ss' % _scalar(it[t_key]))
+    for k, v in it.items():
+        if k in skip or k == t_key or k in ISSUE_COMMAND_KEYS:
+            continue
+        sv = _scalar(v)
+        if sv is not None:
+            parts.append('%s=%s' % (k, sv))
+    return ' '.join(parts)
+
+
 def summarize_issues(data, limit=3):
+    """Console lines for the issues of a report.  An issue with a detail text prints `code: detail (@where)`; issues without
+    one are grouped by their code/kind and print the count plus the first few occurrences with all their scalar fields
+    (time and measured values), so a bare `- dips` is never printed.  Commands inside an issue are printed in full."""
     out = []
     if not isinstance(data, dict):
         return out
     for key in ('issues', 'errors', 'dips', 'problems'):
         items = data.get(key)
-        if isinstance(items, list):
-            for it in items:
-                if isinstance(it, dict):
-                    code = it.get('code') or it.get('rule') or it.get('id') or key
-                    detail = it.get('detail') or it.get('message') or it.get('reason') or ''
-                    where = it.get('path') or it.get('beat') or it.get('t') or it.get('start')
-                    text = '%s: %s' % (code, detail) if detail else str(code)
-                    if where not in (None, ''):
-                        text += ' (@%s)' % (where,)
-                else:
-                    text = str(it)
-                out.append(text[:300])
-                if len(out) >= limit:
-                    return out
+        if not isinstance(items, list):
+            continue
+        groups = {}
+        for it in items:
+            if not isinstance(it, dict):
+                out.append(str(it)[:DETAIL_MAX])
+                continue
+            code = next((it[k] for k in ISSUE_CODE_KEYS if it.get(k)), key)
+            detail = next((it[k] for k in ISSUE_TEXT_KEYS if it.get(k)), '')
+            for ck in ISSUE_COMMAND_KEYS:
+                if isinstance(it.get(ck), str) and it[ck]:
+                    out.append('rerun (copy this whole line): %s' % it[ck])
+            if detail:
+                text = '%s: %s' % (code, str(detail)[:DETAIL_MAX])
+                where = it.get('path') or it.get('beat') or it.get('t') or it.get('start')
+                if where not in (None, ''):
+                    text += ' (@%s)' % (where,)
+                out.append(text)
+            else:
+                groups.setdefault(str(code), []).append(it)
+        for code, its in groups.items():
+            skip = set(ISSUE_CODE_KEYS) | set(ISSUE_TEXT_KEYS)
+            shown = ['[%s]' % _occurrence(it, skip) for it in its[:OCCURRENCES_SHOWN]]
+            more = '' if len(its) <= OCCURRENCES_SHOWN else ' ... +%d more' % (len(its) - OCCURRENCES_SHOWN)
+            out.append('%s x%d, first %d: %s%s' % (code, len(its), len(shown), ' '.join(shown), more))
     if not out and isinstance(data.get('error'), str):
-        out.append('error: ' + data['error'][:300])
-    return out
+        out.append('error: ' + data['error'][:DETAIL_MAX])
+    return out[:max(limit, 1)] if limit else out
 
 
 # ---------------------------------------------------------------- fresh gates
@@ -1394,8 +1455,9 @@ def summary(records):
                 lines.append('        - %s' % i)
             if r.get('report'):
                 lines.append('        report: %s' % r['report'])
-            if r.get('command'):
-                lines.append('        rerun : %s' % r['command'])
+            if r.get('command'):         # never shortened or wrapped: it is meant to be copied
+                lines.append('        rerun (copy the next line):')
+                lines.append(r['command'])
     return '\n'.join(lines)
 
 
@@ -1459,6 +1521,70 @@ def release_run_lock(lock):
     remove_quiet(lock)
 
 
+CHECK_FILE = {'path': None, 'started_at': None}      # the check.json of THIS invocation (set once the marker is written)
+
+
+def certified_pair(deliver, receipt_p):
+    """True when <deliver> is a regular file that is exactly the mp4 a delivery receipt of ours vouches for."""
+    try:
+        if not stat.S_ISREG(os.lstat(deliver).st_mode):
+            return False
+        data, err = read_json(receipt_p)
+        if err or not isinstance(data, dict) or data.get('schema') != RECEIPT_SCHEMA:
+            return False
+        want = (data.get('delivered') or {}).get('sha256')
+        return valid_sha(want) and sha256_file(Path(deliver)) == want.lower()
+    except OSError:
+        return False
+
+
+def retire_output(deliver, receipt_p):
+    """A run that does not deliver must not leave an mp4 at the deliver path that this run did not certify.
+    -> (moved_to, previous_delivery_kept, error).  An mp4 + receipt pair of an earlier SUCCESSFUL delivery is never deleted:
+    both are renamed to <deliver>.previous[.N] (+ .receipt.json).  Any other regular mp4 is renamed to <deliver>.uncertified[.N];
+    a symlink is removed itself (never its target)."""
+    try:
+        if os.path.islink(deliver):
+            os.unlink(deliver)
+            return None, False, None
+        if not os.path.lexists(deliver) or not stat.S_ISREG(os.lstat(deliver).st_mode):
+            return None, False, None
+        previous = certified_pair(deliver, receipt_p)
+        base, n = str(deliver) + ('.previous' if previous else '.uncertified'), 0
+        target = Path(base)
+        while os.path.lexists(target) or (previous and os.path.lexists(str(target) + '.receipt.json')):
+            n += 1
+            target = Path('%s.%d' % (base, n))
+        os.rename(deliver, target)
+        if previous:
+            os.rename(receipt_p, str(target) + '.receipt.json')
+        return str(target), previous, None
+    except FileNotFoundError:
+        return None, False, None
+    except OSError as e:
+        return None, False, str(e)
+
+
+def write_check_state(status, started_at, **extra):
+    """check.json of this invocation: a `running` marker at the start, a terminal document at the end (or on a signal)."""
+    path = CHECK_FILE['path']
+    if path is None:
+        return
+    body = {'schema': CHECK_SCHEMA, 'version': 1, 'skill': SKILL_DIR.name, 'composition': COMP, 'status': status,
+            'pid': os.getpid(), 'started_at': started_at, 'would_deliver': False}
+    body.update(extra)
+    try:
+        write_json_atomic(path, body)
+    except OSError as e:
+        print('cannot write %s: %s' % (path, e), file=sys.stderr)
+
+
+def run_lock_held_by_other(reports_dir):
+    holder, _err = read_json(Path(reports_dir) / RUN_LOCK_NAME)
+    pid = holder.get('pid') if isinstance(holder, dict) else None
+    return is_int(pid) and pid != os.getpid() and pid_alive(pid)
+
+
 def git_toplevel(path, tools, deadline):
     r = git_run(tools, path, 'rev-parse', '--show-toplevel', deadline=deadline)
     if r.returncode != 0:
@@ -1466,11 +1592,159 @@ def git_toplevel(path, tools, deadline):
     return Path(r.stdout.strip()).resolve()
 
 
+# ---------------------------------------------------------------- integrity + environment (shared by run() and --preflight)
+def check_integrity(args, tools, deadline, state, on_root=None):
+    """The skill's gate files against gates.lock.json (skill + mirror + externals) and git.  -> list of problems.  Fills
+    state: repo_root, lock_mod, mirror, head, lock_sha."""
+    problems = []
+    state.update(lock_mod=None, mirror=[])
+    try:
+        repo_root = git_toplevel(SKILL_DIR, tools, deadline)
+        state['repo_root'] = repo_root
+        if on_root:
+            on_root(repo_root)
+        integ_end = time.monotonic() + min(60.0, max(deadline.remaining(), 0.0))
+        if args.repo_root and Path(args.repo_root).resolve() != repo_root:
+            problems.append('repo-root-mismatch: --repo-root %s is not the skill\'s git top level %s' % (args.repo_root, repo_root))
+        if (repo_root / args.composer).resolve() != (repo_root / 'remotion-composer').resolve():
+            problems.append('composer-mismatch: --composer %s is not %s' % (args.composer, repo_root / 'remotion-composer'))
+        lock_mod = load_sibling('gates_lock')
+        lock_mod.GIT_BIN = tools.get('git') or 'git'
+        lock_mod.NODE_BIN = tools.get('node') or 'node'
+        lock_mod.GIT_TIMEOUT = GIT_TIMEOUT_SEC
+        state['lock_mod'] = lock_mod
+        parent = SKILL_DIR.parent
+        if parent.name == 'skills' and parent.parent.name in ('.claude', '.agents'):
+            other = '.agents' if parent.parent.name == '.claude' else '.claude'
+            state['mirror'] = [parent.parent.parent / other / 'skills' / SKILL_DIR.name]
+        problems += lock_mod.verify(SKILL_DIR, repo_root, state['mirror'], None, integ_end)
+        state['head'] = lock_mod.git_head(repo_root, integ_end)
+        state['lock_sha'] = sha256_file(LOCK_FILE) if LOCK_FILE.is_file() else None
+    except Terminated:
+        raise
+    except Exception as e:  # noqa: BLE001 - fail closed on anything
+        problems.append('git-unavailable: %s' % e if 'git' in str(e).lower() else 'integrity-check-error: %s' % e)
+    return problems
+
+
+def whisper_snapshot(model):
+    """Local HF cache check exactly as word_timing.sh does it (no network, nothing loaded): -> snapshot dir or None, hub dir."""
+    hub = Path(os.environ.get('HF_HUB_CACHE') or (os.environ.get('HF_HOME') or str(Path.home() / '.cache' / 'huggingface')) + '/hub')
+    for snap in sorted((hub / ('models--' + model.replace('/', '--')) / 'snapshots').glob('*')):
+        if (snap / 'config.json').is_file() and ((snap / 'weights.safetensors').exists() or (snap / 'weights.npz').exists()):
+            return snap, hub
+    return None, hub
+
+
+def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=False, word_timing=True):
+    """Fail-closed environment checks, shared by a real run and `finalize.py --preflight`.  Never raises, never touches the
+    network, never loads a model.  -> [{name, status: ok|FAIL|skip, detail, cls}] in the order of the preflight listing.
+    lock_problems: the problems check_integrity() found (None = not checked, an empty list = the lock verified).
+    word_timing: the local-whisper check is the ONE intentional difference between `--preflight` (True) and a real run /
+    `--check` (False): finalize never calls word_timing.sh, so a missing model cache at delivery time must not block an
+    episode whose timing already passed the `timing` / `derived` gates.  Every other check is identical."""
+    out = []
+
+    def add(name, status, detail, cls=0):
+        out.append({'name': name, 'status': status, 'detail': detail, 'cls': cls if status == 'FAIL' else 0})
+
+    # 1. tools (same resolver as the real run)
+    vers = tool_versions(tools) if versions else {}
+    for n in REQUIRED_TOOLS:
+        if tools.get(n):
+            v = (vers.get(n) or {}).get('version')
+            add('tool-' + n, 'ok', '%s%s' % (tools[n], ' (%s)' % v if v else ''))
+        else:
+            add('tool-' + n, 'FAIL', 'not found on PATH%s' % (' (macOS Vision OCR of the frames gate: no OCR = no watermark check)' if n == 'swift' else ''), 4)
+    # 2. python modules (the gates run under this interpreter)
+    missing = []
+    for mod in PY_MODULES:
+        try:
+            importlib.import_module(mod)
+        except Exception as e:  # noqa: BLE001 - any import failure
+            missing.append('%s (%s)' % (mod, str(e).splitlines()[0][:80] if str(e) else type(e).__name__))
+    if missing:
+        add('python-modules', 'FAIL', 'cannot import %s with %s: run finalize with the repo\'s .venv python (%s)'
+            % (', '.join(missing), os.path.realpath(sys.executable), Path(repo_root) / '.venv' / 'bin' / 'python'), 4)
+    else:
+        add('python-modules', 'ok', '%s importable with %s' % (', '.join(PY_MODULES), os.path.realpath(sys.executable)))
+    # 3. composer node_modules
+    composer = (Path(repo_root) / composer_arg).resolve()
+    nm = composer / 'node_modules'
+    if not nm.is_dir():
+        add('composer-node-modules', 'FAIL', '%s does not exist (the render / layout scripts load %s from it; never install packages '
+            'during a run)' % (nm, ', '.join(COMPOSER_PACKAGES)), 4)
+    else:
+        absent = [n for n in COMPOSER_PACKAGES if not (nm / n / 'package.json').is_file()]
+        add('composer-node-modules', 'FAIL' if absent else 'ok',
+            ('%s lacks %s' % (nm, ', '.join(absent))) if absent else '%s has %s' % (nm, ', '.join(COMPOSER_PACKAGES)), 4)
+    # 4. fonts the engine loads
+    absent = [f for f in FONT_FILES if not (composer / 'public' / f).is_file() or (composer / 'public' / f).stat().st_size == 0]
+    add('fonts', 'FAIL' if absent else 'ok',
+        ('missing or empty under %s: %s (the render loads them blocking; never download fonts during a run)' % (composer / 'public', ', '.join(absent)))
+        if absent else '%s under %s' % (', '.join(FONT_FILES), composer / 'public'), 4)
+    # 5. gate lock (verified by check_integrity)
+    if lock_problems is None:
+        add('gate-lock', 'skip', 'not checked')
+    elif lock_problems:
+        tool_only = all(p.startswith('tool-missing:') for p in lock_problems)
+        add('gate-lock', 'FAIL', ' | '.join(lock_problems[:4]) + (' | ...(%d more)' % (len(lock_problems) - 4) if len(lock_problems) > 4 else ''),
+            4 if tool_only else 3)
+    else:
+        add('gate-lock', 'ok', 'lock present; skill, mirror and external files match it and git HEAD')
+    # 6. local speech model for word_timing.sh (--preflight only): file existence only, what the script itself checks before it starts
+    if not word_timing:
+        return out
+    venv = Path(os.environ.get('KARAOKE_VENV') or Path.home() / '.cache' / 'karaoke-subtitle' / 'venv')
+    model = os.environ.get('WHISPER_MODEL') or WHISPER_DEFAULT_MODEL
+    problems = []
+    py = venv / 'bin' / 'python'
+    if not (py.is_file() and os.access(py, os.X_OK)):
+        problems.append('karaoke venv python missing: %s' % py)
+    tool = os.environ.get('EXTRACT_TIMING')
+    if not tool:
+        tool = next((str(c) for c in (SKILL_DIR.parent / 'karaoke_subtitle_v2' / 'scripts' / 'extract_timing.py',
+                                      Path('/Volumes/Ext_SS990Pro/Dev/openMontage-video-production/.claude/skills/karaoke_subtitle_v2/scripts/extract_timing.py'))
+                     if c.is_file()), '')
+    if not (tool and Path(tool).is_file()):
+        problems.append('extract_timing.py not found (set EXTRACT_TIMING)')
+    snap, hub = whisper_snapshot(model)
+    if snap is None:
+        problems.append('speech model %s is not in the local HF cache %s' % (model, hub))
+    if problems:
+        add('word-timing', 'FAIL', '; '.join(problems) + ' (word_timing.sh would exit 4; nothing is downloaded)', 4)
+    else:
+        add('word-timing', 'ok', 'venv %s, %s, model %s cached at %s (not loaded)' % (venv, tool, model, snap))
+    return out
+
+
+def preflight(args):
+    """`finalize.py --preflight`: print one line per check; exit 0 all ok, 3 integrity, 4 tool / dependency missing.
+    A real run and `--check` execute the same environment_checks() except `word-timing` (local whisper for word_timing.sh):
+    that one is preflight-only, on purpose (finalize never calls word_timing.sh)."""
+    deadline = Deadline(TOTAL_BUDGET_SEC)
+    STOP.clear()
+    tools = resolve_tools()
+    state = {'repo_root': None}
+    args.check = False
+    problems = check_integrity(args, tools, deadline, state)
+    repo_root = state['repo_root'] or Path(args.repo_root or '.').resolve()
+    results = environment_checks(repo_root, args.composer, tools, problems, versions=True)
+    for r in results:
+        print('PREFLIGHT %s %s: %s' % (r['status'], r['name'], r['detail']))
+    failed = [r for r in results if r['status'] == 'FAIL']
+    code = 3 if any(r['cls'] == 3 for r in failed) else 4 if failed else 0
+    print('PREFLIGHT PASS (exit 0): %d checks ok' % sum(1 for r in results if r['status'] == 'ok') if code == 0 else
+          'PREFLIGHT FAIL (exit %d): %s' % (code, ', '.join(r['name'] for r in failed)))
+    return code
+
+
 # ---------------------------------------------------------------- main
 def run(args):
     t_start, started = time.monotonic(), now_iso()
     deadline = Deadline(TOTAL_BUDGET_SEC)
     STOP.clear()
+    CHECK_FILE.update(path=None, started_at=started)
     tools = resolve_tools()
     # deliver path: resolve only the parent directory, then lstat BEFORE anything else runs
     lexical = Path(os.path.abspath(args.deliver))
@@ -1490,7 +1764,7 @@ def run(args):
     except OSError as e:
         deliver_problem = 'cannot stat %s: %s' % (deliver, e)
 
-    state = {'moved': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False}
+    state = {'moved': None, 'check_path': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False}
 
     def remaining_msg(phase):
         return 'time budget (%ds) exhausted during phase "%s"' % (TOTAL_BUDGET_SEC, phase)
@@ -1512,7 +1786,7 @@ def run(args):
                 'finished_at': now_iso(), 'seconds': round(time.monotonic() - t_start, 2),
                 'git_head': state['head'], 'lock_sha256': state['lock_sha']}
         if args.check:
-            body.update(schema=CHECK_SCHEMA, version=1, would_deliver=(code == 0), reasons=reasons,
+            body.update(schema=CHECK_SCHEMA, version=1, status='finished', pid=os.getpid(), would_deliver=(code == 0), reasons=reasons,
                         integrity_problems=list(integrity), relevance_status=relevance,
                         gates=[public(r, True) for r in records])
             rdir = None
@@ -1524,32 +1798,21 @@ def run(args):
             if rdir is not None:
                 try:
                     write_json_atomic(rdir / 'check.json', body)
+                    state['check_path'] = rdir / 'check.json'
                 except OSError as e:
                     print('cannot write check.json: %s' % e, file=sys.stderr)
         elif code != 0:
+            previous_kept = False
             if may_touch_deliver():
+                moved, previous_kept, err = retire_output(deliver, receipt_p)
+                state['moved'] = moved
+                if err:
+                    reasons = reasons + ['could not move the pre-existing output aside: %s' % err]
                 for p in (receipt_p, receipt_tmp, partial):
                     remove_quiet(p)
-                try:    # a symlink at the deliver path could open an uncertified mp4: remove the link itself, never its target
-                    if os.path.islink(deliver):
-                        os.unlink(deliver)
-                except OSError:
-                    pass
-                if preexisting and deliver_problem is None:
-                    try:   # a regular mp4 that is still there is NOT certified: move it aside, never delete it
-                        if stat.S_ISREG(os.lstat(deliver).st_mode):
-                            target, n = Path(str(deliver) + '.uncertified'), 0
-                            while os.path.lexists(target):
-                                n += 1
-                                target = Path('%s.uncertified.%d' % (deliver, n))
-                            os.rename(deliver, target)
-                            state['moved'] = str(target)
-                    except FileNotFoundError:
-                        pass
-                    except OSError as e:
-                        reasons = reasons + ['could not move the pre-existing output aside: %s' % e]
             body.update(schema=FAILED_SCHEMA, version=1, reasons=reasons, integrity_problems=list(integrity),
-                        preexisting_output_not_certified=preexisting, preexisting_output_moved_to=state['moved'],
+                        preexisting_output_not_certified=preexisting and not previous_kept,
+                        preexisting_output_moved_to=state['moved'], previous_delivery_preserved=previous_kept,
                         deliver_path_problem=deliver_problem, gates=[public(r, True) for r in records])
             try:
                 write_json_atomic(failed_p, body)
@@ -1564,37 +1827,25 @@ def run(args):
                 lines.append(hint)
             if not args.check:
                 lines.append('  -> see %s' % failed_p)
+        if args.check:
+            cp = state['check_path']
+            lines.append('CHECK RESULT FILE: %s' % (cp if cp else 'not written (the repository or project could not be resolved)'))
+            lines.append('--check never writes %s; the result of this run is only in the file above' % failed_p)
         print('\n'.join(lines))
         return code
 
     # ---- 1. integrity (gate files); repo root is derived from the skill dir, never from the cwd
-    problems = []
-    lock_mod = None
-    mirror = []
-    try:
-        repo_root = git_toplevel(SKILL_DIR, tools, deadline)
-        state['repo_root'] = repo_root
-        integ_end = time.monotonic() + min(60.0, max(deadline.remaining(), 0.0))
-        if args.repo_root and Path(args.repo_root).resolve() != repo_root:
-            problems.append('repo-root-mismatch: --repo-root %s is not the skill\'s git top level %s' % (args.repo_root, repo_root))
-        if (repo_root / args.composer).resolve() != (repo_root / 'remotion-composer').resolve():
-            problems.append('composer-mismatch: --composer %s is not %s' % (args.composer, repo_root / 'remotion-composer'))
-        lock_mod = load_sibling('gates_lock')
-        lock_mod.GIT_BIN = tools.get('git') or 'git'
-        lock_mod.NODE_BIN = tools.get('node') or 'node'
-        lock_mod.GIT_TIMEOUT = GIT_TIMEOUT_SEC
-        parent = SKILL_DIR.parent
-        if parent.name == 'skills' and parent.parent.name in ('.claude', '.agents'):
-            other = '.agents' if parent.parent.name == '.claude' else '.claude'
-            mirror = [parent.parent.parent / other / 'skills' / SKILL_DIR.name]
-        problems += lock_mod.verify(SKILL_DIR, repo_root, mirror, None, integ_end)
-        state['head'] = lock_mod.git_head(repo_root, integ_end)
-        state['lock_sha'] = sha256_file(LOCK_FILE) if LOCK_FILE.is_file() else None
-    except Terminated:
-        raise
-    except Exception as e:  # noqa: BLE001 - fail closed on anything
-        repo_root = state['repo_root'] or Path(args.repo_root or '.').resolve()
-        problems.append('git-unavailable: %s' % e if 'git' in str(e).lower() else 'integrity-check-error: %s' % e)
+    def on_root(root):
+        if args.check:       # the previous check.json must never be mistaken for the result of this run
+            proj0 = Path(args.project)
+            rdir0 = (proj0 if proj0.is_absolute() else root / proj0) / DEFAULT_PATHS['reports']
+            if not run_lock_held_by_other(rdir0):          # never overwrite the file of a run that is still going
+                CHECK_FILE['path'] = rdir0 / 'check.json'
+                write_check_state('running', started)
+
+    problems = check_integrity(args, tools, deadline, state, on_root)
+    repo_root = state['repo_root'] or Path(args.repo_root or '.').resolve()
+    lock_mod, mirror = state['lock_mod'], state['mirror']
     if problems:
         if deadline.expired():
             return finish(4, [], [remaining_msg('integrity')] + ['integrity: %s' % p for p in problems[:5]], problems)
@@ -1603,10 +1854,9 @@ def run(args):
         return finish(3, [], ['integrity: %s' % p for p in problems[:20]], problems, hint=RESTORE_HINT)
     if deadline.expired():
         return finish(4, [], [remaining_msg('integrity')])
-    missing_tools = [n for n in REQUIRED_TOOLS if not tools.get(n)]
-    if missing_tools:
-        return finish(4, [], ['required tool(s) not found on PATH: %s (swift = macOS Vision OCR for the frames gate; '
-                              'nothing was run)' % ', '.join(missing_tools)])
+    bad_env = [r for r in environment_checks(repo_root, args.composer, tools, [], word_timing=False) if r['status'] == 'FAIL']
+    if bad_env:                      # the very checks `finalize.py --preflight` prints: they can never disagree
+        return finish(4, [], ['environment: %s: %s (nothing was run)' % (r['name'], r['detail']) for r in bad_env[:6]])
 
     # ---- context, run lock, deliver path (class 2 problems; nothing has run yet)
     try:
@@ -1626,14 +1876,21 @@ def run(args):
     try:
         state['lock'] = acquire_run_lock(ctx.reports)
     except (BadInput, OSError) as e:
+        if args.check and CHECK_FILE['path'] is not None:      # our own `running` marker must not outlive this invocation
+            write_check_state('finished', started, exit_code=2, reasons=['bad input: %s' % e])
         print('FINALIZE FAIL (exit 2): %s' % e)       # do not touch anything the other run may be using
         return 2
     try:
         if deliver_problem:
             return finish(2, [], ['bad input: ' + deliver_problem])
         if not args.check:
-            for p in (receipt_p, receipt_tmp, failed_p, partial):
+            # no stale failure / partial of an earlier attempt may sit beside the deliver path while this one runs.  A receipt is
+            # kept ONLY when it is still the receipt of the mp4 beside it (a certified earlier delivery is never deleted here;
+            # it is replaced when this run delivers, or renamed to <deliver>.previous when it does not).
+            for p in (receipt_tmp, failed_p, partial):
                 remove_quiet(p)
+            if not certified_pair(deliver, receipt_p):
+                remove_quiet(receipt_p)
         purge_pycache(SKILL_DIR)
         env = gate_env(tools)
 
@@ -1739,53 +1996,76 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
 
 
 def crash(args, exc):
-    """Any unexpected exception becomes exit 4 + FAILED.json (never a bare traceback with exit 1)."""
+    """Any unexpected exception becomes exit 4 + FAILED.json (never a bare traceback with exit 1).  A SIGTERM / SIGINT
+    (Terminated) is an interruption, not an internal error: it gets its own message and `status: terminated` in the file."""
     STOP.set()
     kill_all()
+    interrupted = isinstance(exc, Terminated)
     text = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
-    reasons = ['internal error: %s' % text]
+    if interrupted:
+        what = str(exc) or 'terminated'
+        reasons = ['interrupted: %s; nothing was delivered' % what]
+        message = 'FINALIZE INTERRUPTED (exit 4): %s \u2014 nothing was delivered; re-run the same command' % what
+    else:
+        reasons = ['internal error: %s' % text]
+        message = 'FINALIZE FAIL (exit 4): %s' % reasons[0]
+    status = {'status': 'terminated', 'signal': exc.signum} if interrupted else {'status': 'crashed'}
     try:
         lexical = Path(os.path.abspath(args.deliver))
         deliver = lexical.parent.resolve() / lexical.name
-        if not args.check:
-            for s in ('.receipt.json', '.receipt.json.tmp', '.partial'):
-                remove_quiet(str(deliver) + s)
+        if args.check:
+            write_check_state(status['status'], CHECK_FILE['started_at'], exit_code=4, reasons=reasons,
+                              **({'signal': exc.signum} if interrupted else {}))
+        else:
+            receipt_p = str(deliver) + '.receipt.json'
             body = {'schema': FAILED_SCHEMA, 'version': 1, 'skill': SKILL_DIR.name, 'composition': COMP, 'exit_code': 4,
-                    'reasons': reasons, 'traceback': tail(traceback.format_exc(), 3000), 'gates': [],
-                    'finished_at': now_iso(), 'preexisting_output_not_certified': deliver.is_file(),
-                    'preexisting_output_moved_to': None}
-            if deliver.is_symlink():
-                os.unlink(deliver)          # the link itself; it could open an uncertified mp4
-            elif deliver.is_file():
-                target, n = Path(str(deliver) + '.uncertified'), 0
-                while os.path.lexists(target):
-                    n += 1
-                    target = Path('%s.uncertified.%d' % (deliver, n))
-                os.rename(deliver, target)
-                body['preexisting_output_moved_to'] = str(target)
+                    'reasons': reasons, 'gates': [], 'finished_at': now_iso(),
+                    'preexisting_output_not_certified': deliver.is_file(), 'preexisting_output_moved_to': None,
+                    'previous_delivery_preserved': False, **status}
+            if not interrupted:
+                body['traceback'] = tail(traceback.format_exc(), 3000)
+            moved, kept, err = retire_output(deliver, receipt_p)
+            body.update(preexisting_output_moved_to=moved, previous_delivery_preserved=kept)
+            if kept:
+                body['preexisting_output_not_certified'] = False
+            if err:
+                body['reasons'] = reasons + ['could not move the pre-existing output aside: %s' % err]
+            for s_ in ('.receipt.json', '.receipt.json.tmp', '.partial'):
+                remove_quiet(str(deliver) + s_)
             write_json_atomic(str(deliver) + '.FAILED.json', body)
     except Exception:  # noqa: BLE001
         pass
-    print('FINALIZE FAIL (exit 4): %s' % reasons[0])
+    print(message)
     return 4
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
-    ap.add_argument('--project', required=True)
-    ap.add_argument('--deliver', required=True)
+    ap.add_argument('--project')
+    ap.add_argument('--deliver')
+    ap.add_argument('--preflight', action='store_true',
+                    help='check the environment (tools, python modules, composer node_modules, fonts, gate lock, local whisper) and exit; '
+                         'needs neither --project nor --deliver')
     ap.add_argument('--composer', default='remotion-composer', help='must be <repo root>/remotion-composer')
     ap.add_argument('--repo-root', default=None, help='optional; must equal the skill\'s git top level')
     ap.add_argument('--manifest')
     ap.add_argument('--check', action='store_true')
     args = ap.parse_args(argv)
+    if args.preflight:
+        if args.project or args.deliver or args.check or args.manifest:
+            ap.error('--preflight takes only --composer / --repo-root')
+    elif not (args.project and args.deliver):
+        ap.error('--project and --deliver are required (unless --preflight)')
     old = {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, signal.SIGINT):
             old[sig] = signal.signal(sig, _on_signal)
     try:
-        return run(args)
+        return preflight(args) if args.preflight else run(args)
     except Exception as e:  # noqa: BLE001
+        if args.preflight:
+            print('PREFLIGHT FAIL (exit 4): %s' % ('interrupted: %s' % e if isinstance(e, Terminated) else 'internal error: %s' % e))
+            return 4
         return crash(args, e)
     finally:
         for sig, handler in old.items():

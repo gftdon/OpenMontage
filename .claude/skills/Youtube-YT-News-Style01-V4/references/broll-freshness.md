@@ -11,7 +11,7 @@
 Production command (รันเมื่อได้รับอนุญาตให้เขียน ledger เท่านั้น; `episode.json` เป็น positional แรก — ส่ง `.tsx` = exit 2; `--media-dir`, `--manifest` และ `--cuts` บังคับ; exit 0 = ผ่าน, 1 = พบการซ้ำ/ผิดกฎ, 2 = อินพุตผิด):
 
 ```bash
-python3 .claude/skills/Youtube-YT-News-Style01-V4/scripts/check_broll.py projects/<slug>/artifacts/episode.json \
+$PY "$SKILL/scripts/check_broll.py projects/<slug>/artifacts/episode.json \
   --media-dir <assetDir> --manifest projects/<slug>/assets/broll/_manifest.json \
   --cuts projects/<slug>/artifacts/_cuts.json --public-root remotion-composer/public \
   --projects-root projects --ledger projects/_broll_ledger.json

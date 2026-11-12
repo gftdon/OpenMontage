@@ -2,7 +2,7 @@
 
 format นี้เรื่องที่รายงานคือ **วิดีโอ YouTube** ภาพฝั่งซ้ายมาจาก clip ที่ตัดจากวิดีโอนั้น ส่วนที่เหลือ (avatar morph, geometry, captions, การ์ดข้อความ, mux) ดู `format-spec.md` และ `v4-contract.md` หลักคิดของขั้นนี้: **หาให้เจอว่าต้นฉบับ "แสดง" สิ่งที่บรรทัดนั้น "พูด" ตรงไหน แล้วตัดให้ภาพนั้นอยู่บนจอตลอด beat** ไม่ใช่ตัดตามชื่อ chapter
 
-ทุกคำสั่งในไฟล์นี้อยู่ใต้ `SKILL=.claude/skills/Youtube-YT-News-Style01-V4`, `P=projects/<slug>` และรันจาก root ของ worktree
+ทุกคำสั่งในไฟล์นี้อยู่ใต้ `SKILL=.claude/skills/Youtube-YT-News-Style01-V4`, `P=projects/<slug>`, `PY` (python ที่ import `numpy,PIL,pythainlp` ได้ — นิยามใน SKILL.md ขั้น 0) และรันจาก root ของ worktree
 
 ## 1. Download + chapters + transcript
 
@@ -20,11 +20,11 @@ bash "$SKILL/scripts/yt_survey.sh" --frames-only $P/assets/ytsource/source.mp4 $
 ```bash
 # ไม่มี transcript_timed.json: สร้างแบบ local offline เป็นหน้าต่างละไม่เกิน 300 s (คำสั่งเดียวต้องจบ < 8 นาที) แล้วรวม (`merge` ข้ามไฟล์ `*.done.json` ที่ from-audio เขียนไว้ จึงใช้ `part_*.json` ได้)
 # เรียกซ้ำด้วยอาร์กิวเมนต์เดิมได้ (พิมพ์ "already done")
-python3 "$SKILL/scripts/source_timed.py" from-audio $P/assets/ytsource/source.mp4 --out $P/assets/ytsource/part_0000.json --start 0 --duration 300
+$PY "$SKILL/scripts/source_timed.py" from-audio $P/assets/ytsource/source.mp4 --out $P/assets/ytsource/part_0000.json --start 0 --duration 300
 #   ... --start 300 --out part_0300.json ... จนครบความยาววิดีโอ แล้ว:
-python3 "$SKILL/scripts/source_timed.py" merge $P/assets/ytsource/part_*.json --out $P/assets/ytsource/transcript_timed.json
+$PY "$SKILL/scripts/source_timed.py" merge $P/assets/ytsource/part_*.json --out $P/assets/ytsource/transcript_timed.json
 # ทุกกรณี: transcript ข้อความล้วนสำหรับตรวจที่มาของตัวเลข (ผลจากไฟล์ ไม่ใช่พิมพ์มือ)
-python3 -c "import json,sys;print('\n'.join(r['text'] for r in json.load(open(sys.argv[1]))))" $P/assets/ytsource/transcript_timed.json > $P/assets/ytsource/transcript.txt
+$PY -c "import json,sys;print('\n'.join(r['text'] for r in json.load(open(sys.argv[1]))))" $P/assets/ytsource/transcript_timed.json > $P/assets/ytsource/transcript.txt
 ```
 
 exit 4 = ไม่มี model/venv (ไม่ดาวน์โหลดให้) → ขั้นล้ม รายงานเหตุผล; exit 2 = อินพุตผิด; exit 1 = ล้มอื่น ๆ (`from-audio` ที่เสร็จแล้วรันซ้ำด้วยอาร์กิวเมนต์เดิมจะพิมพ์ "already done")
@@ -75,11 +75,11 @@ mkdir -p remotion-composer/public/<assetDir>/broll && cp $P/assets/ytsource/clip
 
 ## 5. `srcCrop` (เมื่อภาพสำคัญเป็นแค่ส่วนหนึ่งของเฟรมต้นฉบับ)
 
-`srcCrop {x,y,w,h}` เป็นพิกเซลบนเฟรม 1920×1080 ของต้นฉบับ สัดส่วน ≈16:9 (คลาดเกิน 25 % = error, เกิน 10 % = warning) ไม่ใส่ = ใส่ทั้งเฟรม; ใส่แล้วภาพถูก cover ลงกรอบ (V4 ไม่มี punch บน footage)
+**ค่าเริ่มต้นคือไม่ใส่ `srcCrop`** — ช่องภาพเป็น 16:9 เหมือน clip ต้นฉบับ จึงแสดงทั้งเฟรมอยู่แล้ว ใส่เฉพาะเมื่อตั้งใจซูมไปที่ส่วนหนึ่งของเฟรม `srcCrop {x,y,w,h}` เป็นพิกเซลบนเฟรม 1920×1080 ของต้นฉบับ สัดส่วน ≈16:9 (คลาดเกิน 25 % = error, เกิน 10 % = warning); ใส่แล้วภาพถูก cover ลงกรอบ (V4 ไม่มี punch บน footage) **ไม่มี gate ใดตรวจว่ากรอบตัดเนื้อหา/ข้อความของต้นฉบับหรือไม่** (S11 และ `crop-check` ตรวจแค่ขอบเขต สัดส่วน ขนาดต่ำสุด และภาพว่างในกรอบ) ผู้เขียนต้องเปิดเฟรมดูเอง คำสั่งด้านล่างคือขั้นตอนสำหรับกรณีซูมโดยตั้งใจเท่านั้น
 
 ```bash
-python3 "$SKILL/scripts/frame_checks.py" crop-propose --video remotion-composer/public/<assetDir>/broll/<src>.mp4 --in <A> --out <B> --report $P/qc/crop_<src>.json
-python3 "$SKILL/scripts/frame_checks.py" crop-check   --video <เดิม> --in <A> --out <B> --crop x:y:w:h --report $P/qc/cropcheck_<src>.json
+$PY "$SKILL/scripts/frame_checks.py" crop-propose --video remotion-composer/public/<assetDir>/broll/<src>.mp4 --in <A> --out <B> --report $P/qc/crop_<src>.json
+$PY "$SKILL/scripts/frame_checks.py" crop-check   --video <เดิม> --in <A> --out <B> --crop x:y:w:h --report $P/qc/cropcheck_<src>.json
 ```
 
 `crop-propose` เป็นข้อเสนอเท่านั้น: **เปิดเฟรมที่ crop แล้วดู** ว่าสิ่งที่ป้ายอ้างถึงอยู่ครบ ไม่ถูกตัดขอบ และไม่ติดแถบดำ/watermark `--in/--out` = วินาทีภายในไฟล์ clip ช่วงที่แสดงจริง

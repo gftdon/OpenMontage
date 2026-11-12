@@ -74,3 +74,7 @@ THRESHOLDS.update({
 # typo-filler: the episode fails when more than this share of its typo card / item / vs texts has Thai words the script does not support
 # (the provenance-thai test). starting value set by the implementer, not an acceptance threshold -- report to lead.
 THRESHOLDS['typoFillerMaxShare'] = 0.30
+
+# crop-trims-source (lint_content.py, warning only): a beat's srcCrop that trims any edge of the 1920x1080 source frame by MORE than this
+# many percent of that side is listed so the author looks at the frame. starting value proposed by the implementer, accepted by lead 2026-11-12; warning only
+CROP_TRIM_WARN_PERCENT = 2.0

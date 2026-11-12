@@ -34,7 +34,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import episode_data as ed
-from content_thresholds import THRESHOLDS, LEGACY_OVERRIDES
+from content_thresholds import THRESHOLDS, LEGACY_OVERRIDES, CROP_TRIM_WARN_PERCENT
 
 SCHEMA = 'yt-news-v4-content-lint'
 VERSION = 1
@@ -578,6 +578,38 @@ def check_stock(ep, inp, issues):
                                  'relevance verdict is not passing (score=%s readable_text=%s)' % (bad[0].get('score'), bad[0].get('readable_text'))))
 
 
+def check_crop_trims(ep, issues):
+    """crop-trims-source (warn only): a srcCrop that trims an edge of the source frame by more than CROP_TRIM_WARN_PERCENT of that side.
+    A malformed srcCrop is the schema's business: skipped here."""
+    for idx, b in enumerate(ep['beats']):
+        crop = b.get('srcCrop')
+        if not isinstance(crop, dict):
+            continue
+        x, y, w, h = (ed.num(crop.get(k)) for k in ('x', 'y', 'w', 'h'))
+        if None in (x, y, w, h) or w <= 0 or h <= 0:
+            continue
+        trims = {'left': x / ed.SOURCE_W * 100.0, 'right': (ed.SOURCE_W - (x + w)) / ed.SOURCE_W * 100.0,
+                 'top': y / ed.SOURCE_H * 100.0, 'bottom': (ed.SOURCE_H - (y + h)) / ed.SOURCE_H * 100.0}
+        if not any(v > CROP_TRIM_WARN_PERCENT for v in trims.values()):
+            continue
+        t = b['t']
+        at = (ed.num(b.get('from')) or 0.0) + (b['end'] - t) / 2.0        # middle of the shown range, in the source file
+        src = b.get('src')
+        asset_dir = ep.get('assetDir')                                    # top-level assetDir (set by main(); the loader does not carry it)
+        media = ('remotion-composer/public/%s/broll/%s.mp4' % (asset_dir, src)) if isinstance(asset_dir, str) and asset_dir else '%s.mp4' % src
+        pct = ' '.join('%s %.1f%%' % (k, trims[k]) for k in ('left', 'right', 'top', 'bottom'))
+        cmd = 'ffmpeg -ss %.1f -i %s -frames:v 1 -vf "drawbox=x=%s:y=%s:w=%s:h=%s:color=red:t=4" crop_check.jpg' % (
+            at, media, _fmt_num(x), _fmt_num(y), _fmt_num(w), _fmt_num(h))
+        issues.append(_issue('crop-trims-source', 'warn', t, 'srcCrop', src,
+                             'beat %d (t=%.2f) srcCrop trims the source frame of %s: %s (limit %.1f%% per edge); no gate can tell whether the crop cuts content, '
+                             'look at the frame with: %s' % (idx, t, src, pct, CROP_TRIM_WARN_PERCENT, cmd),
+                             trimPercent={k: round(v, 2) for k, v in trims.items()}))
+
+
+def _fmt_num(v):
+    return '%d' % v if float(v).is_integer() else '%g' % v
+
+
 def check_source_reuse(ep, inp, th, issues):
     shown = []
     for b in ep['beats']:
@@ -803,6 +835,7 @@ def lint_content(ep, inp, thresholds=None):
     check_punch(ep, issues, schema_owns=(ep['format'] == 'json-object' and not inp.legacy))
     check_stock(ep, inp, issues)
     check_source_reuse(ep, inp, th, issues)
+    check_crop_trims(ep, issues)
     check_evidence(ep, inp, th, issues, metrics)
     metrics['beats'] = len(ep['beats'])
     metrics['voEnd'] = ep['vo_end']
@@ -869,6 +902,10 @@ def main(argv=None):
         timed = ed.load_timed_transcript(a.source_timed) if a.source_timed else []
         chapters = ed.load_chapters(a.chapters) if a.chapters else []
         ep = ed.load_episode(a.beats, vo_end=a.vo_end, fallback_vo_end=line_starts[-1]['end'])
+        if ep['format'] == 'json-object':
+            asset_dir = json.loads(Path(a.beats).read_text(encoding='utf-8')).get('assetDir')
+            if isinstance(asset_dir, str):
+                ep['assetDir'] = asset_dir
         if ep['format'] == 'json-object':
             if validator.exists():
                 schema_issues, schema_summary = run_schema(a.beats, a.captions, validator)

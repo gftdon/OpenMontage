@@ -18,13 +18,15 @@
 | `beats[].media` + `layout` (pip) | `broll`/`clip` + `stage` = split screen (ค่าเริ่ม) · `clip` + `wide` = หน้าต่าง 16:9 ไม่มีพิธีกร (ใช้ได้กับ source เท่านั้น ห้ามมี `sub`/`stats`) · `typo` + `stage` = การ์ดข้อความ (ต้องมี `typo`: `card`/`summary3`/`final4`/`vs` และห้ามมี `src`/`from`/`srcCrop`/`origin`/`punch`) | schema S05/S08/S14 |
 | `src`, `origin` | ชื่อ clip (prefix `yt_` ⇔ `origin:"source"`, `ai_` ⇔ `ai`) | schema S06/S07 · `lint_content.py` (`stock-unverified`) |
 | `from` | วินาทีที่เริ่มเล่นภายในไฟล์ที่ตัดแล้ว (ไม่ใช่เวลาในวิดีโอ YouTube ต้นฉบับ) | schema **S09**: `from` + ความยาว beat + **หางของภาพเก่าตอนเปลี่ยนฉาก (≤ 0.92 s)** ต้องไม่เกินความยาว clip (engine หัก 2 เฟรม) — clip ต้นฉบับเกิน = error (วน/ค้างเฟรมสุดท้าย), stock/ai เกิน = warning (วนกลับต้นคลิป); ใช้ `src` ซ้ำได้เฉพาะ clip ต้นฉบับที่ช่วงเล่นไม่ซ้อนกัน = **S10** · `frame_checks.py` (`source-loop`, `from-out-of-range`) |
-| `srcCrop` | `{x,y,w,h}` จำนวนเต็ม พิกเซลบนเฟรม 1920×1080 ของต้นฉบับ (`x+w` ≤ 1920, `y+h` ≤ 1080, สัดส่วน ~16:9: คลาด > 25 % = error, > 10 % = warning); เฉพาะ beat `broll`/`clip` | schema S11 · `frame_checks.py crop-check` |
+| `srcCrop` | `{x,y,w,h}` จำนวนเต็ม พิกเซลบนเฟรม 1920×1080 ของต้นฉบับ (`x+w` ≤ 1920, `y+h` ≤ 1080, สัดส่วน ~16:9: คลาด > 25 % = error, > 10 % = warning); เฉพาะ beat `broll`/`clip`; **default: omit; see authoring rule** (SKILL.md ขั้น 4) | schema S11 · `frame_checks.py crop-check` |
 | `headline`, `sub`, `kicker` | ข้อความของ beat (pip ต้องมี `headline`; `wide` ห้ามมี `sub`) | schema S04/S17 (warning งบ grapheme ตามชนิดฉาก) · `lint_content.py` (provenance) |
 | `stats[]`, `lower`, `cards[]`, `items[]`, `vs` | ทุกเวลา `at` มาจาก `cue_times.py` เท่านั้น; `stats` ≤ 3 ชิ้น (S13: `at` อยู่ใน beat, ข้ามเขต beat ได้ ≤ 1 ครั้ง, หายก่อน `ctaT`, ไม่โชว์ตอน `wide`); `lower` เฉพาะ beat `full` (S15); `summary3` = 3 items, `final4` = 4 items + `sub` (S14) | schema S13-S15 (+ S18 warning ความกว้างแถว chip) · `lint_content.py` (`card-timing-*`) |
 | `punch[]` | `{at,z,fx?,fy?}` (z 1..1.6) ใช้ได้เฉพาะ beat `mode:"full"` (พิธีกร) — ห้ามบน footage/การ์ด, `at` อยู่ใน beat และเพิ่มขึ้น, ห้ามที่/หลัง `ctaT` | schema S12 (`lint_content.py` รายงานซ้ำเป็น `schema`) |
 | (ไม่มีแล้วใน V4) | `captionLane`, `chrome`, `layout:"full"` (ใช้ `wide`), `cam`, `clipFit`, `src` บน typo beat, punch บน footage, ตาราง `BROLL_DUR` / `BEATS` ใน TSX, caption TS module (`caption_join.mjs --module`) | schema (unknown key = ผิด) · engine อ่านแต่ `episode.json` + captions JSON |
 
 **layout gate (`qc_layout.mjs`) ข้อควรรู้:** ป้าย `credit` (`SOURCE · …` บน beat ต้นฉบับ) และ `ai-label` (`ภาพประกอบ AI`) ต้องมีเมื่อ beat นิ่งแล้ว — ยอมให้ขึ้นช้าได้ ≤ 0.55 s หลัง beat เริ่ม · `text-alpha` ดูแค่ alpha ของ **สีตัวอักษร** (ไม่ใช่ opacity ขององค์ประกอบ) · หน้าพิธีกรตรวจจากพิกเซลด้วย `avatarFaceBox` (`face-text`: ตัวอักษรทับหน้า, `face-backing`: พื้นรองทับหน้า)
+
+Empty-backing sweep (qc_layout.mjs): inside a transition window, a backing painted above the presenter fails when its empty regions with short side ≥ 12 px (avatarEmptyMinShortSide) total ≥ 1500 px² with long side ≥ 24 px for more than 0.3 s.
 
 ## Unattended policy (V4, มีผลเหนือข้อความด้านล่างเมื่อขัดกัน)
 
@@ -163,3 +165,8 @@ Punch is allowed only on `mode:"full"` beats (never `pip`, never AI/stock/typogr
 Text fields are explicit `data-qc-field`, `data-qc-role` logical units. Caption words share one field, preventing false collisions within a phrase. The QC-only probe waits for Kanit fonts, then measures real Range rects (including Thai marks), cumulative opacity and clipped ancestors after layout. Missing data fails, not skips. Crossfade exemption is limited to previous/current versions of the same logical field; the reference keeps bounded motion but does not crossfade overlapping text fields and needs no exemption.
 
 Acceptance uses actual video in stills, never a blank-media substitute. Sampling covers every beat boundary/settled/mid/last, captions, hard punch, lower-third and CTA. Delivery stills at 9/89/172s are extra examples, not a replacement for the plan.
+
+## สิ่งที่ด่านไม่รับประกัน
+
+- An empty strip of backing thinner than 12 px over the presenter (for example chip padding) is not detected.
+- The gates do not know whether `srcCrop` cuts source content or on-screen text: the author must extract and look at one frame of the clip inside the shown range (same rule as SKILL.md step 4); `static-hold`, `crop-check` and the layout gate do not catch a crop that cuts content.

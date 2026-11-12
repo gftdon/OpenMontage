@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -211,8 +212,34 @@ def make_videos(proj, visual_args=None, pix_fmt='yuv420p'):
     ffmpeg('-i', str(proj / 'renders' / 'visual.mp4'), '-c:v', 'copy', str(proj / 'renders' / 'final.mp4'))
 
 
+ENV_BACKUP = {}
+ENV_DIR = []
+
+
 def setUpModule():
     global PROJECT_TEMPLATE
+    # a stubbed environment for the environment checks every real run starts with: stand-ins for numpy / PIL / pythainlp
+    # (appended to sys.path and PYTHONPATH, so a real install still wins), a fake karaoke venv, extract_timing.py and HF cache
+    env = Path(tempfile.mkdtemp(prefix='finalize-env-')).resolve()
+    ENV_DIR.append(env)
+    for mod in ('numpy', 'PIL', 'pythainlp'):
+        (env / 'stubmods' / mod).mkdir(parents=True)
+        (env / 'stubmods' / mod / '__init__.py').write_text('')
+    sys.path.append(str(env / 'stubmods'))
+    (env / 'venv' / 'bin').mkdir(parents=True)
+    (env / 'venv' / 'bin' / 'python').write_text('#!/bin/sh\n')
+    (env / 'venv' / 'bin' / 'python').chmod(0o755)
+    (env / 'extract_timing.py').write_text('# stub\n')
+    snap = env / 'hub' / 'models--mlx-community--whisper-large-v3-mlx' / 'snapshots' / 'abc'
+    snap.mkdir(parents=True)
+    (snap / 'config.json').write_text('{}')
+    (snap / 'weights.safetensors').write_bytes(b'w')
+    for k, v in (('PYTHONPATH', os.pathsep.join(x for x in (os.environ.get('PYTHONPATH'), str(env / 'stubmods')) if x)),
+                 ('KARAOKE_VENV', str(env / 'venv')), ('EXTRACT_TIMING', str(env / 'extract_timing.py')), ('HF_HUB_CACHE', str(env / 'hub'))):
+        ENV_BACKUP[k] = os.environ.get(k)
+        os.environ[k] = v
+    ENV_BACKUP.pop('WHISPER_MODEL', None)
+    os.environ.pop('WHISPER_MODEL', None)
     if not (HAVE_FFMPEG and HAVE_NODE):
         return
     t = Path(tempfile.mkdtemp(prefix='finalize-proj-'))
@@ -236,6 +263,15 @@ def setUpModule():
 
 
 def tearDownModule():
+    for k, v in ENV_BACKUP.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    for env in ENV_DIR:
+        if str(env / 'stubmods') in sys.path:
+            sys.path.remove(str(env / 'stubmods'))
+        shutil.rmtree(env, ignore_errors=True)
     if PROJECT_TEMPLATE:
         shutil.rmtree(PROJECT_TEMPLATE, ignore_errors=True)
     # nothing may be written into the locked skill tree (a stray tests/projects/... once ended up there)
@@ -358,6 +394,12 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     (repo / 'remotion-composer' / 'public' / 'ep1' / 'broll').mkdir(parents=True)
     (repo / 'remotion-composer' / 'public' / 'ep1' / 'broll' / 'a.mp4').write_bytes(b'x')
     (repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4').write_bytes(b'AVATAR')
+    (repo / 'remotion-composer' / 'public' / 'fonts').mkdir(parents=True)
+    for font in ('Kanit-Bold.ttf', 'Kanit-ExtraBold.ttf'):
+        (repo / 'remotion-composer' / 'public' / 'fonts' / font).write_bytes(b'FONT')
+    for pkg in ('remotion', '@remotion/bundler', '@remotion/renderer'):
+        (repo / 'remotion-composer' / 'node_modules' / pkg).mkdir(parents=True)
+        (repo / 'remotion-composer' / 'node_modules' / pkg / 'package.json').write_text('{}')
     write_receipts(repo, name=name)
     return repo
 
@@ -548,8 +590,11 @@ class HappyAndGateTests(FinalizeBase):
             self.assertEqual(2, r.returncode)
         self.assertFalse(self.deliver.exists())
         src = (SCRIPTS / 'finalize.py').read_text()
-        self.assertNotIn('os.environ.get', src)
         self.assertNotIn('getenv', src)
+        # the only environment variables read are the ones word_timing.sh itself honours (its venv / extractor / model cache),
+        # for the word-timing PRE-FLIGHT check; none of them can skip, weaken or reconfigure a gate
+        names = set(re.findall(r"os\.environ\.get\('([A-Z_]+)'", src))
+        self.assertEqual({'HF_HUB_CACHE', 'HF_HOME', 'KARAOKE_VENV', 'WHISPER_MODEL', 'EXTRACT_TIMING'}, names)
 
     def test_gate_exit_1_fails_but_all_gates_run(self):
         self.behavior(lint_content={'exit': 1, 'pass': False})
@@ -1675,10 +1720,14 @@ class RealValidatorContractTests(FinalizeBase):
         self.assertTrue({'entry-drift', 'entry-registration', 'entry-closure'} <= ids, ids)
         self.assertNotIn('root-registration', ids)
 
-    def test_real_integrity_without_composer_public_is_class_2_for_the_schema_gate(self):
+    def test_without_composer_public_the_run_stops_at_the_environment_check_exit_4(self):
+        # public/ (media + fonts) is git-ignored and only exists in the checkout that started the work: the fonts check comes
+        # first, so the schema gate's S07-file rule is never reached with a missing public directory
         shutil.rmtree(self.repo / 'remotion-composer' / 'public')
-        g = self.check_gates()['schema']
-        self.assertEqual('bad-input', g['status'])
+        self.assertEqual(4, self.run_fin('--check'), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        self.assertTrue(any('environment: fonts' in r for r in doc['reasons']), doc['reasons'])
+        self.assertEqual([], doc['gates'])
 
 
 class ScriptGateTests(FinalizeBase):
@@ -2121,6 +2170,479 @@ class SkillTreeCoverageTests(FinalizeBase):
             _gl.build_lock(self.skill, self.repo, [], required=EXTERNAL_PATHS)
 
 
+REAL_DIPS = [  # the exact shape qc_final_pixels.mjs findDarkDips() writes into final-pixels.json
+    {'startFrame': 21, 'endFrame': 22, 'startSec': 0.84, 'runFrames': 2, 'minY': 3.1, 'beforeY': 40.25, 'recoveredToY': 38.5, 'kind': 'flash'},
+    {'startFrame': 150, 'endFrame': 153, 'startSec': 6, 'runFrames': 4, 'minY': 2, 'beforeY': 9.5, 'recoveredToY': 30, 'kind': 'dark-entry'},
+    {'startFrame': 300, 'endFrame': 301, 'startSec': 12, 'runFrames': 2, 'minY': 1, 'beforeY': 33, 'recoveredToY': 31, 'kind': 'flash'},
+    {'startFrame': 400, 'endFrame': 401, 'startSec': 16, 'runFrames': 2, 'minY': 1, 'beforeY': 33, 'recoveredToY': 31, 'kind': 'flash'},
+    {'startFrame': 500, 'endFrame': 501, 'startSec': 20, 'runFrames': 2, 'minY': 1, 'beforeY': 33, 'recoveredToY': 31, 'kind': 'flash'},
+]
+
+
+class ConsoleSummaryTests(FinalizeBase):
+    def test_final_pixels_failure_prints_kind_count_first_occurrences_with_time_and_values_and_the_report_path(self):
+        self.behavior(qc_final_pixels={'exit': 1, 'pass': False, 'certified': False, 'dips': REAL_DIPS})
+        self.assertEqual(1, self.run_fin(), self.out)
+        lines = [l.strip() for l in self.out.splitlines()]
+        self.assertNotIn('- dips', lines)
+        flash = next(l for l in lines if l.startswith('- flash x4'))
+        self.assertIn('first 3', flash)
+        self.assertIn('[@0.84s startFrame=21 endFrame=22 runFrames=2 minY=3.1 beforeY=40.25 recoveredToY=38.5]', flash)
+        self.assertIn('[@12s ', flash)
+        self.assertIn('+1 more', flash)
+        self.assertNotIn('@20s', flash)                    # only the first three occurrences
+        entry = next(l for l in lines if l.startswith('- dark-entry x1'))
+        self.assertIn('[@6s startFrame=150 endFrame=153 runFrames=4 minY=2 beforeY=9.5 recoveredToY=30]', entry)
+        self.assertTrue(any(l.startswith('report:') and 'qc/finalize/final-pixels/final-pixels.json' in l for l in lines), self.out)
+        g = self.gate(self.failed(), 'final-pixels')
+        self.assertEqual(2, len(g['issues']))
+
+    def test_issues_without_detail_print_their_scalar_fields_not_only_the_code(self):
+        self.behavior(lint_beats={'exit': 1, 'pass': False, 'issues': [
+            {'code': 'hold', 't': 3.2, 'seconds': 9.5, 'max': 6, 'nested': {'a': 1}}, {'code': 'hold', 'beat': 'S4', 'seconds': 8}]})
+        self.assertEqual(1, self.run_fin(), self.out)
+        line = next(l.strip() for l in self.out.splitlines() if l.strip().startswith('- hold x2'))
+        self.assertIn('[@3.2s seconds=9.5 max=6]', line)           # nested objects are not scalars: skipped
+        self.assertIn('[beat=S4 seconds=8]', line)
+
+    def test_an_issue_with_detail_keeps_its_one_line_and_truncates_only_the_free_text(self):
+        m = self.module()
+        long_detail = 'x' * 500
+        out = m.summarize_issues({'issues': [{'code': 'c', 'detail': long_detail, 't': 1.5}]})
+        self.assertEqual(1, len(out))
+        self.assertTrue(out[0].startswith('c: ' + 'x' * 300))
+        self.assertNotIn('x' * 301, out[0])
+        self.assertTrue(out[0].endswith('(@1.5)'))                 # the location survives the truncation
+
+    def test_a_command_is_never_truncated_in_the_fail_output(self):
+        m = self.module()
+        command = 'node ' + ' '.join('--flag-%d=/very/long/path/segment/%s' % (i, 'z' * 20) for i in range(40))
+        self.assertGreater(len(command), 900)
+        rec = m.record({'name': 'g'}, 'fail', 1, 'boom', report='qc/finalize/g.json', command=command)
+        text = m.summary([rec])
+        self.assertIn('\n' + command + '\n', text + '\n')          # on its own line, whole
+        self.assertIn('rerun (copy the next line):', text)
+        out = m.summarize_issues({'issues': [{'code': 'c', 'detail': 'd', 'command': command}]}, limit=5)
+        self.assertIn('rerun (copy this whole line): ' + command, out)
+
+    def test_real_gate_output_carries_the_whole_command(self):
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(1, self.run_fin(), self.out)
+        cmd = self.gate(self.failed(), 'beats')['command']
+        self.assertIn('\n' + cmd + '\n', self.out)
+
+
+class CheckStateAndInterruptTests(FinalizeBase):
+    def popen(self, *extra):
+        return subprocess.Popen([sys.executable, '-B', str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1',
+                                 '--deliver', str(self.deliver), *extra], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def wait_for(self, path, secs=15):
+        for _ in range(int(secs * 10)):
+            if Path(path).exists():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def sleepers(self):
+        for stem in ('frame_checks', 'measure_loudness', 'timing_check'):
+            (self.repo / '.stub_logs' / (stem + '.pid')).unlink(missing_ok=True)      # a pid file of an earlier run must not fool wait_for
+        self.behavior(**{n: {'sleep': 25} for n in ('frame_checks', 'measure_loudness', 'timing_check')})
+
+    def test_check_replaces_a_stale_check_json_with_a_running_marker_then_a_terminated_state(self):
+        self.rdir.mkdir(parents=True, exist_ok=True)
+        (self.rdir / 'check.json').write_text(json.dumps({'status': 'finished', 'would_deliver': True, 'exit_code': 0}))
+        self.sleepers()
+        p = self.popen('--check')
+        self.assertTrue(self.wait_for(self.repo / '.stub_logs' / 'frame_checks.pid'), 'the gates did not start')
+        marker = json.loads((self.rdir / 'check.json').read_text())
+        self.assertEqual('running', marker['status'])
+        self.assertEqual(p.pid, marker['pid'])
+        self.assertIn('started_at', marker)
+        self.assertIs(False, marker['would_deliver'])
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(4, p.returncode, out + err)
+        state = json.loads((self.rdir / 'check.json').read_text())
+        self.assertEqual('terminated', state['status'])
+        self.assertEqual(signal.SIGTERM, state['signal'])
+        self.assertEqual(4, state['exit_code'])
+        self.assertIs(False, state['would_deliver'])
+        self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())      # --check never writes it, not even when interrupted
+
+    def test_sigint_is_reported_as_an_interruption_too(self):
+        self.sleepers()
+        p = self.popen('--check')
+        self.assertTrue(self.wait_for(self.repo / '.stub_logs' / 'frame_checks.pid'))
+        p.send_signal(signal.SIGINT)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(4, p.returncode, out + err)
+        self.assertEqual(signal.SIGINT, json.loads((self.rdir / 'check.json').read_text())['signal'])
+
+    def test_signal_message_is_an_interruption_not_an_internal_error(self):
+        self.sleepers()
+        p = self.popen()
+        self.assertTrue(self.wait_for(self.repo / '.stub_logs' / 'frame_checks.pid'))
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(4, p.returncode, out + err)
+        self.assertIn('FINALIZE INTERRUPTED (exit 4): terminated by signal 15 \u2014 nothing was delivered; re-run the same command', out)
+        self.assertNotIn('internal error', out)
+        f = self.failed()
+        self.assertEqual('terminated', f['status'])
+        self.assertEqual(signal.SIGTERM, f['signal'])
+        self.assertNotIn('traceback', f)
+
+    def test_check_mode_finishes_with_the_result_path_and_the_no_failed_json_statement(self):
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(1, self.run_fin('--check'), self.out)
+        check = self.rdir / 'check.json'
+        self.assertIn('CHECK RESULT FILE: %s' % check, self.out)
+        self.assertIn('--check never writes %s' % (str(self.deliver) + '.FAILED.json'), self.out)
+        self.assertEqual('finished', json.loads(check.read_text())['status'])
+        self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
+        self.assertTrue(self.out.rstrip().splitlines()[-2].startswith('CHECK RESULT FILE'))
+
+    def test_check_pass_also_names_the_result_file(self):
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        self.assertIn('CHECK RESULT FILE: %s' % (self.rdir / 'check.json'), self.out)
+
+    def test_an_integrity_failure_in_check_mode_overwrites_a_stale_check_json_and_says_where_it_is(self):
+        self.rdir.mkdir(parents=True, exist_ok=True)
+        (self.rdir / 'check.json').write_text(json.dumps({'status': 'finished', 'would_deliver': True, 'exit_code': 0}))
+        (self.skill / 'scripts' / 'lint_beats.py').write_text('import sys; sys.exit(0)\n')
+        self.assertEqual(3, self.run_fin('--check'), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        self.assertEqual((3, False), (doc['exit_code'], doc['would_deliver']))
+        self.assertIn('CHECK RESULT FILE: %s' % (self.rdir / 'check.json'), self.out)
+
+    def test_a_live_run_keeps_its_own_check_json_a_second_invocation_does_not_clobber_it(self):
+        self.sleepers()
+        first = self.popen('--check')
+        self.assertTrue(self.wait_for(self.repo / '.stub_logs' / 'frame_checks.pid'))
+        before = (self.rdir / 'check.json').read_text()
+        second = self.popen('--check')
+        out, err = second.communicate(timeout=30)
+        self.assertEqual(2, second.returncode, out + err)
+        self.assertEqual(first.pid, json.loads((self.rdir / 'check.json').read_text())['pid'])
+        self.assertEqual(before, (self.rdir / 'check.json').read_text())
+        first.send_signal(signal.SIGTERM)
+        first.communicate(timeout=30)
+
+
+class StaleDeliveryFilesTests(CheckStateAndInterruptTests):
+    """A real run never leaves the result of an earlier attempt next to the deliver path while it runs."""
+
+    def deliver_once(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        return self.deliver.read_bytes(), json.loads(Path(str(self.deliver) + '.receipt.json').read_text())
+
+    def test_stale_failed_json_and_partials_are_gone_while_the_new_attempt_runs(self):
+        self.deliver.parent.mkdir(parents=True)
+        Path(str(self.deliver) + '.FAILED.json').write_text('{"exit_code": 1, "old": true}')
+        Path(str(self.deliver) + '.partial').write_bytes(b'junk')
+        Path(str(self.deliver) + '.receipt.json.tmp').write_text('{}')
+        Path(str(self.deliver) + '.receipt.json').write_text('{"orphan": true}')           # a receipt of nothing
+        self.sleepers()
+        p = self.popen()
+        self.assertTrue(self.wait_for(self.repo / '.stub_logs' / 'frame_checks.pid'))
+        for suffix in ('.FAILED.json', '.partial', '.receipt.json.tmp', '.receipt.json'):
+            self.assertFalse(Path(str(self.deliver) + suffix).exists(), suffix)
+        p.send_signal(signal.SIGTERM)
+        p.communicate(timeout=30)
+        self.assertEqual('terminated', self.failed()['status'])
+
+    def test_a_certified_earlier_delivery_survives_while_the_new_attempt_runs_and_is_preserved_when_it_is_interrupted(self):
+        old_bytes, old_receipt = self.deliver_once()
+        self.sleepers()
+        p = self.popen()
+        self.assertTrue(self.wait_for(self.repo / '.stub_logs' / 'frame_checks.pid'))
+        self.assertEqual(old_bytes, self.deliver.read_bytes())                              # untouched during the run
+        self.assertEqual(old_receipt, json.loads(Path(str(self.deliver) + '.receipt.json').read_text()))
+        self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
+        p.send_signal(signal.SIGTERM)
+        p.communicate(timeout=30)
+        # interrupted: the old pair is renamed, never deleted, and the deliver path holds no mp4 that this run did not certify
+        self.assertFalse(self.deliver.exists())
+        self.assertFalse(Path(str(self.deliver) + '.receipt.json').exists())
+        prev = Path(str(self.deliver) + '.previous')
+        self.assertEqual(old_bytes, prev.read_bytes())
+        self.assertEqual(old_receipt, json.loads(Path(str(prev) + '.receipt.json').read_text()))
+        f = self.failed()
+        self.assertEqual(str(prev), f['preexisting_output_moved_to'])
+        self.assertIs(True, f['previous_delivery_preserved'])
+        self.assertIs(False, f['preexisting_output_not_certified'])
+
+    def test_a_failed_attempt_preserves_the_certified_pair_as_previous_never_deletes_it(self):
+        old_bytes, old_receipt = self.deliver_once()
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertFalse(self.deliver.exists())
+        prev = Path(str(self.deliver) + '.previous')
+        self.assertEqual(old_bytes, prev.read_bytes())
+        self.assertEqual(old_receipt, json.loads(Path(str(prev) + '.receipt.json').read_text()))
+        self.assertIs(True, self.failed()['previous_delivery_preserved'])
+        # a second failure never overwrites the first preserved pair
+        self.behavior(lint_beats={'exit': 0, 'pass': True})
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertEqual(old_bytes, prev.read_bytes())
+        self.assertTrue(Path(str(self.deliver) + '.previous.1').exists())
+        self.assertTrue(Path(str(self.deliver) + '.previous.1.receipt.json').exists())
+
+    def test_a_successful_attempt_replaces_the_certified_pair_with_the_new_pair(self):
+        old_bytes, old_receipt = self.deliver_once()
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertEqual(old_bytes, self.deliver.read_bytes())
+        self.assertFalse(Path(str(self.deliver) + '.previous').exists())
+        new_receipt = json.loads(Path(str(self.deliver) + '.receipt.json').read_text())
+        self.assertEqual(old_receipt['delivered']['sha256'], new_receipt['delivered']['sha256'])
+        self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
+
+    def test_an_mp4_whose_receipt_does_not_match_is_not_certified_and_goes_to_uncertified(self):
+        self.deliver_once()
+        self.deliver.write_bytes(b'SOMETHING ELSE')                      # the receipt now vouches for another file
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertEqual(b'SOMETHING ELSE', Path(str(self.deliver) + '.uncertified').read_bytes())
+        self.assertFalse(Path(str(self.deliver) + '.previous').exists())
+        self.assertFalse(Path(str(self.deliver) + '.receipt.json').exists())
+        self.assertIs(False, self.failed()['previous_delivery_preserved'])
+
+
+class PreflightBase(FinalizeBase):
+    """Helpers for the environment-check tests."""
+
+    def run_pre(self, *extra, patch=None):
+        m = self.module()
+        if patch:
+            patch(m)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = m.main(['--preflight', *extra])
+        self.out = buf.getvalue()
+        return code
+
+    def lines(self):
+        return [l for l in self.out.splitlines() if l.startswith('PREFLIGHT ')]
+
+    def line(self, status, name):
+        found = [l for l in self.lines() if l.startswith('PREFLIGHT %s %s:' % (status, name))]
+        self.assertEqual(1, len(found), (status, name, self.out))
+        return found[0]
+
+    def without_tool(self, name):
+        def patch(m):
+            real = m.resolve_tools
+            m.resolve_tools = lambda: dict(real(), **{name: None})
+        return patch
+
+
+
+class PreflightTests(PreflightBase):
+    """`finalize.py --preflight`: the environment checks a real run starts with, printed one line per check."""
+
+    def test_all_ok_exit_0_one_line_per_check_and_no_project_or_deliver_needed(self):
+        self.assertEqual(0, self.run_pre(), self.out)
+        names = ['tool-node', 'tool-ffmpeg', 'tool-ffprobe', 'tool-git', 'tool-swift', 'python-modules', 'composer-node-modules',
+                 'fonts', 'gate-lock', 'word-timing']
+        got = [l.split(' ', 3)[1:3] for l in self.lines()[:-1]]
+        self.assertEqual([['ok', n + ':'] for n in names], got)
+        self.assertTrue(self.lines()[-1].startswith('PREFLIGHT PASS (exit 0)'), self.out)
+        self.assertNotIn('FAIL', self.out)
+        for n in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift'):
+            self.assertIn(os.path.realpath(shutil.which(n)), self.line('ok', 'tool-' + n))          # realpath and version
+        self.assertIn(os.path.realpath(sys.executable), self.line('ok', 'python-modules'))
+        self.assertIn('not loaded', self.line('ok', 'word-timing'))
+        # nothing is written: no reports directory, no check.json, no lock file of a run
+        self.assertFalse((self.proj / 'qc' / 'finalize' / 'check.json').exists())
+
+    def test_each_missing_tool_is_exit_4(self):
+        for name in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift'):
+            code = self.run_pre(patch=self.without_tool(name))
+            if name in ('node', 'git'):
+                self.assertNotEqual(0, code, name)                  # the lock / list command cannot run without them either
+                continue
+            self.assertEqual(4, code, (name, self.out))
+            self.assertIn('not found on PATH', self.line('FAIL', 'tool-' + name))
+            self.assertTrue(self.lines()[-1].startswith('PREFLIGHT FAIL (exit 4)'), self.out)
+
+    def test_missing_node_is_exit_4_not_ok(self):
+        self.assertEqual(4, self.run_pre(patch=self.without_tool('node')), self.out)
+        self.line('FAIL', 'tool-node')
+
+    def test_python_modules_missing_names_the_interpreter_and_the_venv_hint(self):
+        def patch(m):
+            m.PY_MODULES = ('numpy', 'no_such_module_xyz')
+        self.assertEqual(4, self.run_pre(patch=patch), self.out)
+        line = self.line('FAIL', 'python-modules')
+        self.assertIn('no_such_module_xyz', line)
+        self.assertNotIn('cannot import numpy', line)
+        self.assertIn(os.path.realpath(sys.executable), line)
+        self.assertIn("run finalize with the repo's .venv python", line)
+
+    def test_composer_node_modules_missing_or_incomplete(self):
+        nm = self.repo / 'remotion-composer' / 'node_modules'
+        shutil.rmtree(nm / '@remotion' / 'renderer')
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertIn('@remotion/renderer', self.line('FAIL', 'composer-node-modules'))
+        shutil.rmtree(nm)
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertIn('does not exist', self.line('FAIL', 'composer-node-modules'))
+
+    def test_every_package_the_engine_scripts_load_lazily_is_required(self):
+        m = self.module()
+        self.assertEqual(('remotion', '@remotion/bundler', '@remotion/renderer'), m.COMPOSER_PACKAGES)
+        text = (SCRIPTS / 'render_episode.mjs').read_text() + (SCRIPTS / 'qc_layout.mjs').read_text()
+        for pkg in ('@remotion/bundler', '@remotion/renderer'):
+            self.assertIn("'%s'" % pkg, text)                       # read from the engine scripts: still what they load
+
+    def test_fonts_missing_or_empty(self):
+        fonts = self.repo / 'remotion-composer' / 'public' / 'fonts'
+        (fonts / 'Kanit-ExtraBold.ttf').write_bytes(b'')
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertIn('Kanit-ExtraBold.ttf', self.line('FAIL', 'fonts'))
+        self.assertNotIn('Kanit-Bold.ttf,', self.line('FAIL', 'fonts'))
+        shutil.rmtree(fonts)
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertIn('Kanit-Bold.ttf', self.line('FAIL', 'fonts'))
+
+    def test_the_font_list_is_what_the_engine_loads(self):
+        engine = (SCRIPTS.parent.parent.parent.parent / 'remotion-composer' / 'src' / 'YtNewsStyle01V4.tsx')
+        if not engine.is_file():
+            self.skipTest('engine file not in this checkout')
+        for font in self.module().FONT_FILES:
+            self.assertIn('"%s"' % font, engine.read_text())
+
+    def test_missing_lock_is_a_failure_here_too_exit_3(self):
+        (self.skill / 'scripts' / 'gates.lock.json').unlink()
+        self.assertEqual(3, self.run_pre(), self.out)
+        self.assertIn('lock-missing', self.line('FAIL', 'gate-lock'))
+
+    def test_a_tampered_skill_file_or_external_is_exit_3(self):
+        (self.skill / 'scripts' / 'lint_beats.py').write_text('import sys; sys.exit(0)\n')
+        self.assertEqual(3, self.run_pre(), self.out)
+        self.assertIn('file-changed', self.line('FAIL', 'gate-lock'))
+        (self.skill / 'scripts' / 'lint_beats.py').write_text(
+            (self.repo / '.agents' / 'skills' / self.name / 'scripts' / 'lint_beats.py').read_text())
+        (self.repo / 'remotion-composer' / 'src' / 'YtNewsStyle01V4.tsx').write_text('tampered\n')
+        self.assertEqual(3, self.run_pre(), self.out)
+        self.assertIn('external-changed', self.line('FAIL', 'gate-lock'))
+
+    def test_a_mirror_difference_is_exit_3(self):
+        (self.repo / '.agents' / 'skills' / self.name / 'SKILL.md').write_text('changed\n')
+        self.assertEqual(3, self.run_pre(), self.out)
+
+    def test_integrity_wins_over_a_missing_dependency(self):
+        (self.skill / 'scripts' / 'gates.lock.json').unlink()
+        shutil.rmtree(self.repo / 'remotion-composer' / 'public' / 'fonts')
+        self.assertEqual(3, self.run_pre(), self.out)
+        self.line('FAIL', 'gate-lock')
+        self.line('FAIL', 'fonts')
+
+    def test_word_timing_checks_the_venv_the_extractor_and_the_cached_model_without_loading_anything(self):
+        env_dir = ENV_DIR[0]
+        cases = {
+            'venv': ({'KARAOKE_VENV': str(env_dir / 'no-venv')}, 'karaoke venv python missing'),
+            'tool': ({'EXTRACT_TIMING': str(env_dir / 'missing.py')}, 'extract_timing.py not found'),
+            'cache': ({'HF_HUB_CACHE': str(env_dir / 'empty-hub')}, 'is not in the local HF cache'),
+            'model': ({'WHISPER_MODEL': 'someone/other-model'}, 'someone/other-model is not in the local HF cache'),
+        }
+        for label, (env, text) in cases.items():
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(4, self.run_pre(), (label, self.out))
+            self.assertIn(text, self.line('FAIL', 'word-timing'), label)
+        # an incomplete snapshot (no weights) does not count, exactly as in word_timing.sh
+        snap = env_dir / 'hub2' / 'models--mlx-community--whisper-large-v3-mlx' / 'snapshots' / 'x'
+        snap.mkdir(parents=True)
+        (snap / 'config.json').write_text('{}')
+        with mock.patch.dict(os.environ, {'HF_HUB_CACHE': str(env_dir / 'hub2')}):
+            self.assertEqual(4, self.run_pre(), self.out)
+        self.line('FAIL', 'word-timing')
+
+    def test_preflight_takes_no_project_or_deliver(self):
+        m = self.module()
+        for extra in (['--project', 'projects/p1'], ['--deliver', str(self.deliver)], ['--check']):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+                m.main(['--preflight', *extra])
+            self.assertEqual(2, cm.exception.code, extra)
+
+    def test_a_real_run_still_needs_project_and_deliver(self):
+        m = self.module()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            m.main(['--project', 'projects/p1'])
+        self.assertEqual(2, cm.exception.code)
+
+    def test_composer_mismatch_is_reported_like_in_a_real_run(self):
+        self.assertEqual(3, self.run_pre('--composer', 'elsewhere'), self.out)
+        self.assertIn('composer-mismatch', self.line('FAIL', 'gate-lock'))
+
+    def test_cli_prints_the_documented_lines_and_exits_0(self):
+        r = subprocess.run([sys.executable, '-B', str(self.skill / 'scripts' / 'finalize.py'), '--preflight'], capture_output=True, text=True,
+                           cwd=self.tmp)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertTrue(r.stdout.splitlines()[-1].startswith('PREFLIGHT PASS (exit 0)'))
+        self.assertEqual(11, len([l for l in r.stdout.splitlines() if l.startswith('PREFLIGHT ')]))
+
+
+class RealRunEnvironmentTests(PreflightBase):
+    """The real run starts with the same checks (the same function): the two can never disagree."""
+
+    def real_run(self):
+        code = self.run_fin()
+        return code, ' | '.join(self.failed()['reasons']) if Path(str(self.deliver) + '.FAILED.json').exists() else ''
+
+    def assertRunStopsBeforeAnyGate(self, name):
+        code, reasons = self.real_run()
+        self.assertEqual(4, code, self.out)
+        self.assertIn('environment: %s:' % name, reasons)
+        self.assertEqual([], self.failed()['gates'])
+        for stem in STEM.values():
+            self.assertFalse(self.ran(stem), stem)
+        self.assertNotDelivered()
+
+    def test_missing_fonts_node_modules_whisper_each_stop_the_real_run_and_the_preflight_agrees(self):
+        shutil.rmtree(self.repo / 'remotion-composer' / 'public' / 'fonts')
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertRunStopsBeforeAnyGate('fonts')
+        write_receipts(self.repo, name=self.name)
+        (self.repo / 'remotion-composer' / 'public' / 'fonts').mkdir()
+        for f in ('Kanit-Bold.ttf', 'Kanit-ExtraBold.ttf'):
+            (self.repo / 'remotion-composer' / 'public' / 'fonts' / f).write_bytes(b'F')
+        shutil.rmtree(self.repo / 'remotion-composer' / 'node_modules')
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertRunStopsBeforeAnyGate('composer-node-modules')
+
+    def test_missing_python_module_stops_the_real_run(self):
+        m = self.module()
+        m.PY_MODULES = ('no_such_module_xyz',)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = m.main(['--project', 'projects/p1', '--deliver', str(self.deliver)])
+        self.assertEqual(4, code, buf.getvalue())
+        self.assertIn("environment: python-modules:", ' | '.join(self.failed()['reasons']))
+        self.assertIn('.venv python', ' | '.join(self.failed()['reasons']))
+
+    def test_missing_whisper_cache_fails_the_preflight_but_never_blocks_a_real_run_or_a_check(self):
+        # the one intentional difference: finalize never calls word_timing.sh, the timing / derived gates already vouch for the timing
+        with mock.patch.dict(os.environ, {'HF_HUB_CACHE': str(ENV_DIR[0] / 'empty-hub'), 'KARAOKE_VENV': str(ENV_DIR[0] / 'no-venv')}):
+            self.assertEqual(4, self.run_pre(), self.out)
+            self.line('FAIL', 'word-timing')
+            self.assertEqual(0, self.run_fin('--check'), self.out)
+            self.assertEqual(0, self.run_fin(), self.out)
+            self.assertNotIn('word-timing', self.out)
+
+    def test_the_lock_failure_keeps_exit_3_in_both(self):
+        (self.skill / 'scripts' / 'gates.lock.json').unlink()
+        self.assertEqual(3, self.run_pre(), self.out)
+        self.assertEqual(3, self.run_fin(), self.out)
+
+    def test_ok_environment_passes_in_both(self):
+        self.assertEqual(0, self.run_pre(), self.out)
+        self.assertEqual(0, self.run_fin(), self.out)
+
+
 class MusicBedProvenanceTests(FinalizeBase):
     def sidecar(self):
         return Path(str(self.proj / 'assets' / 'audio' / 'bed.mp3') + '.source.json')
@@ -2308,6 +2830,68 @@ class DeliveryOrderAndPathTests(FinalizeBase):
                             str(self.deliver), '--check'], capture_output=True, text=True, cwd=cwd)
         self.assertEqual(3, r.returncode, r.stdout + r.stderr)
         self.assertEqual([], list(cwd.iterdir()))
+
+
+class SecondDestinationTests(FinalizeBase):
+    """SKILL.md: after the first `finalize.py --project P --deliver A` exits 0, an extra destination B is delivered by running
+    finalize again with `--deliver B` (never cp).  The first delivery must stay exactly as it was."""
+
+    def setUp(self):
+        super().setUp()
+        self.dest_b = self.repo / 'out-b' / 'second' / 'episode-b.mp4'
+
+    def side_files(self, path):
+        return sorted(p.name for p in Path(path).parent.iterdir() if p.name.startswith(Path(path).name))
+
+    def snapshot_a(self):
+        return {'mp4': self.deliver.read_bytes(), 'receipt': Path(str(self.deliver) + '.receipt.json').read_bytes(),
+                'files': self.side_files(self.deliver)}
+
+    def test_a_second_run_to_another_destination_delivers_b_and_leaves_a_untouched(self):
+        self.assertEqual(0, self.run_fin(), self.out)                                       # (1) run to A
+        self.assertTrue(self.deliver.is_file())
+        self.assertTrue(Path(str(self.deliver) + '.receipt.json').is_file())
+        a = self.snapshot_a()
+        self.assertEqual(['episode.mp4', 'episode.mp4.receipt.json'], a['files'])
+        self.assertEqual(0, self.run_fin(deliver=self.dest_b), self.out)                    # (2) same project, --deliver B
+        receipt_b = Path(str(self.dest_b) + '.receipt.json')
+        self.assertTrue(self.dest_b.is_file())
+        self.assertTrue(receipt_b.is_file())
+        self.assertEqual(a['mp4'], self.dest_b.read_bytes())                                # same bytes as A
+        self.assertEqual(self.fin.read_bytes(), self.dest_b.read_bytes())
+        self.assertEqual(a['mp4'], self.deliver.read_bytes())                              # A and its receipt are byte-identical
+        self.assertEqual(a['receipt'], Path(str(self.deliver) + '.receipt.json').read_bytes())
+        self.assertEqual(a['files'], self.side_files(self.deliver))                         # no .previous, no .FAILED.json beside A
+        self.assertEqual(['episode-b.mp4', 'episode-b.mp4.receipt.json'], self.side_files(self.dest_b))
+        rb = json.loads(receipt_b.read_text())
+        self.assertEqual(str(self.dest_b), rb['delivered']['path'])                         # B's receipt describes B
+        self.assertEqual(sha(self.dest_b), rb['delivered']['sha256'])
+        self.assertEqual(json.loads(Path(str(self.deliver) + '.receipt.json').read_text())['delivered']['sha256'], rb['delivered']['sha256'])
+
+    def test_a_failing_second_run_writes_failed_json_at_b_only_and_leaves_a_untouched(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        a = self.snapshot_a()
+        self.behavior(lint_beats={'exit': 1, 'pass': False})                                # an existing way to force a gate failure
+        code = self.run_fin(deliver=self.dest_b)                                            # (3) the second run fails
+        self.assertNotEqual(0, code, self.out)
+        self.assertEqual(1, code)
+        failed_b = Path(str(self.dest_b) + '.FAILED.json')
+        self.assertTrue(failed_b.is_file())
+        self.assertEqual(1, json.loads(failed_b.read_text())['exit_code'])
+        self.assertFalse(self.dest_b.exists())                                              # nothing at B
+        self.assertFalse(Path(str(self.dest_b) + '.receipt.json').exists())
+        self.assertEqual(a['mp4'], self.deliver.read_bytes())                              # A and its receipt untouched
+        self.assertEqual(a['receipt'], Path(str(self.deliver) + '.receipt.json').read_bytes())
+        self.assertEqual(a['files'], self.side_files(self.deliver))
+
+    def test_after_the_failed_second_run_the_next_run_to_b_can_still_deliver(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(1, self.run_fin(deliver=self.dest_b), self.out)
+        self.behavior(lint_beats={'exit': 0, 'pass': True})
+        self.assertEqual(0, self.run_fin(deliver=self.dest_b), self.out)
+        self.assertFalse(Path(str(self.dest_b) + '.FAILED.json').exists())                  # the stale failure is cleared by the success
+        self.assertEqual(self.deliver.read_bytes(), self.dest_b.read_bytes())
 
 
 class LockCoverageAndGitIndependenceTests(FinalizeBase):
