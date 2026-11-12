@@ -134,11 +134,14 @@ export function parseArgs(argv, defaults = {}) {
 // input validation
 // ---------------------------------------------------------------------------------------------
 
+/** One line per validation error: `<path> [<rule>]: <message>` (the rule name is part of the status line). */
+export const describeErrors = (errors, max = 5) => errors.slice(0, max).map(e => `${e.path}${e.rule ? ` [${e.rule}]` : ''}: ${e.message}`).join('; ');
+
 /**
- * Validate episode + captions. Uses ./episode_schema.mjs (validateEpisode(episode, captions, {publicDir}))
- * when that file exists; otherwise it only checks that both files are JSON objects and that
- * episode.assetDir is a plain directory name. When the schema module exports projectCaptions, `captions`
- * in the result is the projection (what the engine gets as a prop); `rawCaptions` is what was on disk.
+ * Validate episode + captions through ./episode_schema.mjs: validateEpisode(episode, captions, {publicDir})
+ * -> {valid, errors, warnings, schemaSha256}. The module is required: when it cannot be imported (or lacks
+ * validateEpisode / projectCaptions) the result is a refusal, never a lighter check. `captions` in the result
+ * is projectCaptions(rawCaptions) (what the engine gets as a prop); `rawCaptions` is what was on disk.
  * @returns {Promise<{ok: boolean, errors: object[], episode?: object, captions?: object, rawCaptions?: object}>}
  */
 export async function validateInputs({episodePath, captionsPath, skillDir, composer}) {
@@ -158,19 +161,16 @@ export async function validateInputs({episodePath, captionsPath, skillDir, compo
   if (errors.length) return {ok: false, errors};
 
   const schemaFile = path.join(skillDir, 'scripts', 'episode_schema.mjs');
-  const hasSchema = await fs.access(schemaFile).then(() => true, () => false);
-  if (hasSchema) {
-    const schema = await import(pathToFileURL(schemaFile).href);
-    const result = schema.validateEpisode(episode, rawCaptions, {publicDir: path.join(composer, 'public')});
-    const valid = result.valid ?? result.ok;          // validateEpisode reports `valid`; older stubs reported `ok`
-    if (!valid) return {ok: false, errors: result.errors ?? []};
-    const captions = typeof schema.projectCaptions === 'function' ? schema.projectCaptions(rawCaptions) : rawCaptions;
-    return {ok: true, errors: [], episode, captions, rawCaptions};
+  let schema;
+  try { schema = await import(pathToFileURL(schemaFile).href); } catch (error) {
+    return {ok: false, errors: [{path: 'episode_schema.mjs', rule: 'schema-module', message: `cannot import ${schemaFile}: ${error.code ?? error.message}`}]};
   }
-  if (typeof episode.assetDir !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(episode.assetDir)) {
-    return {ok: false, errors: [{path: 'episode.assetDir', rule: 'asset-dir', message: 'episode.assetDir must be a plain directory name'}]};
+  if (typeof schema.validateEpisode !== 'function' || typeof schema.projectCaptions !== 'function') {
+    return {ok: false, errors: [{path: 'episode_schema.mjs', rule: 'schema-module', message: `${schemaFile} must export validateEpisode and projectCaptions`}]};
   }
-  return {ok: true, errors: [], episode, captions: rawCaptions, rawCaptions};
+  const result = schema.validateEpisode(episode, rawCaptions, {publicDir: path.join(composer, 'public')});
+  if (result.valid !== true) return {ok: false, errors: result.errors ?? [{path: 'episode', rule: 'validate', message: 'validateEpisode did not report valid: true'}]};
+  return {ok: true, errors: [], episode, captions: schema.projectCaptions(rawCaptions), rawCaptions};
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -505,9 +505,10 @@ export async function run(argv, deps = {}) {
   try {
     // 1. inputs and integrity
     const validation = await d.validateInputs({episodePath: path.resolve(args.episode), captionsPath: path.resolve(args.captions), skillDir, composer});
-    if (!validation.ok) throw new RefusedError('validation ' + validation.errors.slice(0, 5).map(e => `${e.path}: ${e.message}`).join('; '));
+    if (!validation.ok) throw new RefusedError('validation ' + describeErrors(validation.errors));
     const {episode, captions} = validation;
-    const integrity = await d.checkIntegrity({composerDir: composer, skillDir});
+    // A missing lock is only a warning here (the report records lock.status); an invalid or mismatching lock refuses.
+    const integrity = await d.checkIntegrity({composerDir: composer, skillDir, requireLock: false});
     if (!integrity.ok) throw new RefusedError([...new Set(integrity.issues.map(i => i.id))].join(','));
     const warnings = (integrity.warnings ?? []).map(w => w.id);
 
@@ -637,7 +638,8 @@ export async function run(argv, deps = {}) {
       await writeReport(out, {...report, manifestPath: path.relative(out, manifestPath)});
       await writeReport(runDir, {...report, manifestPath: RUN_MANIFEST_FILE});
     };
-    const reportBase = {...meta, endedAt: isoAt(d.now())};
+    // lock = state of scripts/gates.lock.json; its hash is part of manifest.sourceHashes, so a resume under another lock state is refused (exit 4).
+    const reportBase = {...meta, endedAt: isoAt(d.now()), lock: integrity.lock};
     if (after.pending.length) {
       const fullPlanFrames = manifest.diagnostic ? manifest.fullPlanFrames : manifest.frames;
       await writeBoth(makeReport({

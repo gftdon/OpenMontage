@@ -11,6 +11,9 @@ import {
 } from '../qc_layout.mjs';
 import {buildFramePlan} from '../qc_layout_eval.mjs';
 import {stagePublicDir} from '../media_digest.mjs';
+import {checkIntegrity as realCheckIntegrity} from '../gate_integrity.mjs';
+import {sha256Hex} from '../qc_manifest.mjs';
+import {projectCaptions} from '../episode_schema.mjs';
 import {thresholds as T, PLAN, v3Field, v3Snap} from './fixtures/v3/builders.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +33,26 @@ const cleanSnapshot = frame => v3Snap([
   v3Field('kicker', {tier: 'label', lane: 'header', x: 1546, y: 66, w: 258, h: 34}),
 ], {frame});
 const schema2Snapshot = frame => ({...cleanSnapshot(frame), schemaVersion: 2});
+
+const STUB_SCHEMA = `
+  export function validateEpisode(e) {
+    return typeof e.assetDir === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(e.assetDir)
+      ? {valid: true, errors: [], warnings: []}
+      : {valid: false, errors: [{path: 'episode.assetDir', rule: 'asset-dir', message: 'episode.assetDir must be a plain directory name'}], warnings: []};
+  }
+  export function projectCaptions(c) { return c; }
+`;
+const FIXTURES = path.join(here, 'fixtures/episodes');
+const readFixture = rel => fs.readFile(path.join(FIXTURES, rel), 'utf8').then(JSON.parse);
+const NO_LOCK = {status: 'missing', sha256: null, files: null, external: null};
+const LOCKED_SOURCE = 'export const locked = 1;\n';
+const lockOf = (files = {'scripts/locked_gate.mjs': sha256Hex(LOCKED_SOURCE)}) => ({schema: 'yt-news-v4-gates-lock', version: 1, skill: 'Youtube-YT-News-Style01-V4', files});
+/** The real lock check on the world's skill dir, minus the engine/Root checks (the world's engine is a placeholder). */
+const lockOnlyIntegrity = async options => {
+  const r = await realCheckIntegrity(options);
+  const issues = r.issues.filter(i => i.id.startsWith('gates-lock'));
+  return {...r, issues, ok: issues.length === 0};
+};
 
 /**
  * A throw-away world: skill dir (real thresholds + field rules), composer dir, episode/captions files,
@@ -60,6 +83,20 @@ async function makeWorld(opts = {}) {
 
   const clock = {t: 1_000_000};
   const log = {lines: [], plan: 0, bundleBuilds: 0, bundleReuses: 0, captures: [], open: 0, close: 0, inFlight: 0, maxInFlight: 0, stagedEntries: null, validate: 0};
+  // opts.realSchema: a copy of the real validator + schema and the min-3-beat fixture (with its media files) instead of the permissive stub
+  if (opts.realSchema) {
+    await fs.copyFile(path.join(realScripts, 'episode_schema.mjs'), path.join(skillDir, 'scripts', 'episode_schema.mjs'));
+    await fs.copyFile(path.join(realScripts, '..', 'assets', 'episode.schema.json'), path.join(skillDir, 'assets', 'episode.schema.json'));
+    const episode = await readFixture('valid/min-3-beat.json');
+    await fs.mkdir(path.join(composer, 'public', episode.assetDir, 'broll'), {recursive: true});
+    await fs.writeFile(path.join(composer, 'public', episode.assetDir, episode.avatarFile), 'AVATAR');
+    for (const src of Object.keys(episode.brollDur)) await fs.writeFile(path.join(composer, 'public', episode.assetDir, 'broll', `${src}.mp4`), 'B');
+    await fs.writeFile(episodePath, JSON.stringify(episode));
+    await fs.writeFile(captionsPath, JSON.stringify(await readFixture('captions/min-captions.json')));
+  } else {
+    await fs.writeFile(path.join(skillDir, 'scripts', 'episode_schema.mjs'), STUB_SCHEMA);
+  }
+  await fs.writeFile(path.join(skillDir, 'scripts', 'locked_gate.mjs'), LOCKED_SOURCE);
   const world = {
     root, skillDir, composer, episodePath, captionsPath, out, clock, log, opts,
     renderer: {remotion: '4.0.526', node: 'v22', chrome: 'Chrome 1'},
@@ -79,7 +116,7 @@ async function makeWorld(opts = {}) {
     now: () => clock.t,
     log: line => log.lines.push(line),
     newId: (() => { let n = 0; return () => `id-${++n}`; })(),
-    checkIntegrity: async () => (opts.integrity ?? {ok: true, issues: [], warnings: []}),
+    checkIntegrity: opts.realLock ? lockOnlyIntegrity : async () => (opts.integrity ?? {ok: true, issues: [], warnings: [], lock: NO_LOCK}),
     rendererInfo: async () => ({...world.renderer}),
     async ensureBundle({runDir, rebuild, makePublicDir}) {
       const index = path.join(runDir, 'bundle', 'index.html');
@@ -518,10 +555,10 @@ test('validation failure: exit 3, REFUSED validation, nothing bundled or rendere
   assert.equal((await w.go()).code, EXIT.REFUSED);
 }));
 
-test('episode_schema.mjs verdicts are honoured (valid / ok, and the projected captions are the props)', withWorld({}, async w => {
+test('episode_schema.mjs verdicts are honoured (`valid` only, the projected captions are the props, publicDir is <composer>/public)', withWorld({}, async w => {
   const schemaDir = path.join(w.skillDir, 'scripts');
   await fs.writeFile(path.join(schemaDir, 'episode_schema.mjs'), `
-    export function validateEpisode(e, c, opts) { return opts.publicDir.endsWith('public') && e.assetDir === 'ep' ? {valid: true, errors: []} : {valid: false, errors: [{path: 'x', message: 'nope'}]}; }
+    export function validateEpisode(e, c, opts) { return opts.publicDir.endsWith('public') && e.assetDir === 'ep' ? {valid: true, errors: []} : {valid: false, errors: [{path: 'x', rule: 'R1', message: 'nope'}]}; }
     export function projectCaptions(c) { return {projected: true, pages: c.pages}; }
   `);
   const props = [];
@@ -532,19 +569,134 @@ test('episode_schema.mjs verdicts are honoured (valid / ok, and the projected ca
   await fs.writeFile(w.episodePath, JSON.stringify({assetDir: 'other', beats: []}));
   const bad = await w.go();
   assert.equal(bad.code, EXIT.REFUSED);
-  assert.match(bad.status, /validation x: nope/);
+  assert.match(bad.status, /validation x \[R1\]: nope/);
 }));
 
-test('integrity failure: exit 3 with the issue ids, nothing rendered', withWorld({integrity: {ok: false, issues: [{id: 'engine-drift', message: 'a'}, {id: 'gates-lock', message: 'b'}], warnings: []}}, async w => {
+test('a validator that reports only the old `ok` field is not valid', withWorld({}, async w => {
+  await fs.writeFile(path.join(w.skillDir, 'scripts', 'episode_schema.mjs'), `
+    export function validateEpisode() { return {ok: true, errors: []}; }
+    export function projectCaptions(c) { return c; }
+  `);
+  const r = await w.go();
+  assert.equal(r.code, EXIT.REFUSED);
+  assert.match(r.status, /^QC_LAYOUT REFUSED validation /);
+  assert.deepEqual([w.log.bundleBuilds, w.log.plan, w.log.captures.length], [0, 0, 0]);
+}));
+
+test('episode_schema.mjs missing (or without validateEpisode/projectCaptions): exit 3, no JSON-only fallback, nothing rendered', async () => {
+  const gone = await makeWorld({});
+  const partial = await makeWorld({});
+  try {
+    await fs.rm(path.join(gone.skillDir, 'scripts', 'episode_schema.mjs'));
+    await fs.writeFile(path.join(partial.skillDir, 'scripts', 'episode_schema.mjs'), 'export function validateEpisode() { return {valid: true, errors: []}; }\n');
+    for (const w of [gone, partial]) {
+      const r = await w.go();
+      assert.equal(r.code, EXIT.REFUSED);
+      assert.match(r.status, /^QC_LAYOUT REFUSED validation .*\[schema-module\]/);
+      assert.deepEqual([w.log.bundleBuilds, w.log.plan, w.log.captures.length, w.log.open], [0, 0, 0, 0]);
+      assert.ok(!await exists(path.join(w.out, 'runs')));
+    }
+  } finally { await gone.cleanup(); await partial.cleanup(); }
+});
+
+test('real validator: min-3-beat passes (projected captions are the props); unknown-beat-key-captionLane is refused with its rule, nothing rendered', async () => {
+  const w = await makeWorld({realSchema: true});
+  try {
+    const props = [];
+    const ok = await w.go(['--workers', '2'], {prepareMeasure: async ({inputProps}) => { props.push(inputProps); return {}; }});
+    assert.equal(ok.code, EXIT.PASS, ok.lines.join('\n'));
+    assert.deepEqual(props[0].captions, projectCaptions(await readFixture('captions/min-captions.json')));
+    const {_expect, ...invalid} = await readFixture('invalid/unknown-beat-key-captionLane.json');
+    assert.ok(_expect);
+    await fs.writeFile(w.episodePath, JSON.stringify(invalid));
+    w.log.bundleBuilds = 0; w.log.plan = 0; w.log.captures.length = 0;
+    const bad = await w.go();
+    assert.equal(bad.code, EXIT.REFUSED);
+    assert.match(bad.status, /^QC_LAYOUT REFUSED validation \/beats\/1\/captionLane \[additionalProperties\]/);
+    assert.deepEqual([w.log.bundleBuilds, w.log.plan, w.log.captures.length], [0, 0, 0]);
+  } finally { await w.cleanup(); }
+});
+
+test('integrity failure: exit 3 with the issue ids, nothing rendered', withWorld({integrity: {ok: false, issues: [{id: 'engine-drift', message: 'a'}, {id: 'gates-lock', message: 'b'}], warnings: [], lock: {status: 'mismatch', sha256: 'x', files: 1, external: 0}}}, async w => {
   const r = await w.go();
   assert.equal(r.code, EXIT.REFUSED);
   assert.equal(r.status, 'QC_LAYOUT REFUSED engine-drift,gates-lock');
   assert.deepEqual([w.log.bundleBuilds, w.log.plan, w.log.captures.length], [0, 0, 0]);
 }));
 
-test('integrity warnings are carried into the report warnings', withWorld({integrity: {ok: true, issues: [], warnings: [{id: 'gates-lock-missing', message: 'm'}]}}, async w => {
+test('integrity warnings are carried into the report warnings', withWorld({integrity: {ok: true, issues: [], warnings: [{id: 'gates-lock-missing', message: 'm'}], lock: NO_LOCK}}, async w => {
   await w.go(['--workers', '2']);
   assert.ok((await readJson(path.join(w.out, 'report.json'))).warnings.includes('gates-lock-missing'));
+}));
+
+// ---- gates lock ---------------------------------------------------------------------------------------
+const lockPathOf = w => path.join(w.skillDir, 'scripts', 'gates.lock.json');
+
+test('lock missing: warning gates-lock-missing, the run is usable, report.lock = {status: "missing", sha256: null, files: null, external: null}', withWorld({realLock: true}, async w => {
+  const r = await w.go(['--workers', '2']);
+  assert.equal(r.code, EXIT.PASS);
+  const report = await readJson(path.join(w.out, 'report.json'));
+  assert.ok(report.warnings.includes('gates-lock-missing'));
+  assert.deepEqual(report.lock, NO_LOCK);
+  assert.equal(report.pass, true);
+}));
+
+test('lock ok: report.lock carries status, the lock file sha256 and the file count (in both report copies); that hash is in the run manifest', withWorld({realLock: true}, async w => {
+  const lock = JSON.stringify(lockOf());
+  await fs.writeFile(lockPathOf(w), lock);
+  const r = await w.go(['--run-id', 'lk', '--workers', '2']);
+  assert.equal(r.code, EXIT.PASS, r.lines.join('\n'));
+  const wanted = {status: 'ok', sha256: sha256Hex(lock), files: 1, external: 0};
+  assert.deepEqual((await readJson(path.join(w.out, 'report.json'))).lock, wanted);
+  assert.deepEqual((await readJson(path.join(w.runDirOf('lk'), 'report.json'))).lock, wanted);
+  const manifest = await readJson(path.join(w.runDirOf('lk'), 'run-manifest.json'));
+  assert.equal(manifest.sourceHashes['scripts/gates.lock.json'], sha256Hex(lock));
+  assert.ok(!(await readJson(path.join(w.out, 'report.json'))).warnings.includes('gates-lock-missing'));
+}));
+
+test('an incomplete report carries lock too', withWorld({realLock: true, frameSeconds: 100}, async w => {
+  await fs.writeFile(lockPathOf(w), JSON.stringify(lockOf()));
+  const r = await w.go(['--max-seconds', '150', '--workers', '1']);
+  assert.equal(r.code, EXIT.INCOMPLETE);
+  assert.equal((await readJson(path.join(w.out, 'report.json'))).lock.status, 'ok');
+}));
+
+test('lock present but invalid or mismatching: REFUSED gates-lock..., exit 3, nothing rendered', async () => {
+  const cases = {
+    'gates-lock-format': w => fs.writeFile(lockPathOf(w), JSON.stringify({...lockOf(), version: 2})),
+    'gates-lock-format (not json)': w => fs.writeFile(lockPathOf(w), 'nope'),
+    'gates-lock': async w => { await fs.writeFile(lockPathOf(w), JSON.stringify(lockOf())); await fs.writeFile(path.join(w.skillDir, 'scripts', 'locked_gate.mjs'), 'export const locked = 2;\n'); },
+    'gates-lock (file missing)': async w => { await fs.writeFile(lockPathOf(w), JSON.stringify(lockOf())); await fs.rm(path.join(w.skillDir, 'scripts', 'locked_gate.mjs')); },
+  };
+  for (const [name, setup] of Object.entries(cases)) {
+    const w = await makeWorld({realLock: true});
+    try {
+      await setup(w);
+      const r = await w.go();
+      assert.equal(r.code, EXIT.REFUSED, name);
+      assert.equal(r.status, `QC_LAYOUT REFUSED ${name.split(' ')[0]}`, name);
+      assert.deepEqual([w.log.bundleBuilds, w.log.plan, w.log.captures.length], [0, 0, 0], name);
+      const report = await readJson(path.join(w.out, 'report.json'));
+      assert.deepEqual([report.status, report.pass], ['refused', false], name);
+    } finally { await w.cleanup(); }
+  }
+});
+
+test('the runner never asks for requireLock (a missing lock stays a warning for the layout gate)', withWorld({}, async w => {
+  const seen = [];
+  const r = await w.go(['--workers', '2'], {checkIntegrity: async options => { seen.push(options.requireLock); return {ok: true, issues: [], warnings: [], lock: NO_LOCK}; }});
+  assert.equal(r.code, EXIT.PASS);
+  assert.deepEqual(seen, [false]);
+}));
+
+test('resume under another lock state is refused (exit 4, sourceHashes.scripts/gates.lock.json)', withWorld({realLock: true, frameSeconds: 100}, async w => {
+  const first = await w.go(['--run-id', 'lr', '--max-seconds', '150', '--workers', '1']);
+  assert.equal(first.code, EXIT.INCOMPLETE);
+  assert.equal(first.status.startsWith('QC_LAYOUT INCOMPLETE'), true);
+  await fs.writeFile(lockPathOf(w), JSON.stringify(lockOf()));       // missing -> ok
+  const second = await w.go(['--run-id', 'lr', '--max-seconds', '150', '--workers', '1']);
+  assert.equal(second.code, EXIT.RESUME_REFUSED);
+  assert.equal(second.status, 'QC_LAYOUT RESUME_REFUSED sourceHashes.scripts/gates.lock.json');
 }));
 
 test('usage errors: exit 2, USAGE_ERROR is the last line', withWorld({}, async w => {

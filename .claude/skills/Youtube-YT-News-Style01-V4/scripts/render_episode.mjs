@@ -14,7 +14,7 @@
 //        --out <file.mp4> [--gate-report <qc/layout/report.json>] [--render-id <id>] [--max-seconds 420]
 //        [--segment-frames 750] [--concurrency 4] [--draft]
 //
-// Exit codes: 0 complete | 75 incomplete, call again | 3 refused (gate / draft rule / integrity / validation)
+// Exit codes: 0 complete | 75 incomplete, call again | 3 refused (gate / draft rule / integrity incl. gates lock / validation)
 //             4 resume refused (sources changed since the render started) | 2 crash or usage error
 //
 // Only renderSegment(), selectDuration() and ensureBundle() touch Remotion (loaded lazily from the
@@ -59,8 +59,10 @@ export const RECEIPT_FIELDS = Object.freeze([
 export const USAGE = `usage: render_episode.mjs --episode <episode.json> --captions <captions.json> --composer <remotion-composer-dir> --out <file.mp4>
          [--gate-report <qc/layout/report.json>] [--render-id <id>] [--max-seconds ${DEFAULTS.maxSeconds}]
          [--segment-frames ${DEFAULTS.segmentFrames}] [--concurrency ${DEFAULTS.concurrency}] [--draft]
-  final render : --gate-report is required and the file name must not contain ".draft."
-  draft render : --draft is required, the file name must contain ".draft.", the gate is skipped
+  final render : --gate-report is required, the file name must not contain ".draft.", and scripts/gates.lock.json must exist,
+                 be valid and match (checked at start and before the concat)
+  draft render : --draft is required, the file name must contain ".draft.", the gate is skipped; engine drift and gates-lock
+                 problems are only warnings (recorded in render-manifest.json), root-registration still refuses
   exit codes   : 0 complete | 75 incomplete (re-run with the same --render-id) | 3 refused | 4 resume refused | 2 crash/usage`;
 
 export class UsageError extends Error {}
@@ -120,16 +122,20 @@ export function checkNaming({out, draft, gateReport}) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// input validation (TODO(CF-A66 step B): episode_schema.mjs is delivered with the engine)
+// input validation (mandatory: episode_schema.mjs decides)
 // ---------------------------------------------------------------------------------------------
 
+/** One line per validation error: `<path> [<rule>]: <message>` (the rule name is what the caller greps for). */
+export const describeErrors = (errors, max = 5) => errors.slice(0, max).map(e => `${e.path}${e.rule ? ` [${e.rule}]` : ''}: ${e.message}`).join('; ');
+
 /**
- * Validate episode + captions. Uses ./episode_schema.mjs (validateEpisode(episode, captions) ->
- * {ok, errors:[{path, rule, message}]}) when that file exists; until then it only checks that both files
- * are JSON objects and that episode.assetDir is a plain directory name.
- * @returns {Promise<{ok: boolean, errors: object[], episode?: object, captions?: object}>}
+ * Validate episode + captions through ./episode_schema.mjs: validateEpisode(episode, captions, {publicDir})
+ * -> {valid, errors:[{path, rule, message}], warnings, schemaSha256}. The module is required: when it cannot be
+ * imported (or lacks validateEpisode / projectCaptions) the result is a refusal, never a lighter check.
+ * `captions` in the result is projectCaptions(rawCaptions): the prop the engine gets (qc_layout.mjs does the same).
+ * @returns {Promise<{ok: boolean, errors: object[], warnings?: object[], episode?: object, captions?: object, rawCaptions?: object}>}
  */
-export async function validateInputs({episodePath, captionsPath, skillDir}) {
+export async function validateInputs({episodePath, captionsPath, skillDir, composer}) {
   const errors = [];
   const load = async (file, label) => {
     try {
@@ -142,21 +148,49 @@ export async function validateInputs({episodePath, captionsPath, skillDir}) {
     }
   };
   const episode = await load(episodePath, 'episode');
-  const captions = await load(captionsPath, 'captions');
+  const rawCaptions = await load(captionsPath, 'captions');
   if (errors.length) return {ok: false, errors};
 
   const schemaFile = path.join(skillDir, 'scripts', 'episode_schema.mjs');
-  const hasSchema = await fs.access(schemaFile).then(() => true, () => false);
-  if (hasSchema) {
-    const {validateEpisode} = await import(pathToFileURL(schemaFile).href);
-    const result = validateEpisode(episode, captions);
-    return result.ok ? {ok: true, errors: [], episode, captions} : {ok: false, errors: result.errors};
+  let schema;
+  try { schema = await import(pathToFileURL(schemaFile).href); } catch (error) {
+    return {ok: false, errors: [{path: 'episode_schema.mjs', rule: 'schema-module', message: `cannot import ${schemaFile}: ${error.code ?? error.message}`}]};
   }
-  if (Array.isArray(episode) || typeof episode.assetDir !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(episode.assetDir)) {
-    return {ok: false, errors: [{path: 'episode.assetDir', rule: 'asset-dir', message: 'episode.assetDir must be a plain directory name'}]};
+  if (typeof schema.validateEpisode !== 'function' || typeof schema.projectCaptions !== 'function') {
+    return {ok: false, errors: [{path: 'episode_schema.mjs', rule: 'schema-module', message: `${schemaFile} must export validateEpisode and projectCaptions`}]};
   }
-  return {ok: true, errors: [], episode, captions};
+  const result = schema.validateEpisode(episode, rawCaptions, {publicDir: composer ? path.join(path.resolve(composer), 'public') : undefined});
+  if (result.valid !== true) return {ok: false, errors: result.errors ?? [{path: 'episode', rule: 'validate', message: 'validateEpisode did not report valid: true'}]};
+  return {ok: true, errors: [], warnings: result.warnings ?? [], episode, captions: schema.projectCaptions(rawCaptions), rawCaptions};
 }
+
+// ---------------------------------------------------------------------------------------------
+// integrity (engine copy, Root registration, gates lock)
+// ---------------------------------------------------------------------------------------------
+
+/** Issues a DRAFT render tolerates (recorded as warnings): the engine and the lock are still being developed. */
+export const DRAFT_TOLERATED = Object.freeze(['engine-drift', 'gates-lock', 'gates-lock-format', 'gates-lock-missing']);
+
+/**
+ * Integrity verdict for a render.
+ *   final : requireLock, every issue refuses.
+ *   draft : engine drift and every lock problem become warnings; anything else (root-registration) refuses.
+ * @returns {Promise<{refusals: object[], warnings: object[], lock: object}>}
+ */
+export async function integrityVerdict({composer, skillDir, draft, check = checkIntegrity}) {
+  const result = await check({composerDir: composer, skillDir, requireLock: !draft});
+  if (!draft) return {refusals: result.issues, warnings: result.warnings ?? [], lock: result.lock};
+  const tolerated = i => DRAFT_TOLERATED.includes(i.id);
+  return {
+    refusals: result.issues.filter(i => !tolerated(i)),
+    warnings: [...(result.warnings ?? []), ...result.issues.filter(tolerated)],
+    lock: result.lock,
+  };
+}
+
+const refuseOnIntegrity = verdict => {
+  if (verdict.refusals.length) throw new RefusedError('integrity check failed: ' + verdict.refusals.map(i => `${i.id}: ${i.message}`).join('; '));
+};
 
 // ---------------------------------------------------------------------------------------------
 // gate check
@@ -412,7 +446,7 @@ export async function renderSegment({composer, serveUrl, inputProps, segment, ou
   });
 }
 
-const defaultDeps = {renderSegment, selectDuration, ensureBundle, now: () => Date.now(), log: line => console.log(line)};
+const defaultDeps = {renderSegment, selectDuration, ensureBundle, checkIntegrity, now: () => Date.now(), log: line => console.log(line)};
 
 // ---------------------------------------------------------------------------------------------
 // orchestration
@@ -427,7 +461,7 @@ const round3 = n => Math.round(n * 1000) / 1000;
 
 /**
  * Whole command. `deps` replaces the Remotion adapter and clock in tests:
- *   {renderSegment, selectDuration, ensureBundle, now, log, skillDir}
+ *   {renderSegment, selectDuration, ensureBundle, checkIntegrity, now, log, skillDir}
  * @returns {Promise<number>} the exit code
  */
 export async function run(argv, deps = {}) {
@@ -466,14 +500,14 @@ export async function run(argv, deps = {}) {
     const receiptPath = `${out}.receipt.json`;
     const manifestFile = path.join(renderDir, 'render-manifest.json');
 
-    // 1. inputs and integrity (a draft skips the gate, not the input validation)
-    const validation = await validateInputs({episodePath, captionsPath, skillDir});
-    if (!validation.ok) throw new RefusedError('episode/captions invalid: ' + validation.errors.slice(0, 5).map(e => `${e.path}: ${e.message}`).join('; '));
-    if (!args.draft) {
-      const integrity = await checkIntegrity({composerDir: composer, skillDir});
-      if (!integrity.ok) throw new RefusedError('integrity check failed: ' + integrity.issues.map(i => `${i.id}: ${i.message}`).join('; '));
-    }
-    const {episode, captions} = validation;
+    // 1. inputs and integrity (a draft skips the gate and tolerates engine drift / lock problems, not the input validation)
+    const validation = await validateInputs({episodePath, captionsPath, skillDir, composer});
+    if (!validation.ok) throw new RefusedError('episode/captions invalid: ' + describeErrors(validation.errors));
+    const integrityAtStart = await integrityVerdict({composer, skillDir, draft: args.draft, check: d.checkIntegrity});
+    refuseOnIntegrity(integrityAtStart);
+    for (const w of integrityAtStart.warnings) log(`RENDER WARNING ${w.id}: ${w.message}`);
+    const integrityRecord = verdict => ({draft: args.draft, lock: verdict.lock, warnings: verdict.warnings});
+    const {episode, captions} = validation;     // captions = projectCaptions(...), the engine's prop
     const inputProps = {episode, captions};
 
     // 2. sources, media digest and the staging public directory
@@ -513,6 +547,7 @@ export async function run(argv, deps = {}) {
       if (mismatch) throw new ResumeRefusedError(mismatch);
       if (stored.segmentFrames !== args.segmentFrames) throw new ResumeRefusedError('segmentFrames');
       manifest = stored;
+      manifest.integrity = integrityRecord(integrityAtStart);
       if (gate) manifest.gate = {...gate, checkedAtStart: stored.gate?.checkedAtStart ?? gate.checkedAtStart};
     } else {
       const meta = await d.selectDuration({composer, serveUrl: (await getBundle()).serveUrl, inputProps});
@@ -520,6 +555,7 @@ export async function run(argv, deps = {}) {
       manifest = {
         schema: RENDER_MANIFEST_SCHEMA, version: 1, renderId, draft: args.draft, compositionId: COMPOSITION_ID, sources, gate,
         durationInFrames: meta.durationInFrames, fps: FPS, width: WIDTH, height: HEIGHT, segmentFrames: args.segmentFrames, encoder,
+        integrity: integrityRecord(integrityAtStart),
         createdAt: isoAt(startedMs), segments: newSegmentRecords(meta.durationInFrames, args.segmentFrames), invocations: [],
       };
     }
@@ -572,6 +608,9 @@ export async function run(argv, deps = {}) {
       const fresh = await gatherSources();
       const mismatch = diffManifests(manifest.sources, fresh);
       if (mismatch) throw new RefusedError(`sources changed during the render: ${mismatch}`);
+      const verdict = await integrityVerdict({composer, skillDir, draft: args.draft, check: d.checkIntegrity});
+      refuseOnIntegrity(verdict);
+      manifest.integrity = integrityRecord(verdict);
       if (gate) {
         const check = await checkGate({reportPath: args.gateReport, currentSources: fresh});
         if (!check.ok) throw new RefusedError('gate: ' + check.reason);

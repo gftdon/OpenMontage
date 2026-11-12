@@ -9,10 +9,12 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {
   RECEIPT_FIELDS, EXIT, parseArgs, checkNaming, checkGate, planSegments, nextAction, newSegmentRecords,
-  concatSegments, verifyOutput, buildReceipt, writeReceipt, validateInputs, run, UsageError,
+  concatSegments, verifyOutput, buildReceipt, writeReceipt, validateInputs, integrityVerdict, run, UsageError,
 } from '../render_episode.mjs';
 import {buildManifest, manifestHash, computeSourceHashes, computeBundleCodeKey, writeJsonAtomic, sha256File} from '../qc_manifest.mjs';
 import {digestDir} from '../media_digest.mjs';
+import {sha256Hex} from '../qc_manifest.mjs';
+import {projectCaptions} from '../episode_schema.mjs';
 
 const execFileP = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -270,7 +272,22 @@ test('a segment with the wrong frame count fails verification and a concat of it
 const DURATION = 60;
 const SEG = 25; // segments: 25, 25, 10
 
-async function makeEnv() {
+const LOCKED_SOURCE = 'export const locked = 1;\n';
+const lockOf = (files = {'scripts/locked_gate.mjs': sha256Hex(LOCKED_SOURCE)}) => ({schema: 'yt-news-v4-gates-lock', version: 1, skill: 'Youtube-YT-News-Style01-V4', files});
+const STUB_SCHEMA = `
+  export function validateEpisode(e) { return typeof e.assetDir === 'string' ? {valid: true, errors: [], warnings: []} : {valid: false, errors: [{path: '/assetDir', rule: 'stub', message: 'bad'}], warnings: []}; }
+  export function projectCaptions(c) { return c; }
+`;
+const FIXTURES = path.join(here, 'fixtures/episodes');
+const readFixture = async rel => JSON.parse(await fs.readFile(path.join(FIXTURES, rel), 'utf8'));
+
+/**
+ * opts.schema: 'stub' (permissive episode_schema.mjs, episode {assetDir: 'ep'}) | 'real' (a copy of the real validator + schema,
+ *              episode = fixtures/valid/min-3-beat.json, captions = min-captions.json, and its media files in public/)
+ * opts.lock:   'ok' (a lock over scripts/locked_gate.mjs) | 'none' (no lock file)
+ */
+async function makeEnv(opts = {}) {
+  const {schema = 'stub', lock = 'ok'} = opts;
   const d = await tmpDir('rg-env-');
   const composer = path.join(d, 'composer');
   const skill = path.join(d, 'skill');
@@ -285,13 +302,28 @@ async function makeEnv() {
   await fs.writeFile(path.join(skill, 'assets/YtNewsStyle01V4.reference.tsx'), reference);
   await fs.writeFile(path.join(skill, 'scripts/qc_thresholds.json'), JSON.stringify({maxSecondsDefault: 420}));
   await fs.writeFile(path.join(skill, 'scripts/qc_layout_eval.mjs'), '// eval\n');
+  await fs.writeFile(path.join(skill, 'scripts/locked_gate.mjs'), LOCKED_SOURCE);
+  if (lock === 'ok') await fs.writeFile(path.join(skill, 'scripts/gates.lock.json'), JSON.stringify(lockOf()));
   const episodePath = path.join(d, 'episode.json');
   const captionsPath = path.join(d, 'captions.json');
-  await fs.writeFile(episodePath, JSON.stringify({assetDir: 'ep', beats: []}));
-  await fs.writeFile(captionsPath, '[]');
+  if (schema === 'real') {
+    await fs.copyFile(path.join(realSkill, 'scripts/episode_schema.mjs'), path.join(skill, 'scripts/episode_schema.mjs'));
+    await fs.copyFile(path.join(realSkill, 'assets/episode.schema.json'), path.join(skill, 'assets/episode.schema.json'));
+    const episode = await readFixture('valid/min-3-beat.json');
+    await fs.mkdir(path.join(composer, 'public', episode.assetDir, 'broll'), {recursive: true});
+    await fs.writeFile(path.join(composer, 'public', episode.assetDir, episode.avatarFile), 'AVATAR');
+    for (const src of Object.keys(episode.brollDur)) await fs.writeFile(path.join(composer, 'public', episode.assetDir, 'broll', `${src}.mp4`), 'B');
+    await fs.writeFile(episodePath, JSON.stringify(episode));
+    await fs.writeFile(captionsPath, JSON.stringify(await readFixture('captions/min-captions.json')));
+  } else {
+    await fs.writeFile(path.join(skill, 'scripts/episode_schema.mjs'), STUB_SCHEMA);
+    await fs.writeFile(episodePath, JSON.stringify({assetDir: 'ep', beats: []}));
+    await fs.writeFile(captionsPath, '[]');
+  }
   const outDir = path.join(d, 'out');
   const clock = {ms: 1_700_000_000_000};
-  const calls = {renderSegment: [], ensureBundle: 0, selectDuration: 0};
+  const calls = {renderSegment: [], ensureBundle: 0, selectDuration: 0, inputProps: []};
+  const hooks = {afterSegment: null};
   const lines = [];
   let segmentCost = 100_000;
   let frameOffset = 0;
@@ -301,11 +333,13 @@ async function makeEnv() {
     log: l => lines.push(l),
     selectDuration: async () => { calls.selectDuration++; return {durationInFrames: DURATION, fps: 25, width: 1920, height: 1080}; },
     ensureBundle: async () => { calls.ensureBundle++; return {serveUrl: 'file:///fake-bundle', reused: false}; },
-    renderSegment: async ({segment, outputLocation}) => {
+    renderSegment: async ({segment, outputLocation, inputProps}) => {
       calls.renderSegment.push(segment.index);
+      calls.inputProps.push(inputProps);
       clock.ms += segmentCost;
       const n = segment.to - segment.from + 1 + frameOffset;
       await execFileP('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=black:size=1920x1080:rate=25', '-frames:v', String(n), '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', outputLocation]);
+      if (hooks.afterSegment) await hooks.afterSegment(segment);
     },
   };
   const argsFor = (extra = []) => ['--episode', episodePath, '--captions', captionsPath, '--composer', composer, '--out', path.join(outDir, 'v.mp4'), '--segment-frames', String(SEG), '--render-id', 'r1', ...extra];
@@ -319,7 +353,7 @@ async function makeEnv() {
   });
   const gateDir = path.join(d, 'qc');
   const makeGate = async (report = {}) => writeGate(gateDir, {sources: await currentSources(), report});
-  return {d, composer, skill, episodePath, outDir, clock, calls, lines, deps, argsFor, draftArgs, makeGate, gateDir, setCost: ms => { segmentCost = ms; }, setFrameOffset: n => { frameOffset = n; }, cleanup: () => fs.rm(d, {recursive: true})};
+  return {d, composer, skill, episodePath, captionsPath, outDir, clock, calls, hooks, lines, deps, argsFor, draftArgs, makeGate, gateDir, setCost: ms => { segmentCost = ms; }, setFrameOffset: n => { frameOffset = n; }, cleanup: () => fs.rm(d, {recursive: true})};
 }
 
 test('final render: gate passes, segments rendered, concat verified, receipt written', async () => {
@@ -337,6 +371,7 @@ test('final render: gate passes, segments rendered, concat verified, receipt wri
     assert.equal(receipt.frameCount, DURATION);
     assert.equal(receipt.outputSha256, await sha256File(out));
     assert.equal(receipt.gateRunId, 'gate-run');
+    assert.equal(receipt.gatesLockSha256, await sha256File(path.join(env.skill, 'scripts/gates.lock.json')));
     assert.equal(receipt.gateReportSha256, await sha256File(gateReport));
     assert.ok(receipt.gateCheckedAtStart && receipt.gateCheckedAtConcat);
     assert.equal(receipt.segments.length, 3);
@@ -384,6 +419,7 @@ test('draft render skips the gate, completes and nulls the gate fields in the re
     const out = path.join(env.outDir, 'v.draft.mp4');
     const receipt = JSON.parse(await fs.readFile(`${out}.receipt.json`, 'utf8'));
     assert.equal(receipt.draft, true);
+    assert.equal(receipt.gatesLockSha256, await sha256File(path.join(env.skill, 'scripts/gates.lock.json')));
     assert.equal(receipt.gateReportPath, null);
     assert.equal(receipt.gateManifestHash, null);
     assert.equal(receipt.frameCount, DURATION);
@@ -502,27 +538,216 @@ test('the media-hash cache lives under the output directory, not inside the comp
   } finally { await env.cleanup(); }
 });
 
-test('validateInputs without episode_schema.mjs checks JSON objects and assetDir only', async () => {
+test('validateInputs: episode_schema.mjs is mandatory (missing or without the exports = refusal), valid is read, captions are projected', async () => {
   const d = await tmpDir('rg-valid-');
   try {
-    const skill = path.join(d, 'skill');
-    await fs.mkdir(path.join(skill, 'scripts'), {recursive: true});
+    // each variant gets its own skill folder: the module is imported by URL and Node caches it
+    const skillWith = async (name, source) => {
+      const skill = path.join(d, name);
+      await fs.mkdir(path.join(skill, 'scripts'), {recursive: true});
+      if (source !== null) await fs.writeFile(path.join(skill, 'scripts/episode_schema.mjs'), source);
+      return skill;
+    };
     const e = path.join(d, 'e.json');
     const c = path.join(d, 'c.json');
-    await fs.writeFile(c, '[]');
+    await fs.writeFile(c, '{"pages": []}');
     await fs.writeFile(e, JSON.stringify({assetDir: 'ep'}));
-    assert.equal((await validateInputs({episodePath: e, captionsPath: c, skillDir: skill})).ok, true);
-    await fs.writeFile(e, JSON.stringify({assetDir: '../x'}));
-    assert.equal((await validateInputs({episodePath: e, captionsPath: c, skillDir: skill})).ok, false);
+    const check = skill => validateInputs({episodePath: e, captionsPath: c, skillDir: skill, composer: d});
+    // no module at all: refused, never a lighter check
+    const none = await check(await skillWith('none', null));
+    assert.equal(none.ok, false);
+    assert.equal(none.errors[0].rule, 'schema-module');
+    // a module without projectCaptions
+    assert.equal((await check(await skillWith('noproj', 'export const validateEpisode = () => ({valid: true, errors: []});\n'))).errors[0].rule, 'schema-module');
+    // `valid` decides: the old `ok` field is ignored
+    const bad = await check(await skillWith('okfield', `
+      export function validateEpisode() { return {ok: true, errors: [{path: '/x', rule: 'R9', message: 'nope'}]}; }
+      export function projectCaptions(c) { return c; }`));
+    assert.equal(bad.ok, false);
+    assert.equal(bad.errors[0].rule, 'R9');
+    // valid: true passes; publicDir is <composer>/public; the captions prop is the projection
+    const good = await check(await skillWith('good', `
+      export function validateEpisode(e, c, opts) { return opts.publicDir === ${JSON.stringify(path.join(d, 'public'))} ? {valid: true, errors: [], warnings: []} : {valid: false, errors: []}; }
+      export function projectCaptions(c) { return {projected: true, pages: c.pages}; }`));
+    assert.equal(good.ok, true);
+    assert.deepEqual(good.captions, {projected: true, pages: []});
+    assert.deepEqual(good.rawCaptions, {pages: []});
+    // unreadable files
     await fs.writeFile(e, '{broken');
-    assert.equal((await validateInputs({episodePath: e, captionsPath: c, skillDir: skill})).ok, false);
-    // when episode_schema.mjs exists it decides
-    await fs.writeFile(e, JSON.stringify({assetDir: 'ep'}));
-    await fs.writeFile(path.join(skill, 'scripts/episode_schema.mjs'), 'export const validateEpisode = () => ({ok: false, errors: [{path: "x", rule: "r", message: "nope"}]});\n');
-    const r = await validateInputs({episodePath: e, captionsPath: c, skillDir: skill});
-    assert.equal(r.ok, false);
-    assert.equal(r.errors[0].message, 'nope');
+    assert.equal((await check(await skillWith('good', null))).errors[0].rule, 'json-parse');
   } finally { await fs.rm(d, {recursive: true}); }
+});
+
+test('validateInputs with the real validator: min-3-beat passes, the unknown-beat-key fixture fails with its rule', async () => {
+  const env = await makeEnv({schema: 'real'});
+  try {
+    const good = await validateInputs({episodePath: env.episodePath, captionsPath: env.captionsPath, skillDir: env.skill, composer: env.composer});
+    assert.equal(good.ok, true, JSON.stringify(good.errors));
+    assert.deepEqual(good.captions, projectCaptions(good.rawCaptions));
+    const {_expect, ...invalid} = await readFixture('invalid/unknown-beat-key-captionLane.json');
+    assert.ok(_expect);
+    await fs.writeFile(env.episodePath, JSON.stringify(invalid));
+    const bad = await validateInputs({episodePath: env.episodePath, captionsPath: env.captionsPath, skillDir: env.skill, composer: env.composer});
+    assert.equal(bad.ok, false);
+    assert.equal(bad.errors[0].rule, 'additionalProperties');
+  } finally { await env.cleanup(); }
+});
+
+test('whole command with the real validator: a valid episode renders (projected captions are the prop), an invalid one is refused with its rule and nothing is rendered', async () => {
+  const env = await makeEnv({schema: 'real'});
+  try {
+    assert.equal(await run(env.draftArgs(), env.deps), EXIT.COMPLETE, env.lines.join('\n'));
+    assert.ok(env.calls.renderSegment.length > 0);
+    const raw = JSON.parse(await fs.readFile(env.captionsPath, 'utf8'));
+    assert.deepEqual(env.calls.inputProps[0].captions, projectCaptions(raw));
+    assert.equal(env.calls.inputProps[0].episode.assetDir, 'cf-a66-min');
+  } finally { await env.cleanup(); }
+  for (const draft of [true, false]) {
+    const bad = await makeEnv({schema: 'real'});
+    try {
+      const {_expect, ...invalid} = await readFixture('invalid/unknown-beat-key-captionLane.json');
+      await fs.writeFile(bad.episodePath, JSON.stringify(invalid));
+      const gate = draft ? [] : ['--gate-report', path.join(bad.d, 'none.json')];
+      const code = await run(draft ? bad.draftArgs() : bad.argsFor(gate), bad.deps);
+      assert.equal(code, EXIT.REFUSED, bad.lines.join('\n'));
+      const status = bad.lines.at(-1);
+      assert.match(status, /^RENDER REFUSED episode\/captions invalid: /);
+      assert.match(status, /additionalProperties/);
+      assert.deepEqual([bad.calls.renderSegment, bad.calls.selectDuration, bad.calls.ensureBundle], [[], 0, 0]);
+      assert.equal(await exists(path.join(bad.outDir, draft ? 'v.draft.mp4' : 'v.mp4')), false);
+      assert.equal(await exists(path.join(bad.outDir, draft ? 'v.draft.render' : 'v.render')), false);
+    } finally { await bad.cleanup(); }
+  }
+});
+
+test('the schema module missing from the skill refuses (exit 3) instead of a JSON-only check', async () => {
+  const env = await makeEnv();
+  try {
+    await fs.rm(path.join(env.skill, 'scripts/episode_schema.mjs'));
+    assert.equal(await run(env.draftArgs(), env.deps), EXIT.REFUSED);
+    assert.match(env.lines.at(-1), /^RENDER REFUSED episode\/captions invalid: .*schema-module/);
+    assert.deepEqual(env.calls.renderSegment, []);
+  } finally { await env.cleanup(); }
+});
+
+// ---- gates lock: final vs draft ----------------------------------------------------------------------
+const lockFileOf = env => path.join(env.skill, 'scripts/gates.lock.json');
+const readRenderManifest = (env, draft) => fs.readFile(path.join(env.outDir, draft ? 'v.draft.render' : 'v.render', 'r1', 'render-manifest.json'), 'utf8').then(JSON.parse);
+const LOCK_STATES = {
+  missing: env => fs.rm(lockFileOf(env)),
+  'invalid (wrong schema)': env => fs.writeFile(lockFileOf(env), JSON.stringify({...lockOf(), schema: 'other'})),
+  'invalid (not json)': env => fs.writeFile(lockFileOf(env), 'nope'),
+  'invalid (escaping path)': env => fs.writeFile(lockFileOf(env), JSON.stringify(lockOf({'../x.mjs': sha256Hex('x')}))),
+  mismatch: env => fs.writeFile(path.join(env.skill, 'scripts/locked_gate.mjs'), 'export const locked = 2;\n'),
+  'listed file missing': env => fs.rm(path.join(env.skill, 'scripts/locked_gate.mjs')),
+};
+
+test('FINAL render: a missing, invalid or mismatching lock is refused (exit 3, nothing rendered)', async () => {
+  for (const [name, mutate] of Object.entries(LOCK_STATES)) {
+    const env = await makeEnv();
+    try {
+      await mutate(env);
+      const gateReport = await env.makeGate();
+      const code = await run(env.argsFor(['--gate-report', gateReport]), env.deps);
+      assert.equal(code, EXIT.REFUSED, `${name}: ${env.lines.join('\n')}`);
+      const status = env.lines.at(-1);
+      assert.match(status, /^RENDER REFUSED integrity check failed: gates-lock/, name);
+      assert.match(status, name === 'missing' ? /gates-lock-missing/ : name.startsWith('invalid') ? /gates-lock-format/ : /gates-lock: /, name);
+      assert.deepEqual(env.calls.renderSegment, [], name);
+      assert.equal(await exists(path.join(env.outDir, 'v.mp4')), false, name);
+      assert.equal(await exists(path.join(env.outDir, 'v.mp4.receipt.json')), false, name);
+    } finally { await env.cleanup(); }
+  }
+});
+
+test('FINAL render: the lock is checked again before the concat (a locked file edited during the render refuses, nothing published)', async () => {
+  const env = await makeEnv();
+  try {
+    const gateReport = await env.makeGate();
+    env.hooks.afterSegment = async seg => { if (seg.index === 2) await fs.writeFile(path.join(env.skill, 'scripts/locked_gate.mjs'), 'export const locked = 3;\n'); };
+    const code = await run(env.argsFor(['--gate-report', gateReport]), env.deps);
+    assert.equal(code, EXIT.REFUSED, env.lines.join('\n'));
+    assert.match(env.lines.at(-1), /^RENDER REFUSED integrity check failed: gates-lock: .*locked_gate\.mjs \(changed\)/);
+    assert.deepEqual(env.calls.renderSegment, [0, 1, 2]);
+    assert.equal(await exists(path.join(env.outDir, 'v.mp4')), false);
+    assert.equal(await exists(path.join(env.outDir, 'v.mp4.receipt.json')), false);
+  } finally { await env.cleanup(); }
+});
+
+test('DRAFT render: lock problems and engine drift are warnings recorded in the render manifest, the receipt keeps its fields', async () => {
+  const states = {
+    ...LOCK_STATES,
+    'engine drift': env => fs.writeFile(path.join(env.composer, 'src/YtNewsStyle01V4.tsx'), reference + '\n// drift\n'),
+  };
+  const expectedId = {missing: 'gates-lock-missing', 'invalid (wrong schema)': 'gates-lock-format', 'invalid (not json)': 'gates-lock-format',
+    'invalid (escaping path)': 'gates-lock-format', mismatch: 'gates-lock', 'listed file missing': 'gates-lock', 'engine drift': 'engine-drift'};
+  for (const [name, mutate] of Object.entries(states)) {
+    const env = await makeEnv();
+    try {
+      await mutate(env);
+      const code = await run(env.draftArgs(), env.deps);
+      assert.equal(code, EXIT.COMPLETE, `${name}: ${env.lines.join('\n')}`);
+      assert.ok(env.lines.some(l => l.startsWith(`RENDER WARNING ${expectedId[name]}:`)), name);
+      const manifest = await readRenderManifest(env, true);
+      assert.equal(manifest.integrity.draft, true, name);
+      assert.ok(manifest.integrity.warnings.some(w => w.id === expectedId[name]), name);
+      const out = path.join(env.outDir, 'v.draft.mp4');
+      const receipt = JSON.parse(await fs.readFile(`${out}.receipt.json`, 'utf8'));
+      assert.deepEqual(Object.keys(receipt), [...RECEIPT_FIELDS], name);
+      assert.equal(receipt.draft, true, name);
+      const lockExists = await exists(lockFileOf(env));
+      assert.equal(receipt.gatesLockSha256, lockExists ? await sha256File(lockFileOf(env)) : null, name);
+      if (name === 'missing') assert.equal(manifest.integrity.lock.status, 'missing');
+      if (name === 'mismatch') assert.equal(manifest.integrity.lock.status, 'mismatch');
+    } finally { await env.cleanup(); }
+  }
+});
+
+test('DRAFT render with a good lock records no warnings and lock.status "ok"; a draft without any lock still renders', async () => {
+  const env = await makeEnv();
+  try {
+    assert.equal(await run(env.draftArgs(), env.deps), EXIT.COMPLETE, env.lines.join('\n'));
+    const manifest = await readRenderManifest(env, true);
+    assert.deepEqual(manifest.integrity.warnings, []);
+    assert.deepEqual([manifest.integrity.lock.status, manifest.integrity.lock.files], ['ok', 1]);
+    assert.ok(!env.lines.some(l => l.startsWith('RENDER WARNING')));
+  } finally { await env.cleanup(); }
+  const none = await makeEnv({lock: 'none'});
+  try {
+    assert.equal(await run(none.draftArgs(), none.deps), EXIT.COMPLETE, none.lines.join('\n'));
+    const receipt = JSON.parse(await fs.readFile(path.join(none.outDir, 'v.draft.mp4.receipt.json'), 'utf8'));
+    assert.equal(receipt.gatesLockSha256, null);
+  } finally { await none.cleanup(); }
+});
+
+test('DRAFT render: root-registration still refuses (exit 3), and a lock change during the render is a changed source', async () => {
+  const env = await makeEnv();
+  try {
+    await fs.writeFile(path.join(env.composer, 'src/Root.tsx'), realRoot.replace('from "./YtNewsStyle01V4";', 'from "./YtNewsStyle01V4Copy";'));
+    assert.equal(await run(env.draftArgs(), env.deps), EXIT.REFUSED);
+    assert.match(env.lines.at(-1), /^RENDER REFUSED integrity check failed: root-registration/);
+    assert.deepEqual(env.calls.renderSegment, []);
+  } finally { await env.cleanup(); }
+  const env2 = await makeEnv();
+  try {
+    env2.hooks.afterSegment = async seg => { if (seg.index === 2) await fs.rm(lockFileOf(env2)); };
+    assert.equal(await run(env2.draftArgs(), env2.deps), EXIT.REFUSED, env2.lines.join('\n'));
+    assert.match(env2.lines.at(-1), /sources changed during the render: sourceHashes\.scripts\/gates\.lock\.json/);
+  } finally { await env2.cleanup(); }
+});
+
+test('integrityVerdict: final refuses every issue (requireLock), draft only refuses what it cannot tolerate', async () => {
+  const seen = [];
+  const check = async opts => {
+    seen.push(opts.requireLock);
+    return {ok: false, issues: [{id: 'engine-drift', message: 'e'}, {id: 'gates-lock', message: 'l'}, {id: 'root-registration', message: 'r'}], warnings: [{id: 'w', message: 'w'}], lock: {status: 'mismatch', sha256: 'x', files: 1}};
+  };
+  const fin = await integrityVerdict({composer: 'c', skillDir: 's', draft: false, check});
+  assert.deepEqual(fin.refusals.map(i => i.id), ['engine-drift', 'gates-lock', 'root-registration']);
+  const dr = await integrityVerdict({composer: 'c', skillDir: 's', draft: true, check});
+  assert.deepEqual(dr.refusals.map(i => i.id), ['root-registration']);
+  assert.deepEqual(dr.warnings.map(i => i.id), ['w', 'engine-drift', 'gates-lock']);
+  assert.deepEqual(seen, [true, false]);
 });
 
 test('newSegmentRecords names files seg-NNN.mp4 and starts pending', () => {

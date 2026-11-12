@@ -603,30 +603,30 @@ function ruleS17(ctx) {
       let budget;
       let what = 'headline';
       if (b.media === 'typo') {
-        if (b.typo === 'card') { budget = 36; what = 'typo-title (card)'; }
-        else if (b.typo === 'final4') { budget = 30; what = 'typo-title (final4)'; }
+        if (b.typo === 'card') { budget = 26; what = 'typo-title (card)'; }
+        else if (b.typo === 'final4') { budget = 28; what = 'typo-title (final4)'; }
         else { budget = 40; what = `typo-eyebrow (${b.typo})`; }
       } else {
         budget = b.layout === 'wide' ? 48 : 44;
       }
       check(at('headline'), b.headline, budget, what);
-      if (b.media === 'typo') check(at('sub'), b.sub, 44, 'typo-sub (final4)');
+      if (b.media === 'typo') check(at('sub'), b.sub, 40, 'typo-sub (final4)');
       else check(at('sub'), b.sub, 48, 'description');
     }
     (b.stats || []).forEach((s, j) => {
       check(`${at('stats')}/${j}/big`, s.big, 10, 'stat big');
       check(`${at('stats')}/${j}/label`, s.label, 18, 'stat label');
     });
-    (b.cards || []).forEach((c, j) => c.lines.forEach((l, k) => check(`${at('cards')}/${j}/lines/${k}`, l, 38, 'typo-line')));
-    (b.items || []).forEach((it, j) => check(`${at('items')}/${j}/text`, it.text, b.typo === 'final4' ? 18 : 14, `typo-item (${b.typo})`));
+    (b.cards || []).forEach((c, j) => c.lines.forEach((l, k) => check(`${at('cards')}/${j}/lines/${k}`, l, 30, 'typo-line')));
+    (b.items || []).forEach((it, j) => check(`${at('items')}/${j}/text`, it.text, b.typo === 'final4' ? 14 : 22, `typo-item (${b.typo})`));
     if (b.vs) {
       for (const side of ['left', 'right']) {
         const s = b.vs[side];
         check(`${at('vs')}/${side}/badge`, s.badge, 18, `vs-${side}-badge`);
-        check(`${at('vs')}/${side}/title`, s.title, 14, `vs-${side}-title`);
-        s.lines.forEach((l, k) => check(`${at('vs')}/${side}/lines/${k}`, l, 20, `vs-${side}-line`));
+        check(`${at('vs')}/${side}/title`, s.title, 12, `vs-${side}-title`);
+        s.lines.forEach((l, k) => check(`${at('vs')}/${side}/lines/${k}`, l, 16, `vs-${side}-line`));
       }
-      check(`${at('vs')}/conclusion`, b.vs.conclusion, 48, 'vs-conclusion');
+      check(`${at('vs')}/conclusion`, b.vs.conclusion, 38, 'vs-conclusion');
     }
     if (b.lower) {
       check(`${at('lower')}/title`, b.lower.title, 30, 'lower-title');

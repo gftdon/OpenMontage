@@ -242,6 +242,46 @@ test('S17 / S18 produce warnings only and never flip valid', () => {
   assert.ok(r.warnings.some((w) => w.rule === 'S18'));
 });
 
+test('S17 text-card budgets: at the budget is silent, one grapheme over warns (warnings only, valid stays true)', () => {
+  // [beat index in sample-v1, path suffix, budget]
+  const cases = [
+    [5, 'headline', 26],                  // card title
+    [5, 'cards/0/lines/0', 30],           // card line
+    [24, 'headline', 28],                 // final4 title
+    [24, 'sub', 40],                      // final4 sub
+    [24, 'items/0/text', 14],             // final4 item
+    [37, 'items/0/text', 22],             // summary3 item
+    [37, 'headline', 40],                 // summary3 eyebrow
+    [20, 'headline', 40],                 // vs eyebrow
+    [20, 'vs/left/title', 12],            // vs side title
+    [20, 'vs/right/lines/0', 16],         // vs side line
+    [20, 'vs/conclusion', 38],            // vs conclusion
+  ];
+  const setAt = (ep, beat, suffix, value) => {
+    const parts = suffix.split('/');
+    let node = ep.beats[beat];
+    for (const part of parts.slice(0, -1)) node = node[part];
+    node[parts.at(-1)] = value;
+  };
+  const sample = readJson(path.join(FX, 'valid/sample-v1.json'));
+  const sampleCaptions = captions('sample-captions.json');
+  for (const [beat, suffix, budget] of cases) {
+    const where = `/beats/${beat}/${suffix}`;
+    const at = clone(sample);
+    setAt(at, beat, suffix, 'x'.repeat(budget));
+    const rAt = validateEpisode(at, sampleCaptions);
+    assert.equal(rAt.valid, true, `${where}: ${JSON.stringify(rAt.errors)}`);
+    assert.equal(rAt.warnings.some((w) => w.rule === 'S17' && w.path === where), false, `${where} at budget ${budget}`);
+    const over = clone(sample);
+    setAt(over, beat, suffix, 'x'.repeat(budget + 1));
+    const rOver = validateEpisode(over, sampleCaptions);
+    assert.equal(rOver.valid, true, `${where}: ${JSON.stringify(rOver.errors)}`);
+    const warn = rOver.warnings.find((w) => w.rule === 'S17' && w.path === where);
+    assert.ok(warn, `${where} one over budget ${budget}`);
+    assert.match(warn.message, new RegExp(`is ${budget + 1} graphemes, budget is ${budget}`));
+  }
+});
+
 test('S19 without captions is a warning "captions not checked"', () => {
   const r = validateEpisode(baseMin());
   assert.equal(r.valid, true);
