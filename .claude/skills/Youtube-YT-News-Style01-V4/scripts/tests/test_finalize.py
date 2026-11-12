@@ -280,7 +280,28 @@ def tearDownModule():
         raise AssertionError('a test leaked files into the skill tree: %s' % stray)
 
 
-def write_receipts(repo, run_id=RUN_ID, name=NAME):
+LIB_BYTES = b'LIBRARY-TRACK-BYTES'
+LIB_FILE = 'calm-tech.mp3'
+
+
+def lib_track(**kw):
+    d = {'sha256': hashlib.sha256(LIB_BYTES).hexdigest(), 'file': LIB_FILE, 'title': 'Calm Tech', 'license': 'CC0-1.0',
+         'origin': 'https://example.test/calm', 'approved_by': 'owner', 'approved_on': '2026-11-12', 'duration_sec': 120}
+    d.update(kw)
+    return d
+
+
+def library_sidecar(bed, **kw):
+    """The sidecar fetch_broll.py writes when it falls back to the approved library."""
+    d = {'schema': 'yt-news-v4-music-source', 'provider': 'music_library', 'track_id': None, 'url': None, 'track_title': 'Calm Tech',
+         'library_file': LIB_FILE, 'license': 'CC0-1.0', 'origin': 'https://example.test/calm', 'approved_by': 'owner',
+         'approved_on': '2026-11-12', 'manifest_sha256': 'e' * 64, 'query': 'calm technology', 'fallback_reason': 'pixabay 403',
+         'sha256': sha(bed), 'fetched_at': '2026-11-12T00:00:00Z'}
+    d.update(kw)
+    return d
+
+
+def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=b'BED-MUSIC', sidecar=None):
     """Layout report v3 + run manifest, render receipt and mux receipt in the shapes the real writers produce."""
     proj = repo / 'projects' / 'p1'
     lock = repo / '.claude' / 'skills' / name / 'scripts' / 'gates.lock.json'
@@ -292,10 +313,10 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME):
     rd.mkdir(parents=True, exist_ok=True)
     bed = proj / 'assets' / 'audio' / 'bed.mp3'
     bed.parent.mkdir(parents=True, exist_ok=True)
-    bed.write_bytes(b'BED-MUSIC')
-    Path(str(bed) + '.source.json').write_text(json.dumps({
-        'schema': 'yt-news-v4-music-source', 'provider': 'pixabay', 'track_id': '42', 'track_title': 'Calm Tech', 'url': 'https://example.test/42',
-        'query': 'calm technology', 'sha256': sha(bed), 'fetched_at': '2026-11-12T00:00:00Z'}))
+    bed.write_bytes(bed_bytes)
+    Path(str(bed) + '.source.json').write_text(json.dumps(sidecar(bed) if callable(sidecar) else sidecar or {
+        'schema': 'yt-news-v4-music-source', 'provider': 'pixabay_music', 'track_id': '42', 'track_title': 'Calm Tech',
+        'url': 'https://example.test/42', 'query': 'calm technology', 'sha256': sha(bed), 'fetched_at': '2026-11-12T00:00:00Z'}))
     manifest = {'schema': 'yt-news-v4-run-manifest', 'version': 1, 'runId': run_id, 'compositionId': COMP,
                 'sourceHashes': {'episode.json': sha(ep), 'captions.json': sha(cap), 'scripts/gates.lock.json': sha(lock),
                                  'src/YtNewsStyle01V4.tsx': sha(composer / 'src' / 'YtNewsStyle01V4.tsx'),
@@ -347,13 +368,19 @@ ROOT_SRC = ('import { YtNewsStyle01V4, calculateYtNewsStyle01V4Metadata } from "
 REAL_NODE = ('episode_schema.mjs', 'gate_integrity.mjs')
 
 
-def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), required=None):
+def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), required=None, library_tracks=None, manifest_text=None):
     """real: names of node scripts to copy from the real skill instead of the stub (the real engine team files)."""
     repo = Path(tmp) / 'repo'
     skill = repo / '.claude' / 'skills' / name
     (skill / 'scripts' / 'tests').mkdir(parents=True)
-    for f in ('finalize.py', 'gates_lock.py', 'final_av_checks.py'):
+    for f in ('finalize.py', 'gates_lock.py', 'final_av_checks.py', 'music_library.py'):
         shutil.copy(SCRIPTS / f, skill / 'scripts' / f)
+    # the skill's own (locked) approved-music manifest + the library files it lists (outside the skill, like music_library/)
+    tracks = [lib_track()] if library_tracks is None else library_tracks
+    (skill / 'scripts' / 'music_library.json').write_text(manifest_text if manifest_text is not None else json.dumps(
+        {'schema': 'yt-news-v4-music-library', 'version': 1, 'tracks': tracks}))
+    (Path(tmp) / 'repo' / 'music_library').mkdir(parents=True, exist_ok=True)
+    (Path(tmp) / 'repo' / 'music_library' / LIB_FILE).write_bytes(LIB_BYTES)
     (skill / 'scripts' / 'qc_thresholds.json').write_text('{}')
     (skill / 'scripts' / 'tests' / 'fixture_test.py').write_text('# locked test file\n')
     (skill / 'SKILL.md').write_text('fake\n')
@@ -382,7 +409,7 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     sh(repo, 'git', 'config', 'user.email', 't@t')
     sh(repo, 'git', 'config', 'user.name', 't')
     sh(repo, 'git', 'config', 'commit.gpgsign', 'false')
-    (repo / '.gitignore').write_text('__pycache__/\nprojects/\nout/\n.stub_*\nremotion-composer/public/\n')
+    (repo / '.gitignore').write_text('__pycache__/\nprojects/\nout/\nout-b/\n.stub_*\nremotion-composer/public/\nmusic_library/\n')
     sh(repo, 'git', 'add', '-A')            # a lock is only written over files git tracks
     if required is None and 'gate_integrity.mjs' in omit:
         required = EXTERNAL_PATHS               # no script to ask: the lock is built from the known list
@@ -414,11 +441,14 @@ class FinalizeBase(unittest.TestCase):
     real = ()
     external = ()               # extra externals (the required ones are always locked unless required=() is set)
     required = None
+    library_tracks = None       # None = one usable approved track; [] = an empty library
+    manifest_text = None        # a raw manifest text (e.g. invalid JSON), written before the lock is made
 
     def setUp(self):
         self.tmp = str(Path(tempfile.mkdtemp(prefix='finalize-')).resolve())
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.repo = make_repo(self.tmp, self.omit, name=self.name, real=self.real, external=self.external, required=self.required)
+        self.repo = make_repo(self.tmp, self.omit, name=self.name, real=self.real, external=self.external, required=self.required,
+                              library_tracks=self.library_tracks, manifest_text=self.manifest_text)
         self.proj = self.repo / 'projects' / 'p1'
         self.rdir = self.proj / 'qc' / 'finalize'
         self.deliver = self.repo / 'out' / 'episode.mp4'
@@ -2446,7 +2476,7 @@ class PreflightTests(PreflightBase):
     def test_all_ok_exit_0_one_line_per_check_and_no_project_or_deliver_needed(self):
         self.assertEqual(0, self.run_pre(), self.out)
         names = ['tool-node', 'tool-ffmpeg', 'tool-ffprobe', 'tool-git', 'tool-swift', 'python-modules', 'composer-node-modules',
-                 'fonts', 'gate-lock', 'word-timing']
+                 'fonts', 'gate-lock', 'word-timing', 'music-library']
         got = [l.split(' ', 3)[1:3] for l in self.lines()[:-1]]
         self.assertEqual([['ok', n + ':'] for n in names], got)
         self.assertTrue(self.lines()[-1].startswith('PREFLIGHT PASS (exit 0)'), self.out)
@@ -2561,6 +2591,32 @@ class PreflightTests(PreflightBase):
             self.assertEqual(4, self.run_pre(), self.out)
         self.line('FAIL', 'word-timing')
 
+    def test_music_library_ok_with_one_usable_track(self):
+        self.assertEqual(0, self.run_pre(), self.out)
+        self.assertEqual('PREFLIGHT ok music-library: 1 approved track(s) usable, first: calm-tech.mp3', self.line('ok', 'music-library'))
+
+    def test_music_library_listed_but_file_missing_or_wrong_is_fail_exit_4(self):
+        (self.repo / 'music_library' / LIB_FILE).unlink()
+        self.assertEqual(4, self.run_pre(), self.out)
+        line = self.line('FAIL', 'music-library')
+        self.assertIn('no approved track is usable: calm-tech.mp3: missing', line)
+        self.assertIn('library dir %s' % (self.repo / 'music_library'), line)
+        (self.repo / 'music_library' / LIB_FILE).write_bytes(b'DIFFERENT BYTES')
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertIn('calm-tech.mp3: sha-mismatch', self.line('FAIL', 'music-library'))
+
+    def test_music_library_dir_override_is_honoured(self):
+        other = Path(self.tmp) / 'elsewhere'
+        other.mkdir()
+        shutil.move(str(self.repo / 'music_library' / LIB_FILE), str(other / LIB_FILE))
+        self.assertEqual(4, self.run_pre(), self.out)                       # the default directory no longer has it
+        with mock.patch.dict(os.environ, {'MUSIC_LIBRARY_DIR': str(other)}):
+            self.assertEqual(0, self.run_pre(), self.out)
+            self.line('ok', 'music-library')
+        with mock.patch.dict(os.environ, {'MUSIC_LIBRARY_DIR': 'relative/dir'}):
+            self.assertEqual(4, self.run_pre(), self.out)
+            self.assertIn('must be an absolute path', self.line('FAIL', 'music-library'))
+
     def test_preflight_takes_no_project_or_deliver(self):
         m = self.module()
         for extra in (['--project', 'projects/p1'], ['--deliver', str(self.deliver)], ['--check']):
@@ -2583,7 +2639,29 @@ class PreflightTests(PreflightBase):
                            cwd=self.tmp)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertTrue(r.stdout.splitlines()[-1].startswith('PREFLIGHT PASS (exit 0)'))
-        self.assertEqual(11, len([l for l in r.stdout.splitlines() if l.startswith('PREFLIGHT ')]))
+        self.assertEqual(12, len([l for l in r.stdout.splitlines() if l.startswith('PREFLIGHT ')]))
+
+
+class PreflightEmptyLibraryTests(PreflightBase):
+    library_tracks = []
+
+    def test_an_empty_manifest_is_fail_exit_4(self):
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertEqual('PREFLIGHT FAIL music-library: music library is empty: no approved track in scripts/music_library.json',
+                         self.line('FAIL', 'music-library'))
+        self.assertTrue(self.lines()[-1].startswith('PREFLIGHT FAIL (exit 4): music-library'), self.out)
+
+    def test_the_real_run_is_not_blocked_by_it(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+
+
+class PreflightInvalidManifestTests(PreflightBase):
+    manifest_text = 'not json at all'
+
+    def test_an_invalid_manifest_is_fail_exit_4(self):
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertIn('music library cannot be used', self.line('FAIL', 'music-library'))
+        self.assertIn('not valid JSON', self.line('FAIL', 'music-library'))
 
 
 class RealRunEnvironmentTests(PreflightBase):
@@ -2650,10 +2728,12 @@ class MusicBedProvenanceTests(FinalizeBase):
     def test_music_provenance_is_copied_into_the_delivery_receipt(self):
         self.assertEqual(0, self.run_fin(), self.out)
         m = self.receipt()['music']
-        self.assertEqual(('pixabay', '42', 'Calm Tech', 'https://example.test/42'),
+        self.assertEqual(('pixabay_music', '42', 'Calm Tech', 'https://example.test/42'),
                          (m['provider'], m['track_id'], m['track_title'], m['url']))
         self.assertEqual(sha(self.sidecar()), m['sidecar']['sha256'])
+        self.assertEqual(sha(self.proj / 'assets' / 'audio' / 'bed.mp3'), m['bed_sha256'])
         self.assertEqual(m, self.gate(self.receipt(), 'mux')['music'])
+        self.assertNotIn('library_file', m)                       # the online record carries no library fields
 
     def test_bed_without_a_fetch_record_is_refused(self):
         self.sidecar().unlink()
@@ -2679,6 +2759,115 @@ class MusicBedProvenanceTests(FinalizeBase):
         (self.proj / 'assets' / 'audio' / 'bed.mp3').write_bytes(b'ANOTHER SONG')
         self.assertEqual(2, self.run_fin())
         self.assertIn('bed', self.gate(self.failed(), 'mux')['reason'])
+
+
+class MusicLibraryBedTests(FinalizeBase):
+    """provider music_library: the bed must be a track of the SKILL's own scripts/music_library.json."""
+
+    def library_bed(self, bed_bytes=LIB_BYTES, **sidecar_kw):
+        write_receipts(self.repo, name=self.name, bed_bytes=bed_bytes, sidecar=lambda bed: library_sidecar(bed, **sidecar_kw))
+
+    def mux_reason(self):
+        g = self.gate(self.failed(), 'mux')
+        self.assertEqual('stale', g['status'])
+        return g['reason']
+
+    def test_a_bed_from_the_approved_library_passes_and_the_receipt_carries_the_reference(self):
+        self.library_bed()
+        self.assertEqual(0, self.run_fin(), self.out)
+        m = self.receipt()['music']
+        manifest = self.skill / 'scripts' / 'music_library.json'
+        self.assertEqual('music_library', m['provider'])
+        self.assertEqual(sha(self.proj / 'assets' / 'audio' / 'bed.mp3'), m['bed_sha256'])
+        self.assertEqual((LIB_FILE, 'Calm Tech', 'CC0-1.0', 'https://example.test/calm', 'owner', '2026-11-12'),
+                         (m['library_file'], m['track_title'], m['license'], m['origin'], m['approved_by'], m['approved_on']))
+        self.assertEqual(sha(manifest), m['manifest_sha256'])                 # the locked manifest in force at delivery
+        self.assertEqual('e' * 64, m['sidecar_manifest_sha256'])              # what the fetch step saw (may be older)
+        self.assertIsNone(m['track_id'])
+        self.assertIsNone(m['url'])
+        self.assertEqual(m, self.gate(self.receipt(), 'mux')['music'])
+
+    def test_a_bed_that_is_not_in_the_manifest_is_refused_naming_its_sha(self):
+        self.library_bed(bed_bytes=b'SOME OTHER SONG')
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        sha12 = sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12]
+        self.assertEqual('music bed %s is not in the approved music library (scripts/music_library.json)' % sha12, self.mux_reason())
+
+    def test_sidecar_library_file_or_license_that_differs_from_the_manifest_is_refused(self):
+        for kw, text in (({'library_file': 'other.mp3'}, "library_file is 'other.mp3' but the manifest says 'calm-tech.mp3'"),
+                         ({'license': 'CC-BY-4.0'}, "license is 'CC-BY-4.0' but the manifest says 'CC0-1.0'")):
+            self.library_bed(**kw)
+            self.assertEqual(2, self.run_fin(), (kw, self.out))
+            reason = self.mux_reason()
+            self.assertIn('is not in the approved music library as described by its fetch record', reason)
+            self.assertIn(text, reason)
+            self.assertIn(sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12], reason)
+
+    def test_a_path_in_the_sidecar_or_an_env_var_cannot_point_at_another_manifest(self):
+        decoy = Path(self.tmp) / 'decoy-manifest.json'
+        decoy.write_text(json.dumps({'schema': 'yt-news-v4-music-library', 'version': 1, 'tracks': [lib_track(
+            sha256=hashlib.sha256(b'SOME OTHER SONG').hexdigest(), file='other.mp3')]}))
+        self.library_bed(bed_bytes=b'SOME OTHER SONG', manifest_path=str(decoy), manifest=str(decoy), library_manifest=str(decoy))
+        env = {k: str(decoy) for k in ('MUSIC_LIBRARY_MANIFEST', 'MUSIC_LIBRARY_JSON', 'MUSIC_MANIFEST')}
+        env['MUSIC_LIBRARY_DIR'] = str(Path(self.tmp))
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(2, self.run_fin(), self.out)
+        self.assertIn('is not in the approved music library', self.mux_reason())
+        shutil.copy(decoy, self.proj / 'assets' / 'audio' / 'music_library.json')          # nor a manifest inside the project
+        self.assertEqual(2, self.run_fin(), self.out)
+        # and the other way round: a good bed is accepted whatever the sidecar claims about a manifest path
+        self.library_bed(manifest_path='/nonexistent/manifest.json')
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_an_unknown_or_missing_provider_fails_closed(self):
+        for provider in ('spotify', 'pixabay', '', None):
+            write_receipts(self.repo, name=self.name, sidecar=lambda bed, p=provider: dict(library_sidecar(bed), provider=p))
+            self.assertEqual(2, self.run_fin(), (provider, self.out))
+            self.assertIn('has an unknown provider %r' % (provider,), self.mux_reason())
+            self.assertIn('expected pixabay_music or music_library', self.mux_reason())
+
+    def test_a_valid_library_bed_still_delivers_when_the_library_directory_is_empty_or_gone(self):
+        self.library_bed()
+        shutil.rmtree(self.repo / 'music_library')                  # the library file is not needed at delivery time
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        self.assertEqual(0, self.run_fin(), self.out)
+        (self.repo / 'music_library').mkdir()
+        self.deliver.unlink()
+        Path(str(self.deliver) + '.receipt.json').unlink()
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertNotIn('music-library', self.out)                 # the check is preflight-only
+
+    def test_the_online_provider_is_unchanged(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertEqual('pixabay_music', self.receipt()['music']['provider'])
+
+
+class MusicLibraryInvalidManifestTests(FinalizeBase):
+    manifest_text = '{"not": "a manifest"'
+
+    def test_an_invalid_manifest_fails_a_library_bed_but_not_an_online_one(self):
+        write_receipts(self.repo, name=self.name, bed_bytes=LIB_BYTES, sidecar=lambda bed: library_sidecar(bed))
+        self.assertEqual(2, self.run_fin(), self.out)
+        reason = self.gate(self.failed(), 'mux')['reason']
+        self.assertIn('music bed %s is not in the approved music library: scripts/music_library.json cannot be used' % sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12], reason)
+        self.assertIn('not valid JSON', reason)
+        write_receipts(self.repo, name=self.name)                   # the online record never reads the manifest
+        self.assertEqual(0, self.run_fin(), self.out)
+
+
+class MusicLibraryEmptyManifestRealRunTests(FinalizeBase):
+    library_tracks = []
+
+    def test_an_empty_library_does_not_stop_a_real_run_or_a_check(self):
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertNotIn('music-library', self.out)
+
+    def test_an_empty_manifest_refuses_a_library_bed(self):
+        write_receipts(self.repo, name=self.name, bed_bytes=LIB_BYTES, sidecar=lambda bed: library_sidecar(bed))
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertIn('is not in the approved music library (scripts/music_library.json)', self.gate(self.failed(), 'mux')['reason'])
 
 
 class ComposerPathTests(FinalizeBase):

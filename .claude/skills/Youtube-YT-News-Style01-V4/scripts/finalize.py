@@ -147,7 +147,22 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    `--check` and by `--preflight` (same function).  ONE intentional difference: `word-timing` (venv / extractor / cached
 #    whisper model of word_timing.sh) is `--preflight`-only; finalize never runs word_timing.sh.
 # -- fetch_broll.py --music : <bed>.source.json {schema "yt-news-v4-music-source", provider, track_id, track_title, url,
-#    query, sha256, fetched_at}; sha256 must equal the bed file's sha256
+#    query, sha256, fetched_at}; sha256 must equal the bed file's sha256.  The bed itself is the file the MUX RECEIPT names
+#    (bed.path + bed.sha256, re-hashed); the sidecar is looked up beside THAT path.  provider:
+#      "pixabay_music"  -> the record above, nothing more.
+#      "music_library"  -> the owner-approved local library (music_library.py / music_library.json, both in the skill, so the
+#                          gate lock covers them): the bed's sha256 MUST be a track of the skill's OWN scripts/music_library.json
+#                          (SCRIPTS_DIR, never a path from the sidecar / project / environment), and the sidecar's library_file
+#                          and license must equal that manifest entry.  Not in the manifest, unreadable manifest or a field
+#                          mismatch fail the `mux` record ("... is not in the approved music library").  The library FILE in
+#                          music_library/ is NOT needed at delivery time (the bed is already in the project).
+#      anything else    -> fails closed.
+#    The delivery receipt `music` entry = provider, bed_sha256, track_id, track_title, url, sidecar {path, sha256} and, for the
+#    library: library_file, license, origin, approved_by, approved_on, manifest_sha256 (+ sidecar_manifest_sha256).
+# -- music-library (`--preflight` ONLY, like word-timing; a real run and --check do not run it): at least one track of
+#    scripts/music_library.json must be usable (music_library.check_library status "ok").  The online source (Pixabay) is
+#    refused at the time of writing, so the library is the one music source every run can rely on; failing at step 0 is
+#    cheaper than failing at the music step an hour in.  Empty / invalid manifest or no usable file = exit 4 class.
 # =================================================================================================================
 
 # -- conventions (override ONLY via the manifest, and only the keys in OVERRIDABLE) ----------------------------
@@ -1241,6 +1256,31 @@ def verify_render_receipt(receipt_path, ctx, layout_info, probe=None):
 
 
 MUSIC_SCHEMA = 'yt-news-v4-music-source'
+MUSIC_PROVIDER_ONLINE = 'pixabay_music'
+MUSIC_PROVIDER_LIBRARY = 'music_library'      # == music_library.SIDECAR_PROVIDER
+MUSIC_MANIFEST = SCRIPTS_DIR / 'music_library.json'       # the skill's own (locked) copy: the only manifest that counts
+
+
+def verify_library_music(src, bed_sha):
+    """provider music_library: the bed must be a track of the skill's own manifest.  -> (problems, receipt fields)"""
+    short = bed_sha[:12]
+    try:
+        lib = load_sibling('music_library')
+        manifest = lib.load_manifest(MUSIC_MANIFEST)
+        track = lib.find_track(manifest, bed_sha)
+    except Exception as e:  # noqa: BLE001 - MusicLibraryError, a missing helper, anything: fail closed
+        return ['music bed %s is not in the approved music library: scripts/music_library.json cannot be used (%s)'
+                % (short, str(e) or type(e).__name__)], {}
+    if not isinstance(track, dict):
+        return ['music bed %s is not in the approved music library (scripts/music_library.json)' % short], {}
+    bad = [(k, src.get(k), track.get(f)) for k, f in (('library_file', 'file'), ('license', 'license')) if src.get(k) != track.get(f)]
+    if bad:
+        return ['music bed %s is not in the approved music library as described by its fetch record: %s'
+                % (short, ', '.join('%s is %r but the manifest says %r' % b for b in bad))], {}
+    fields = {'library_file': track.get('file'), 'track_title': track.get('title'), 'license': track.get('license'),
+              'origin': track.get('origin'), 'approved_by': track.get('approved_by'), 'approved_on': track.get('approved_on'),
+              'manifest_sha256': sha256_file(MUSIC_MANIFEST), 'sidecar_manifest_sha256': src.get('manifest_sha256')}
+    return [], fields
 
 
 def verify_mux_receipt(receipt_path, ctx):
@@ -1278,8 +1318,17 @@ def verify_mux_receipt(receipt_path, ctx):
         elif not (valid_sha(src.get('sha256')) and src['sha256'].lower() == bed_sha):
             p.append('music bed has no fetch record: %s sha256 does not match %s' % (ctx.rel(sidecar), ctx.rel(bed_path)))
         else:
+            provider = src.get('provider')
             info['music'] = {k: src.get(k) for k in ('provider', 'track_id', 'track_title', 'url')}
+            info['music']['bed_sha256'] = bed_sha
             info['music']['sidecar'] = {'path': ctx.rel(sidecar), 'sha256': ctx.hash(sidecar)}
+            if provider == MUSIC_PROVIDER_LIBRARY:
+                lp, fields = verify_library_music(src, bed_sha)
+                p += lp
+                info['music'].update(fields)
+            elif provider != MUSIC_PROVIDER_ONLINE:
+                p.append('music bed %s has an unknown provider %r in %s (expected %s or %s)'
+                         % (bed_sha[:12], provider, ctx.rel(sidecar), MUSIC_PROVIDER_ONLINE, MUSIC_PROVIDER_LIBRARY))
     return p, info
 
 
@@ -1636,13 +1685,14 @@ def whisper_snapshot(model):
     return None, hub
 
 
-def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=False, word_timing=True):
+def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=False, word_timing=True):  # word_timing = the preflight-only checks
     """Fail-closed environment checks, shared by a real run and `finalize.py --preflight`.  Never raises, never touches the
     network, never loads a model.  -> [{name, status: ok|FAIL|skip, detail, cls}] in the order of the preflight listing.
     lock_problems: the problems check_integrity() found (None = not checked, an empty list = the lock verified).
-    word_timing: the local-whisper check is the ONE intentional difference between `--preflight` (True) and a real run /
-    `--check` (False): finalize never calls word_timing.sh, so a missing model cache at delivery time must not block an
-    episode whose timing already passed the `timing` / `derived` gates.  Every other check is identical."""
+    word_timing: the preflight-only checks, the ONLY intentional difference between `--preflight` (True) and a real run /
+    `--check` (False): `word-timing` (finalize never calls word_timing.sh, so a missing model cache at delivery time must not
+    block an episode whose timing already passed the `timing` / `derived` gates) and `music-library` (the delivery only needs
+    the bed already in the project, not the library file).  Every other check is identical."""
     out = []
 
     def add(name, status, detail, cls=0):
@@ -1715,13 +1765,31 @@ def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=F
         add('word-timing', 'FAIL', '; '.join(problems) + ' (word_timing.sh would exit 4; nothing is downloaded)', 4)
     else:
         add('word-timing', 'ok', 'venv %s, %s, model %s cached at %s (not loaded)' % (venv, tool, model, snap))
+    # 7. approved local music library (--preflight only): the online source is refused at the time of writing, so a usable
+    #    library is what every run relies on; failing here is cheaper than at the music step an hour in
+    try:
+        lib = load_sibling('music_library')
+        manifest = lib.load_manifest(MUSIC_MANIFEST)
+        tracks = manifest.get('tracks') or []
+        if not tracks:
+            add('music-library', 'FAIL', 'music library is empty: no approved track in scripts/music_library.json', 4)
+        else:
+            res = lib.check_library(Path(repo_root), manifest)
+            usable = [r for r in res if r.get('status') == 'ok']
+            if usable:
+                add('music-library', 'ok', '%d approved track(s) usable, first: %s' % (len(usable), usable[0].get('file')))
+            else:
+                add('music-library', 'FAIL', 'no approved track is usable: %s (library dir %s)'
+                    % (', '.join('%s: %s' % (r.get('file'), r.get('status')) for r in res), lib.library_dir(Path(repo_root))), 4)
+    except Exception as e:  # noqa: BLE001
+        add('music-library', 'FAIL', 'music library cannot be used: %s' % (str(e) or type(e).__name__), 4)
     return out
 
 
 def preflight(args):
     """`finalize.py --preflight`: print one line per check; exit 0 all ok, 3 integrity, 4 tool / dependency missing.
     A real run and `--check` execute the same environment_checks() except `word-timing` (local whisper for word_timing.sh):
-    that one is preflight-only, on purpose (finalize never calls word_timing.sh)."""
+    that one is preflight-only, on purpose (finalize never calls word_timing.sh); so is `music-library`."""
     deadline = Deadline(TOTAL_BUDGET_SEC)
     STOP.clear()
     tools = resolve_tools()

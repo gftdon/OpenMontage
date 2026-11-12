@@ -1,0 +1,16 @@
+{
+  "schema": "yt-news-v4-music-library",
+  "version": 1,
+  "tracks": [
+    {
+      "sha256": "24da9d0b0dd4a7b8e3fb49d7bb80e3c2a89c29af4b68dd4f7033ab24b0a12ea2",
+      "file": "v4-bed-02-calm-guitar.mp3",
+      "title": "V4 bed 02 - calm guitar",
+      "license": "generated for this channel via Google Gemini API",
+      "origin": "generated 2026-11-12 with gemini-api music, model lyria-3.5",
+      "approved_by": "owner",
+      "approved_on": "2026-11-12",
+      "duration_sec": 176.05
+    }
+  ]
+}

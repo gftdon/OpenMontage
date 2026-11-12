@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
-"""V4: fetch the MUSIC BED (Pixabay Music, free licence). Stock FOOTAGE fetching is disabled in V4.
+"""V4: fetch the MUSIC BED: the owner-approved local library first, Pixabay Music (free licence) only when that
+library is empty. Stock FOOTAGE fetching is disabled in V4.
 
   python fetch_broll.py --music "<query>" projects/<slug>/assets/audio/bed.mp3 [--force]
 
+ORDER (the owner chose the music, so an online source never silently replaces it):
+ 1. The approved list `music_library.json` next to this script (helper: music_library.py) is loaded first. An
+    unreadable / invalid list, or an invalid MUSIC_LIBRARY_DIR, is exit 4 (Pixabay is not tried).
+ 2. List with >= 1 track: library ONLY, Pixabay is never called. The first track in list order whose file is
+    present with the right sha256 is copied atomically to out.mp3 and the copy is re-verified. Files live in
+    `<repo root>/music_library` or the absolute dir in env MUSIC_LIBRARY_DIR (repo root = the current directory,
+    the same "run from the repo root" convention as the Pixabay tool). No usable track -> exit 4.
+ 3. EMPTY list: Pixabay Music, as before. If that fails too -> exit 4 naming both reasons.
+There is no flag or variable that points the fetch at another list.
+
 Writes the mp3 and a sidecar `<out.mp3>.source.json`
-  {"schema":"yt-news-v4-music-source","provider":"pixabay_music","track_id","track_title","url","query",
-   "sha256":<of the mp3>,"fetched_at":<UTC ISO>}      (a field the provider does not return is null)
-The mp3 is only accepted when ffprobe finds an audio stream of at least 30 s. An existing out.mp3 is never
-overwritten without --force (a failed --force run keeps the previous pair). Transient failures (network errors,
-HTTP 429 / 5xx, timeouts) are retried with backoff inside MUSIC_RETRY_BUDGET_SECONDS (180 s).
+  library:  {"schema":"yt-news-v4-music-source","provider":"music_library","track_id":null,"track_title":<manifest
+             title>,"url":null,"query","sha256":<of the delivered mp3>,"fetched_at":<UTC ISO>,"library_file",
+             "license","origin","approved_by","approved_on","manifest_sha256":<of music_library.json>}
+  pixabay:  {"schema":"yt-news-v4-music-source","provider":"pixabay_music","track_id","track_title","url","query",
+             "sha256":<of the mp3>,"fetched_at":<UTC ISO>}      (a field the provider does not return is null)
+A Pixabay mp3 is only accepted when ffprobe finds an audio stream of at least 30 s. An existing out.mp3 is never
+overwritten without --force (a failed --force run keeps the previous pair). Transient Pixabay failures (network
+errors, HTTP 429 / 5xx, timeouts) are retried with backoff inside MUSIC_RETRY_BUDGET_SECONDS (180 s).
 Exit codes: 0 ok (valid mp3 + sidecar exist), 2 usage / refusal to overwrite, 3 footage mode refused,
-4 fetch failed (one `ERROR:` line; no partial mp3 / sidecar left).
+4 no music bed could be fetched (one `ERROR:` line ending "no music bed was written"; no partial mp3 /
+sidecar left).
 
 FOOTAGE MODE (positional QUERIES.json OUT_DIR, --plan, --context, --dry-run) exits 3 with
   "V4: stock footage fetching is disabled (no verified relevance verdicts); only --music is available".
@@ -60,6 +75,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -67,6 +83,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broll_ledger as bl  # noqa: E402
+import music_library as ml  # noqa: E402
 
 FOOTAGE_DISABLED_MESSAGE = ("V4: stock footage fetching is disabled (no verified relevance verdicts); "
                             "only --music is available")
@@ -345,15 +362,89 @@ def _first(data, *keys):
     return None
 
 
-def fetch_music(query: str, out_path, force: bool = False) -> dict:
+def fetch_music(query: str, out_path, force: bool = False, manifest_path=None, repo_root=None) -> dict:
     """Fetch the bed. Returns the sidecar dict; raises MusicRefused (exit 2) / MusicFailed (exit 4).
-    On any failure nothing new is left behind (a failed --force run keeps the previous mp3 + sidecar)."""
+    The approved library (music_library.py) comes first: a non-empty list means library only (no Pixabay call);
+    Pixabay is used only when the list is empty. On any failure nothing new is left behind (a failed --force run
+    keeps the previous mp3 + sidecar).
+    manifest_path / repo_root are a test seam only: main() never passes them (default: the manifest shipped with
+    the skill, and the current directory as repo root)."""
     out = Path(out_path)
-    side = Path(str(out) + ".source.json")
     if out.suffix.lower() != ".mp3":
         raise MusicRefused(f"MUSIC_OUT must be an .mp3 file (got {out})")
     if out.exists() and not force:
         raise MusicRefused(f"{out} already exists; refusing to overwrite it (use --force)")
+    root = Path(repo_root) if repo_root is not None else Path(os.getcwd())
+    try:
+        manifest, manifest_sha = ml.load_manifest_with_sha(manifest_path if manifest_path is not None else ml.manifest_path())
+        ml.library_dir(root)    # an invalid MUSIC_LIBRARY_DIR stops the run before anything is fetched
+    except ml.MusicLibraryError as e:
+        raise MusicFailed(f"music library: {_one_line(e)}; no music bed was written")
+    if manifest["tracks"]:
+        try:
+            return _copy_from_library(query, out, manifest, manifest_sha, root)
+        except MusicFailed as e:
+            raise MusicFailed(f"music library: {_one_line(e)}; Pixabay is not tried because the approved list is not empty; "
+                              "no music bed was written")
+    try:
+        return _fetch_pixabay(query, out)
+    except MusicFailed as pixabay_error:
+        try:
+            ml.pick_track(root, manifest)      # an empty list always raises "music library is empty (...)"
+            empty = "the approved list is empty"
+        except ml.MusicLibraryError as e:
+            empty = _one_line(e)
+        raise MusicFailed(f"Pixabay: {_one_line(pixabay_error)}; music library: {empty}; no music bed was written")
+
+
+def _copy_from_library(query: str, out: Path, manifest: dict, manifest_sha: str, root: Path) -> dict:
+    side = Path(str(out) + ".source.json")
+    part = out.with_name(out.name + ".part")
+    side_part = side.with_name(side.name + ".part")
+
+    def cleanup():
+        part.unlink(missing_ok=True)
+        side_part.unlink(missing_ok=True)
+
+    try:
+        track, src = ml.pick_track(root, manifest)
+    except ml.MusicLibraryError as e:
+        raise MusicFailed(str(e))
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cleanup()
+        with open(src, "rb") as fin, open(part, "wb") as fout:
+            shutil.copyfileobj(fin, fout, 1 << 20)
+            fout.flush()
+            os.fsync(fout.fileno())
+        sha = ml.sha256_file(part)
+        if sha != track["sha256"]:
+            raise MusicFailed(f"the copy of {track['file']} does not match its manifest sha256 "
+                              f"({sha[:12]} != {track['sha256'][:12]})")
+        sidecar = {"schema": MUSIC_SCHEMA, "provider": ml.SIDECAR_PROVIDER, "track_id": None,
+                   "track_title": track["title"], "url": None, "query": query, "sha256": sha,
+                   "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                   "library_file": track["file"], "license": track["license"], "origin": track["origin"],
+                   "approved_by": track["approved_by"], "approved_on": track["approved_on"],
+                   "manifest_sha256": manifest_sha}
+        side_part.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(part, out)
+        try:
+            os.replace(side_part, side)
+        except OSError:
+            out.unlink(missing_ok=True)   # never leave an mp3 without its sidecar
+            raise
+        return sidecar
+    except MusicFailed:
+        cleanup()
+        raise
+    except OSError as e:
+        cleanup()
+        raise MusicFailed(f"could not copy the library track: {_one_line(e)}")
+
+
+def _fetch_pixabay(query: str, out: Path) -> dict:
+    side = Path(str(out) + ".source.json")
     part = out.with_name(out.name + ".part")
     side_part = side.with_name(side.name + ".part")
 
@@ -388,7 +479,7 @@ def fetch_music(query: str, out_path, force: bool = False) -> dict:
             break
         cleanup()
         if _NO_KEY.search(str(error)):
-            raise MusicFailed(f"music provider refused the request (API key missing / not authorised): {_one_line(error)}")
+            raise MusicFailed(f"music provider refused the request (HTTP 401/403: blocked or not authorised; this tool uses no API key): {_one_line(error)}")
         transient = isinstance(error, str) and bool(_TRANSIENT.search(error)) or error is None
         if not transient:
             raise MusicFailed(f"music fetch failed: {_one_line(error)}")
@@ -432,7 +523,7 @@ def fetch_music(query: str, out_path, force: bool = False) -> dict:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="V4: fetch the Pixabay music bed (stock footage fetching is disabled).")
+    ap = argparse.ArgumentParser(description="V4: fetch the music bed: the approved music library, or Pixabay when that library is empty (stock footage fetching is disabled).")
     ap.add_argument("queries", nargs="?", help="(disabled in V4)")
     ap.add_argument("out_dir", nargs="?", help="(disabled in V4)")
     ap.add_argument("--ledger", default=bl.DEFAULT_LEDGER)
@@ -462,6 +553,10 @@ def main(argv=None) -> int:
     except MusicFailed as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 4
+    if sidecar.get("provider") == ml.SIDECAR_PROVIDER:
+        print(f"music OK library track {sidecar['library_file']} ({sidecar['track_title'] or 'untitled'}) "
+              f"sha256={sidecar['sha256'][:12]} -> {out_path} (+ .source.json)")
+        return 0
     print(f"music OK {sidecar['track_title']} sha256={sidecar['sha256'][:12]} -> {out_path} (+ .source.json)")
     return 0
 
