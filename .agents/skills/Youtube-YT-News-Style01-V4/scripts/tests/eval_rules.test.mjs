@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {
   evaluateLayout, evaluatePlanRules, resolveFieldRule, rubricSize,
   ruleBacking, ruleContentPresence, rulePresenterTextBacking, ruleFace, ruleFont, ruleFontRubric, ruleTier,
-  ruleTextAlpha, ruleLane, ruleReservedIntersect, ruleLineCount, ruleNowrapOverflow, ruleLaneTable, ruleSchema,
+  ruleTextAlpha, ruleProbeIssues, ruleLane, ruleReservedIntersect, ruleLineCount, ruleNowrapOverflow, ruleLaneTable, ruleSchema,
 } from '../qc_layout_eval.mjs';
 import {
   thresholds as t, fieldRules, PLAN, CTX, v3Field, v3Snap, backingFor, loadRaw, RAW, augmentDark, withHeldStage,
@@ -346,6 +346,18 @@ test('evaluateLayout: every new defect class is reported through the full rule l
   s.layers = [];                                     // content-presence
   const got = new Set(ids(evaluateLayout(s, t, CTX).issues));
   for (const id of ['lane-missing', 'text-alpha', 'font', 'unknown-field', 'content-presence']) assert.ok(got.has(id), `${id} missing from ${[...got]}`);
+});
+test('probe-issues: snapshot.probeIssues surface as gate issues with the same ids; absent or empty is clean', () => {
+  const s = validSnapshot();
+  assert.deepEqual(ruleProbeIssues(s), []);
+  assert.deepEqual(ruleProbeIssues({ ...s, probeIssues: [] }), []);
+  s.probeIssues = [{ id: 'untagged-text', field: 'mystery', message: 'text without data-qc-field' }, { id: 'unsupported-transform', message: 'zoom on ancestor' }];
+  const out = ruleProbeIssues(s);
+  assert.deepEqual(out.map(i => [i.id, i.field]), [['untagged-text', 'mystery'], ['unsupported-transform', undefined]]);
+  assert.ok(out.every(i => i.frame === s.frame && i.message));
+  assert.deepEqual(ids(evaluateLayout(s, t, CTX).issues).filter(id => id !== 'content-presence').sort(), ['unsupported-transform', 'untagged-text']);
+  assert.deepEqual(ids(ruleProbeIssues({ ...s, probeIssues: 'bad' })), ['probe-issues']);
+  assert.deepEqual(evaluateLayout(validSnapshot(), t, CTX).issues, []);
 });
 test('evaluateLayout: lane-less V3-style fields all fail lane-missing (fail-closed proof)', () => {
   const s = validSnapshot();

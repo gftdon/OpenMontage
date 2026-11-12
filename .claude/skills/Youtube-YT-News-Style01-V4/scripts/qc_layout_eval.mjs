@@ -184,6 +184,21 @@ export function ruleFields(s) {
   return Array.isArray(s.fields) && s.fields.length ? [] : [issue(s, 'fields', 'missing text measurements')];
 }
 
+/**
+ * probe-issues: problems the in-page probe itself detected (`untagged-text`, `unsupported-transform`, ...).
+ * snapshot.probeIssues = [{id, field?, message}]; absent or empty means no issue. Each entry becomes a
+ * gate issue with the same id, so the engine cannot hide what the probe saw.
+ */
+export function ruleProbeIssues(s) {
+  if (s.probeIssues === undefined || s.probeIssues === null) return [];
+  if (!Array.isArray(s.probeIssues)) return [issue(s, 'probe-issues', 'probeIssues must be an array')];
+  return s.probeIssues.map(p => {
+    const id = typeof p?.id === 'string' && p.id ? p.id : 'probe-issues';
+    const message = typeof p?.message === 'string' && p.message ? p.message : `probe reported ${id}`;
+    return issue(s, id, message, p?.field === undefined ? {} : { field: p.field });
+  });
+}
+
 /** geometry: a field (or occluder) lacks complete, finite measurements. */
 export function ruleGeometry(s) {
   const out = [];
@@ -643,7 +658,7 @@ export function ruleFootage(s, t) {
 
 // Per-frame rules in reporting order (ruleLaneTable is plan-level: see evaluatePlanRules).
 export const FRAME_RULES = [
-  ruleFonts, ruleGeometry, ruleTier, ruleFont, ruleFontRubric, ruleTextAlpha, ruleClip, ruleSafe,
+  ruleFonts, ruleProbeIssues, ruleGeometry, ruleTier, ruleFont, ruleFontRubric, ruleTextAlpha, ruleClip, ruleSafe,
   ruleBacking, ruleCaption, ruleLane, ruleLineCount, ruleNowrapOverflow, ruleOverlap, ruleOcclusion,
   ruleReservedIntersect, rulePresenterTextBacking, ruleFace, ruleContentPresence, ruleFootage,
 ];
@@ -657,7 +672,7 @@ export function evaluateLayout(s, t, ctx = {}) {
   const missingCtx = ctxProblem(s, ctx, ['plan', 'fieldRules']);
   if (missingCtx) return { issues: missingCtx };
   const fields = ruleFields(s);
-  if (fields.length) return { issues: [...ruleFonts(s), ...fields] };
+  if (fields.length) return { issues: [...ruleFonts(s), ...fields, ...ruleProbeIssues(s)] };
   const issues = [];
   for (const rule of FRAME_RULES) issues.push(...rule(s, t, ctx));
   return { issues };
