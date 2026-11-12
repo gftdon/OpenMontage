@@ -1,0 +1,19 @@
+{
+  "endCardSeconds": 4.5,
+  "voEnd": 30,
+  "cta": "ติดตามช่องไว้นะ",
+  "brollDur": {"yt_a": 15, "yt_b": 30},
+  "beats": [
+    {"t": 0, "mode": "full", "kicker": "BREAKING NEWS"},
+    {"t": 5, "mode": "pip", "media": "clip", "src": "yt_a", "origin": "source", "layout": "stage", "chrome": true,
+     "srcCrop": {"x": 0, "y": 0, "w": 1280, "h": 720}, "from": 0,
+     "headline": "ทำงานต่อเนื่อง 20 ชั่วโมง"},
+    {"t": 12, "mode": "pip", "media": "typo", "src": "typo_score", "origin": "stock", "layout": "stage", "chrome": false,
+     "cardKind": "summary3",
+     "items": ["คะแนน 3 เต็ม 10", {"text": "รอบที่ 65", "at": 17.5, "dur": 3}]},
+    {"t": 20, "mode": "pip", "media": "clip", "src": "yt_b", "origin": "source", "layout": "stage", "chrome": true, "from": 4,
+     "headline": "โค้ดเกือบ 13,000 บรรทัด",
+     "stats": [{"at": 21.0, "dur": 4.0, "big": "13,000", "label": "บรรทัด"}]},
+    {"t": 28, "mode": "full"}
+  ]
+}
