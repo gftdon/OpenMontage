@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Fetch FRESH stock b-roll (Pixabay, free licence) — never a clip used before.
+"""V4: fetch the MUSIC BED (Pixabay Music, free licence). Stock FOOTAGE fetching is disabled in V4.
+
+  python fetch_broll.py --music "<query>" projects/<slug>/assets/audio/bed.mp3 [--force]
+
+Writes the mp3 and a sidecar `<out.mp3>.source.json`
+  {"schema":"yt-news-v4-music-source","provider":"pixabay_music","track_id","track_title","url","query",
+   "sha256":<of the mp3>,"fetched_at":<UTC ISO>}      (a field the provider does not return is null)
+The mp3 is only accepted when ffprobe finds an audio stream of at least 30 s. An existing out.mp3 is never
+overwritten without --force (a failed --force run keeps the previous pair). Transient failures (network errors,
+HTTP 429 / 5xx, timeouts) are retried with backoff inside MUSIC_RETRY_BUDGET_SECONDS (180 s).
+Exit codes: 0 ok (valid mp3 + sidecar exist), 2 usage / refusal to overwrite, 3 footage mode refused,
+4 fetch failed (one `ERROR:` line; no partial mp3 / sidecar left).
+
+FOOTAGE MODE (positional QUERIES.json OUT_DIR, --plan, --context, --dry-run) exits 3 with
+  "V4: stock footage fetching is disabled (no verified relevance verdicts); only --music is available".
+No existing approval mechanism of this skill covers stock fetching (broll_costs.py / native_paid.py /
+--approval gate paid image + relevance calls by provider, model and USD caps), so the refusal is
+unconditional; there is no override. The V3 footage code below is kept unreachable for a later,
+explicitly approved re-enable.
+
+--- V3 footage mode (kept, disabled) ---------------------------------------------------------------
+Fetch FRESH stock b-roll (Pixabay, free licence) — never a clip used before.
 
   python fetch_broll.py QUERIES.json OUT_DIR [--ledger projects/_broll_ledger.json]
                         [--public-root remotion-composer/public] [--projects-root projects]
@@ -34,18 +55,41 @@ wrong scene (e.g. a "shopping" query returning a kitchen blender).
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broll_ledger as bl  # noqa: E402
 
+FOOTAGE_DISABLED_MESSAGE = ("V4: stock footage fetching is disabled (no verified relevance verdicts); "
+                            "only --music is available")
+MUSIC_RETRY_BUDGET_SECONDS = 180      # total time for retrying transient music failures
+MUSIC_BACKOFF_FIRST, MUSIC_BACKOFF_MAX = 2.0, 30.0
+MUSIC_MIN_SECONDS = 30                # a valid bed has an audio stream of at least this length
+MUSIC_SCHEMA = "yt-news-v4-music-source"
 API_URL = "https://pixabay.com/api/videos/"
 MIN_DUR, MAX_DUR = 8, 40
 MAX_PAGES = 3
 QUALITIES = ("large", "medium", "small", "tiny")
+
+
+class FootageDisabled(RuntimeError):
+    pass
+
+
+class MusicRefused(Exception):      # exit 2
+    pass
+
+
+class MusicFailed(Exception):       # exit 4
+    pass
 
 
 class Page(list):
@@ -156,7 +200,8 @@ def queries_from_plan(plan,context):
 def fetch_videos(queries_path, out_dir, ledger_path=bl.DEFAULT_LEDGER, api_key="",
                  per_page=30, dry_run=False, public_root=bl.DEFAULT_PUBLIC_ROOT,
                  projects_root=bl.DEFAULT_PROJECTS_ROOT) -> int:
-    """Returns the process exit code (0 = all keys ok, 1 = at least one key failed)."""
+    """Returns the process exit code (0 = all keys ok, 1 = at least one key failed). DISABLED in V4: always raises."""
+    raise FootageDisabled(FOOTAGE_DISABLED_MESSAGE)
     out = Path(out_dir)
     slug = bl.slug_from_raw_dir(out)
     queries = queries_path if isinstance(queries_path,dict) else json.loads(Path(queries_path).read_text(encoding="utf-8"))
@@ -255,54 +300,170 @@ def fetch_videos(queries_path, out_dir, ledger_path=bl.DEFAULT_LEDGER, api_key="
     return 1 if failed else 0
 
 
-def fetch_music(query: str, out_path: str) -> None:
+# ------------------------------------------------------------------ music (the only V4 mode)
+
+_sleep = time.sleep
+_monotonic = time.monotonic
+_TRANSIENT = re.compile(r"timeout|timed out|connection|network|temporar|reset by peer|unreachable|URLError|"
+                        r"HTTP Error (?:429|5\d\d)|\b429\b|\b5\d\d\b|too many requests|service unavailable|bad gateway", re.I)
+_NO_KEY = re.compile(r"api[ _-]?key|credential|unauthori[sz]ed|forbidden|HTTP Error 40[13]", re.I)
+
+
+def get_music_tool():
+    """The registry's pixabay_music tool (run from the repo root)."""
     sys.path.insert(0, os.getcwd())
     from tools.tool_registry import registry  # noqa: E402
 
     registry.discover()
-    pm = registry._tools["pixabay_music"]
-    r = pm.execute({"query": query, "min_duration": 120, "max_duration": 400, "output_path": out_path})
-    print("music", "OK" if r.success else f"FAIL {r.error}", (r.data or {}).get("track_title"))
+    return registry._tools["pixabay_music"]
+
+
+def probe_audio(path):
+    """(has_audio_stream, duration_seconds) from ffprobe; (False, 0.0) for anything unreadable."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                            "stream=codec_type:format=duration", "-of", "json", str(path)],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return False, 0.0
+        info = json.loads(r.stdout or "{}")
+        streams = info.get("streams") or []
+        duration = float((info.get("format") or {}).get("duration") or 0)
+        return bool(streams) and streams[0].get("codec_type") == "audio", duration
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, 0.0
+
+
+def _one_line(text) -> str:
+    return " ".join(str(text).split())[:300]
+
+
+def _first(data, *keys):
+    for k in keys:
+        if isinstance(data, dict) and data.get(k) not in (None, ""):
+            return data[k]
+    return None
+
+
+def fetch_music(query: str, out_path, force: bool = False) -> dict:
+    """Fetch the bed. Returns the sidecar dict; raises MusicRefused (exit 2) / MusicFailed (exit 4).
+    On any failure nothing new is left behind (a failed --force run keeps the previous mp3 + sidecar)."""
+    out = Path(out_path)
+    side = Path(str(out) + ".source.json")
+    if out.suffix.lower() != ".mp3":
+        raise MusicRefused(f"MUSIC_OUT must be an .mp3 file (got {out})")
+    if out.exists() and not force:
+        raise MusicRefused(f"{out} already exists; refusing to overwrite it (use --force)")
+    part = out.with_name(out.name + ".part")
+    side_part = side.with_name(side.name + ".part")
+
+    def cleanup():
+        part.unlink(missing_ok=True)
+        side_part.unlink(missing_ok=True)
+
+    try:
+        tool = get_music_tool()
+    except Exception as e:  # registry cannot be loaded (not run from the repo root, ...)
+        raise MusicFailed(f"music tool unavailable: {_one_line(e)}")
+    status = getattr(getattr(tool, "get_status", lambda: None)(), "value", "available")
+    if status != "available":
+        raise MusicFailed("music provider unavailable (missing API key / not set up): "
+                          + _one_line(getattr(tool, "install_instructions", status)))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    started, delay, attempt = _monotonic(), MUSIC_BACKOFF_FIRST, 0
+    data = None
+    while True:
+        attempt += 1
+        cleanup()
+        try:
+            r = tool.execute({"query": query, "min_duration": 120, "max_duration": 400, "output_path": str(part)})
+            ok, error, data = bool(r.success), r.error, (r.data or {})
+        except Exception as e:  # tool raised: network class errors are transient
+            transient = isinstance(e, (OSError, TimeoutError))
+            ok, error, data = False, f"{type(e).__name__}: {e}", {}
+            if not transient:
+                cleanup()
+                raise MusicFailed(f"music fetch failed: {_one_line(error)}")
+        if ok:
+            break
+        cleanup()
+        if _NO_KEY.search(str(error)):
+            raise MusicFailed(f"music provider refused the request (API key missing / not authorised): {_one_line(error)}")
+        transient = isinstance(error, str) and bool(_TRANSIENT.search(error)) or error is None
+        if not transient:
+            raise MusicFailed(f"music fetch failed: {_one_line(error)}")
+        elapsed = _monotonic() - started
+        if elapsed + delay > MUSIC_RETRY_BUDGET_SECONDS:
+            raise MusicFailed(f"music fetch still failing after {attempt} attempts / {elapsed:.0f} s "
+                              f"(budget {MUSIC_RETRY_BUDGET_SECONDS} s): {_one_line(error)}")
+        print(f"music attempt {attempt} failed ({_one_line(error)}); retrying in {delay:.0f} s")
+        _sleep(delay)
+        delay = min(delay * 2, MUSIC_BACKOFF_MAX)
+
+    try:
+        if not part.is_file() or part.stat().st_size == 0:
+            raise MusicFailed("music download is empty (zero bytes)")
+        has_audio, duration = probe_audio(part)
+        if not has_audio:
+            raise MusicFailed("music download is not audio (ffprobe found no audio stream)")
+        if duration < MUSIC_MIN_SECONDS:
+            raise MusicFailed(f"music track is too short ({duration:.1f} s < {MUSIC_MIN_SECONDS} s)")
+        sha = hashlib.sha256(part.read_bytes()).hexdigest()
+        sidecar = {"schema": MUSIC_SCHEMA, "provider": "pixabay_music",
+                   "track_id": _first(data, "track_id", "pixabay_id", "id"),
+                   "track_title": _first(data, "track_title", "title"),
+                   "url": _first(data, "url", "track_url", "page_url"),
+                   "query": query, "sha256": sha,
+                   "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+        side_part.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(part, out)
+        try:
+            os.replace(side_part, side)
+        except OSError:
+            out.unlink(missing_ok=True)   # never leave an mp3 without its sidecar
+            raise
+        return sidecar
+    except MusicFailed:
+        cleanup()
+        raise
+    except OSError as e:
+        cleanup()
+        raise MusicFailed(f"could not write the music files: {_one_line(e)}")
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Fetch fresh (never-used) Pixabay stock b-roll.")
-    ap.add_argument("queries", nargs="?", help='QUERIES.json: {"key": ["query", "category"]}')
-    ap.add_argument("out_dir", nargs="?", help="projects/<slug>/assets/broll; also holds _manifest.json")
+    ap = argparse.ArgumentParser(description="V4: fetch the Pixabay music bed (stock footage fetching is disabled).")
+    ap.add_argument("queries", nargs="?", help="(disabled in V4)")
+    ap.add_argument("out_dir", nargs="?", help="(disabled in V4)")
     ap.add_argument("--ledger", default=bl.DEFAULT_LEDGER)
     ap.add_argument("--public-root", default=bl.DEFAULT_PUBLIC_ROOT)
     ap.add_argument("--projects-root", default=bl.DEFAULT_PROJECTS_ROOT)
-    ap.add_argument("--env", default=".env", help="dotenv file holding PIXABAY_API_KEY (default .env)")
-    ap.add_argument("--per-page", type=int, default=30, help="Pixabay results per page (3-200, default 30)")
-    ap.add_argument("--dry-run", action="store_true", help="search and print the chosen candidates; download nothing")
+    ap.add_argument("--env", default=".env")
+    ap.add_argument("--per-page", type=int, default=30)
+    ap.add_argument("--dry-run", action="store_true", help="(footage mode, disabled in V4)")
     ap.add_argument("--music", nargs=2, metavar=("QUERY", "MUSIC_OUT"),
-                    help='also fetch a Pixabay music track, e.g. --music "calm tech" music.mp3')
-    ap.add_argument('--plan');ap.add_argument('--context')
+                    help='fetch a Pixabay music track, e.g. --music "calm tech" projects/<slug>/assets/audio/bed.mp3')
+    ap.add_argument("--force", action="store_true", help="overwrite an existing MUSIC_OUT (only after a fully valid new download)")
+    ap.add_argument("--plan", help="(footage mode, disabled in V4)")
+    ap.add_argument("--context", help="(footage mode, disabled in V4)")
     args = ap.parse_args(argv)
-    if args.plan:
-        if not args.context or not args.out_dir:ap.error('--plan requires --context and OUT_DIR')
-        args.queries=queries_from_plan(json.loads(Path(args.plan).read_text()),json.loads(Path(args.context).read_text()))
-    if not args.music and not (args.queries and args.out_dir):
-        ap.error("QUERIES.json and OUT_DIR are required (or use --music)")
-
-    from dotenv import load_dotenv
-
-    load_dotenv(args.env)
-    rc = 0
-    if args.music:
-        fetch_music(*args.music)
-    if args.queries and args.out_dir:
-        api_key = os.environ.get("PIXABAY_API_KEY", "")
-        if not api_key:
-            print(f"ERROR: PIXABAY_API_KEY not set (looked in {args.env})", file=sys.stderr)
-            return 2
-        try:
-            rc = fetch_videos(args.queries, args.out_dir, args.ledger, api_key, args.per_page,
-                              args.dry_run, args.public_root, args.projects_root)
-        except (OSError, ValueError) as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 2
-    return rc
+    # Code guard: any footage form is refused, even next to --music. No approval mechanism of this skill covers it.
+    if args.queries or args.out_dir or args.plan or args.context or args.dry_run:
+        print(FOOTAGE_DISABLED_MESSAGE, file=sys.stderr)
+        return 3
+    if not args.music:
+        ap.error("--music \"<query>\" <out.mp3> is required (the only mode in V4)")
+    query, out_path = args.music
+    try:
+        sidecar = fetch_music(query, out_path, args.force)
+    except MusicRefused as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    except MusicFailed as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 4
+    print(f"music OK {sidecar['track_title']} sha256={sidecar['sha256'][:12]} -> {out_path} (+ .source.json)")
+    return 0
 
 
 if __name__ == "__main__":

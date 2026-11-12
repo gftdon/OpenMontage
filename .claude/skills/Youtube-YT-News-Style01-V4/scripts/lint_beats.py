@@ -1,122 +1,160 @@
 #!/usr/bin/env python3
-"""Fail-closed V3 timing/provenance gate. punch is an instantaneous step; cam is not."""
+"""Fail-closed V4 hold gate: one unchanged rendered picture may not stay on screen too long.
+
+  python lint_beats.py <episode.json> [--report <file>]
+
+Exit 0 = pass (warnings never fail), 1 = at least one error, 2 = input / parse error.
+Report: {pass, issues:[{code,t,detail,severity}], beats, warnings, runs}. `severity` is "error" or "warn";
+`warnings` counts the warn issues; `pass` is true when there is no error. Errors are listed before warnings.
+`runs` lists EVERY run of consecutive pip beats with one picture identity, so the numbers can be read even
+when the lint passes: {t, end, seconds, kind ("clip"|"typo"|"broll"), src, layout}.
+The episode is read through episode_data.load_episode (the single loader of episode.json).
+
+Only this rule lives here, because the schema validator (episode_schema.mjs) does not own it. Picture identity:
+  * broll / clip beat   (media, src, layout)
+  * typo beat           changes at every cards[].at / items[].at; identity = ('typo', variant, content shown
+                        so far), so a card repeated with the same lines is NOT a change
+Consecutive beats with the same identity accumulate (a run). Overlays (stats, kicker, headline, sub, lower) never
+reset a run. A `mode: "full"` (presenter-only) beat is NOT held to this rule: the presenter-only run length is the
+`presenter-run` gate of lint_content.py (12 s). A full beat only closes the running run.
+
+What a run is held to depends on what is on screen:
+
+  hold         ERROR  text cards (media typo) and stock / AI b-roll (media broll): one unchanged picture longer
+                      than `maxHoldSeconds` (qc_thresholds.json, 10 s).
+  hold-layout  WARN   source video clips (media clip, origin source): a playing clip changes by itself, so the 10 s
+                      limit for clips is NOT measured here. It is measured from real rendered frames by the
+                      `static-hold` gate of frame_checks.py. This metadata check only warns when the same
+                      src + layout run across consecutive beats is longer than CLIP_LAYOUT_RUN_WARN_SECONDS.
+
+Rules of the V3 version that were deleted, and what owns them now:
+
+  metadata      empty BEATS, invalid / non-contiguous interval, invalid mode / media / layout, pip without media,
+                missing src             -> schema enums + S01 (t increasing, first beat 0), S02 (>= 1 s), S04, S05
+  captionLane   per-beat caption lane   -> removed from the format (caption lane is fixed; additionalProperties:false)
+  chrome        chrome literal, stock-chrome -> removed from the format (the engine draws the chrome by origin)
+  layout full   layout "full"           -> replaced by "wide" (schema enum, S08)
+  origin        yt_ / ai_ prefix vs origin   -> S06
+  punch-origin  punch target + geometry (z, fx, fy, cropStep, scaleStep, time order) -> S12 (punch only on full beats,
+                at in [t, end), increasing) and the schema punch definition (z 1..1.6)
+  cards         invalid typography card -> S14
+  lower         invalid lower timing    -> S15 (+ schema lower definition)
+  endcard       endcard longer than maxEndcardSeconds -> S03 (totalDurationSec - voEndSec in [3, 5])
+"""
 import argparse
 import json
-import math
 from pathlib import Path
-import re
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import broll_ledger as bl
+import episode_data as ed
+
+EPS = 1e-8
+# Warn when one source clip stays in the same layout for longer than this many seconds across consecutive beats.
+# 30 is the project lead's STARTING value, not an acceptance threshold; the 10 s limit for clips is frame_checks static-hold.
+CLIP_LAYOUT_RUN_WARN_SECONDS = 30
 
 
-def number(v):
-    try:
-        n = float(v)
-        return n if math.isfinite(n) else None
-    except (TypeError, ValueError):
-        return None
+def _content_identity(beat, now):
+    """What a typo beat shows at time `now`: the latest card, or the items revealed so far, or the vs table."""
+    variant = beat.get('typo')
+    if variant == 'vs':
+        return ('typo', variant, json.dumps(beat.get('vs'), sort_keys=True, ensure_ascii=False))
+    if variant == 'card':
+        shown = [c for c in beat.get('cards') or [] if isinstance(c, dict) and (ed.num(c.get('at')) or 0) <= now + EPS]
+        return ('typo', variant, tuple(shown[-1].get('lines') or ()) if shown else ())
+    shown = [i.get('text') for i in beat.get('items') or [] if isinstance(i, dict) and (ed.num(i.get('at')) or 0) <= now + EPS]
+    return ('typo', variant, tuple(shown))
 
 
-def lint_beats(beats, end_card_seconds, thresholds):
-    issues = []
-    def issue(code, t, detail): issues.append(dict(code=code,t=t,detail=detail))
-    if not beats:
-        issue('metadata',None,'BEATS must not be empty')
-    end = number(end_card_seconds)
-    if end is None or end < 0: issue('metadata',None,'invalid endcard duration')
-    elif end > thresholds['maxEndcardSeconds']: issue('endcard',None,'endcard exceeds limit')
-    previous_identity = None
-    hold_start = None
-    previous_end = None
+def _segments(beat):
+    """[(start_time, identity)] of a pip beat; the picture changes at each cards[].at / items[].at of a typo beat."""
+    t, end = beat['t'], beat['end']
+    media = beat.get('media')
+    if media != 'typo':
+        return [(t, (media, beat.get('src'), beat.get('layout')))]
+    times = {t}
+    for key in ('cards', 'items'):
+        for entry in beat.get(key) or []:
+            at = ed.num(entry.get('at')) if isinstance(entry, dict) else None
+            if at is not None and t < at < end:
+                times.add(at)
+    return [(now, _content_identity(beat, now)) for now in sorted(times)]
+
+
+def _kind(identity):
+    media = identity[0]
+    return 'typo' if media == 'typo' else 'clip' if media == 'clip' else 'broll'
+
+
+def holds(beats):
+    """Every maximal run of one unchanged picture in pip scenes (presenter-only beats excluded):
+    [{'t','end','seconds','kind','src','layout'}] with kind clip / typo / broll."""
+    runs = []
+    identity = None
+    start = None
+    layout = None
+
+    def close(end):
+        kind = _kind(identity)
+        runs.append({'t': start, 'end': end, 'seconds': end - start, 'kind': kind,
+                     'src': identity[1] if kind != 'typo' else None, 'layout': layout})
+
     for b in beats:
-        t, end = number(b.get('t')), number(b.get('end'))
-        if t is None or end is None or t < 0 or end <= t or (previous_end is not None and abs(t-previous_end)>0.001):
-            issue('metadata',t,'invalid/noncontiguous beat interval'); continue
-        if b.get('mode') not in ('full','pip'): issue('metadata',t,'invalid mode')
-        if b.get('captionLane','bottom') not in ('top','bottom'):issue('metadata',t,'invalid caption lane')
-        media = b.get('media')
-        if media is not None and media not in ('broll','clip','typo'): issue('metadata',t,'invalid media')
-        if media:
-            src=b.get('src')
-            if not isinstance(src,str) or isinstance(src,bl.Raw) or not src: issue('metadata',t,'missing literal src')
-            origin=b.get('origin')
-            if origin not in ('source','stock','ai') or (isinstance(src,str) and (src.startswith('yt_') != (origin=='source') or src.startswith('ai_') != (origin=='ai'))):
-                issue('origin',t,'origin must match yt_ source / ai_ AI convention')
-            if b.get('layout') not in ('stage','full'): issue('metadata',t,'missing layout')
-            chrome=b.get('chrome')
-            # The tokenizer represents true/false as Raw, never eval source expressions.
-            if isinstance(chrome,bl.Raw): chrome={'true':True,'false':False}.get(str(chrome))
-            if type(chrome) is not bool: issue('metadata',t,'chrome must be literal boolean')
-            if origin in ('stock','ai') and chrome is True: issue('stock-chrome',t,'stock/AI must not show source chrome')
-        target='avatar' if b.get('mode')=='full' else 'source' if media in ('broll','clip') and b.get('origin')=='source' else None
-        if b.get('mode')=='pip' and not media:issue('metadata',t,'pip requires rendered media')
-        punches=b.get('punch',[])
-        if punches and target is None:issue('punch-origin',t,'no rendered avatar/source punch target')
-        if not isinstance(punches,list):issue('metadata',t,'punch must be array');punches=[]
-        valid_punches=[];z,fx,fy=1.,.5,.5;last_pt=t
-        for p in punches:
-            if not isinstance(p,dict):issue('metadata',t,'invalid punch');continue
-            pt,pz=number(p.get('t')),number(p.get('z'));px,py=number(p.get('fx',.5)),number(p.get('fy',.5))
-            if None in (pt,pz,px,py) or not t<=pt<end or pt<last_pt or pz<1 or not (0<=px<=1 and 0<=py<=1):
-                issue('metadata',t,'invalid punch geometry/time');continue
-            old_left,old_top=fx*(1-1/z),fy*(1-1/z)
-            left,top=px*(1-1/pz),py*(1-1/pz)
-            cut=target is not None and (abs(pz/z-1)>=thresholds['scaleStep']-1e-8 or max(abs(left-old_left),abs(top-old_top))>=thresholds['cropStep']-1e-8)
-            valid_punches.append((pt,cut,(pz,px,py)))
-            z,fx,fy,last_pt=pz,px,py,pt
-        cards=b.get('cards',[])
-        valid_cards=[];last_time=t
-        if cards and (media!='typo' or not isinstance(cards,list)):issue('metadata',t,'cards only allowed for typography')
-        elif isinstance(cards,list):
-            for card in cards:
-                ct=number(card.get('t')) if isinstance(card,dict) else None;lines=card.get('lines') if isinstance(card,dict) else None
-                if ct is None or not t<=ct<end or ct<last_time or not isinstance(lines,list) or not lines or not all(isinstance(x,str) and x for x in lines):
-                    issue('metadata',t,'invalid typography card');continue
-                valid_cards.append((ct,lines));last_time=ct
-        lower=b.get('lower') if b.get('mode')=='full' else None
-        lower_t=number(lower.get('t',t)) if isinstance(lower,dict) else None
-        lower_dur=number(lower.get('dur',6)) if isinstance(lower,dict) else None
-        if lower is not None and (lower_t is None or lower_dur is None or lower_dur<=0):issue('metadata',t,'invalid lower timing');lower=None
-        times={t,end}
-        times.update(pt for pt,_,_ in valid_punches)
-        times.update(ct for ct,_ in valid_cards)
-        # Overlays never reset holds, regardless of dwell or text changes.
-        # Only primary shot/layout, primary typography cards and approved punches do.
-        for now in sorted(times)[:-1]:
-            if b.get('mode')=='full':base=['avatar']
-            else:
-                lines=[lines for ct,lines in valid_cards if ct<=now]
-                base=[media,b.get('src') if media!='typo' else None,b.get('layout'),lines[-1] if media=='typo' and lines else []]
-            identity=json.dumps(base,sort_keys=True)
-            is_cut=any(pt==now and cut for pt,cut,_ in valid_punches)
-            if previous_identity!=identity or is_cut:
-                if hold_start is not None and now-hold_start>thresholds['maxHoldSeconds']+1e-8:issue('hold',hold_start,'rendered visual hold exceeds limit')
-                hold_start=now
-            previous_identity=identity
-        if hold_start is not None and end-hold_start>thresholds['maxHoldSeconds']+1e-8:issue('hold',hold_start,'rendered visual hold exceeds limit')
-        previous_end=end
-    return issues
+        if b.get('mode') == 'full':
+            if start is not None:
+                close(b['t'])
+            identity = start = None
+            continue
+        for now, ident in _segments(b):
+            if ident != identity:
+                if start is not None:
+                    close(now)
+                identity, start, layout = ident, now, b.get('layout')
+    if start is not None and beats:
+        close(beats[-1]['end'])
+    return runs
+
+
+def lint_beats(beats, thresholds):
+    issues = []
+    limit = thresholds['maxHoldSeconds']
+    for r in holds(beats):
+        if r['kind'] == 'clip':
+            if r['seconds'] > CLIP_LAYOUT_RUN_WARN_SECONDS + EPS:
+                issues.append(dict(code='hold-layout', t=r['t'], severity='warn',
+                                   detail='source clip %s stays in layout %s for %.2f s (%.2f-%.2f), warning above %s s; '
+                                          'the 10 s limit for clips is the static-hold gate (frame_checks.py)'
+                                          % (r['src'], r['layout'], r['seconds'], r['t'], r['end'], CLIP_LAYOUT_RUN_WARN_SECONDS)))
+        elif r['seconds'] > limit + EPS:
+            issues.append(dict(code='hold', t=r['t'], severity='error',
+                               detail='rendered visual hold of %.2f s exceeds %s s (%.2f-%.2f)' % (r['seconds'], limit, r['t'], r['end'])))
+    return sorted(issues, key=lambda i: i['severity'] != 'error')  # errors first (finalize.py shows the first few)
+
+
+def lint_report(beats, thresholds):
+    issues = lint_beats(beats, thresholds)
+    return {'pass': not any(i['severity'] == 'error' for i in issues), 'issues': issues, 'beats': len(beats),
+            'warnings': sum(i['severity'] == 'warn' for i in issues), 'runs': holds(beats)}
 
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('composition'); ap.add_argument('--report'); args=ap.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument('episode', help='episode.json (yt-news-v4-episode/1)')
+    ap.add_argument('--report')
+    args = ap.parse_args()
     try:
-        text=Path(args.composition).read_text()
-        beats=bl.parse_beats(text)
-        def constant(name):
-            m=re.search(r'const\s+'+name+r'\s*=\s*([\d.]+)\s*;',text)
-            if not m: raise ValueError('missing literal '+name)
-            return float(m[1])
-        vo,total=constant('VO_END_SEC'),constant('TOTAL_DURATION_SEC')
-        for i,b in enumerate(beats): b['end']=beats[i+1]['t'] if i+1<len(beats) else vo
-        thresholds=json.loads((Path(__file__).parent/'qc_thresholds.json').read_text())
-        issues=lint_beats(beats,total-vo,thresholds)
-        result=dict(pass_=not issues,issues=issues,beats=len(beats)); result['pass']=result.pop('pass_')
-        output=json.dumps(result,ensure_ascii=False,indent=2)
-        if args.report: Path(args.report).write_text(output)
-        print(output); return 1 if issues else 0
-    except (OSError,ValueError,bl.BeatsParseError) as e:
-        print(json.dumps({'pass':False,'issues':[{'code':'parse','detail':str(e)}]})); return 2
+        beats = ed.load_episode(args.episode)['beats']
+        thresholds = json.loads((Path(__file__).parent / 'qc_thresholds.json').read_text())
+        result = lint_report(beats, thresholds)
+        output = json.dumps(result, ensure_ascii=False, indent=2)
+        if args.report:
+            Path(args.report).write_text(output)
+        print(output)
+        return 0 if result['pass'] else 1
+    except (OSError, ValueError, KeyError) as e:
+        print(json.dumps({'pass': False, 'issues': [{'code': 'parse', 'detail': str(e), 'severity': 'error'}]}))
+        return 2
 
-if __name__=='__main__': sys.exit(main())
+
+if __name__ == '__main__':
+    sys.exit(main())

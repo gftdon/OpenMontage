@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V3 images-only adapter. Dry-run default; never loads .env or discovers tools.
+"""V4 images-only adapter. Dry-run default; never loads .env or discovers tools.
 Direct registry.get + tool.execute avoids registry retry wrappers. Imagen.execute
 performs one requests.post (retry_policy is metadata, not an execution loop).
 """

@@ -1,4 +1,5 @@
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import score_relevance as s
 from broll_costs import Budget,load_config,config_sha256
+EPISODE=Path(__file__).resolve().parent/'fixtures/a67/broll/two-stock-beats.json'
 JPEG=b'\xff\xd8\xff\xc0\x00\x0b\x08\x02\x40\x04\x00\x01\x01\x11\x00\xff\xd9'
 class RowTests(unittest.TestCase):
  def setUp(self):
@@ -26,7 +28,7 @@ class RowTests(unittest.TestCase):
   records={};beats=[];items=[]
   b=Budget(self.p,self.a,today='2026-11-08')
   for i,score in enumerate((2,0)):
-   name='asset'+str(i);media=self.p/(name+'.mp4');media.write_bytes(b'media');records[name]={'sha256':s.file_sha256(media),'pixabay_id':str(i+1),'duration':3};beat={'t':i*4,'end':i*4+2,'origin':'stock','src':name,'layout':'full'};beats.append(beat)
+   name='asset'+str(i);media=self.p/(name+'.mp4');media.write_bytes(b'media');records[name]={'sha256':s.file_sha256(media),'pixabay_id':str(i+1),'duration':3};beat={'t':i*4,'end':i*4+2,'origin':'stock','src':name,'layout':'stage'};beats.append(beat)
    ident={'origin':'stock','identity':'pixabay:'+str(i+1),'cue_ids':['c'+str(i)],'context_sha256':ctx,'sha256':records[name]['sha256'],'frame_spec':s.frame_spec(beat,3)}
    self.score(b,ident,score)
    items.append({'id':name,'t':beat['t'],'end':beat['end'],'spoken':'spoken','cue_ids':ident['cue_ids'],'selected':{'identity':ident['identity']}})
@@ -37,7 +39,7 @@ class RowTests(unittest.TestCase):
   values={'plan':{'beats':items},'context':context,'manifest':records,'cuts':{}}
   argv=['score_relevance']
   for name,v in values.items():f=self.p/(name+'.json');f.write_text(json.dumps(v));argv+=['--'+name,str(f)]
-  comp=self.p/'composition.tsx';comp.write_text('const VO_END_SEC = 8;');out=self.p/'report.json';argv+=['--beats',str(comp),'--project',str(self.p),'--public',str(self.p),'--out',str(out)]
-  with patch.object(sys,'argv',argv),patch.object(s,'validate_plan',return_value=[]),patch.object(s,'reconcile_plan',return_value=[]),patch.object(s,'parse_renderer_durations',return_value={b['src']:3 for b in beats}),patch.object(s,'probe_duration',return_value=3),patch.object(s,'extract_frame',return_value=JPEG),patch('broll_ledger.parse_beats',return_value=beats):
+  comp=self.p/'episode.json';shutil.copy(EPISODE,comp);out=self.p/'report.json';argv+=['--beats',str(comp),'--project',str(self.p),'--public',str(self.p),'--out',str(out)]
+  with patch.object(sys,'argv',argv),patch.object(s,'validate_plan',return_value=[]),patch.object(s,'reconcile_plan',return_value=[]),patch.object(s,'probe_duration',return_value=3),patch.object(s,'extract_frame',return_value=JPEG):
    self.assertEqual(s.main(),1)
   report=json.loads(out.read_text());self.assertEqual(report['results'][1]['score'],0);self.assertNotEqual(report['results'][1]['status'],'unverified_auth');self.assertNotIn('stop_paid_reason',report['results'][0]);self.assertEqual(report['budget_stop_reason'],'observed usage exceeded reservation')

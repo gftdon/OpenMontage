@@ -71,8 +71,62 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual([], [c for c in codes(self.lint('คะแนน 3/10')) if c.startswith('provenance-number')])
 
     def test_fraction_fails_when_line_has_only_numerator(self):
-        issues = self.lint('เป้า 8/10')
+        # the real V261111 script: "5 เต็ม 10 ..." (long line) then "... ประมาณ 8 คะแนน" on the NEXT line, 96 characters apart
+        far = make_inputs([at_time(0, ['คะแนนเริ่มต้นจาก', '3', 'เต็ม', '10'] + ['ซึ่งเป็นเพียงรูปทรงทึบหยาบๆ'] * 4), at_time(10, ['โดยระดับภาพถูกกำหนดไว้ที่ประมาณ', '8', 'คะแนน'])])
+        beat = pip(5.0, headline='เป้า 8/10')
+        issues = run([dict(t=0, mode='full'), beat, dict(t=15.0, mode='full')], far)[0]
         self.assertIn('provenance-number', codes(issues, 'error'))
+        self.assertIn('fraction 8/10', [i['detail'] for i in issues if i['code'] == 'provenance-number'][0])
+
+    def test_fraction_in_two_adjacent_lines_passes_when_close_fails_when_far(self):
+        # ProvenanceTests.inputs: line 1 ends "3 เต็ม 10", line 2 is "ถึง รอบที่ 65 ประมาณ 8": 8 is ~27 characters after the 10
+        self.assertNotIn('provenance-number', codes(self.lint('เป้า 8/10')))
+        self.assertNotIn('provenance-number', codes(self.lint('เป้า 8 เต็ม 10')))
+        # non-adjacent lines never count (line 3 is far from line 1 anyway)
+        self.assertIn('provenance-number', codes(self.lint('เป้า 13000/10', end=15.0), 'error'))
+
+    def test_fractions_in_words_are_one_construct(self):
+        for text in ('8 จาก 10', '8 ใน 10', '8 เต็ม 10', '8 of 10', '8 out of 10', '8/10'):
+            with self.subTest(text=text):
+                tk = lc.numeric_tokens(text)
+                self.assertEqual([('8', '10')], [(a, c) for a, c, _ in tk['fractions']])
+                self.assertEqual([], tk['numbers'])
+        self.assertEqual([], lc.numeric_tokens('8 office 10')['fractions'])
+        self.assertEqual([], lc.numeric_tokens('ราคา 8 บาท 10')['fractions'])
+
+    def test_unsaid_fraction_in_words_is_reported_like_8_slash_10(self):
+        for text in ('คะแนน 7 จาก 9', 'คะแนน 7 ใน 9', 'คะแนน 7 เต็ม 9', 'score 7 of 9', 'score 7 out of 9'):
+            with self.subTest(text=text):
+                self.assertIn('fraction 7/9', [i['detail'] for i in self.lint(text) if i['code'] == 'provenance-number' and i['severity'] == 'error'][0])
+
+    def test_stat_big_plus_label_forms_one_fraction(self):
+        def lint(big, label):
+            return [i for i in self.lint_stat(big, label) if i['code'] == 'provenance-number']
+        bad = lint('7', '/9')
+        self.assertEqual(['stats[0]'], [i['field'] for i in bad])
+        self.assertEqual(1, len(bad), bad)                                    # not once more per number
+        self.assertEqual('error', bad[0]['severity'])
+        self.assertEqual(1, len(lint('7', 'จาก 9 รอบ')))
+        self.assertEqual(1, len(lint('7', 'of 9')))
+        self.assertEqual([], lint('8', '/10'))                                  # said (adjacent lines, 27 characters)
+        self.assertEqual([], lint('8', 'เต็ม 10'))
+        self.assertEqual([], lint('13,000', 'บรรทัด'))                         # not a fraction
+
+    def lint_stat(self, big, label):
+        beat = pip(5.0, stats=[{'at': 5.0, 'dur': 3.0, 'big': big, 'label': label}])
+        return run([dict(t=0, mode='full'), beat, dict(t=15.0, mode='full')], self.inputs())[0]
+
+    def test_breaking_label_and_official_tag_numbers_need_provenance_but_not_words(self):
+        def lint(**top):
+            ep = ed._finish([dict(t=0, mode='full'), pip(5.0, headline='x')], {'vo_end': 100.0, 'end_card_seconds': 4.0, 'top': {**top}}, 'test', 100.0, None)
+            return lc.lint_content(ep, self.inputs(), {})[0]
+        got = lint(breakingLabel='BREAKING 2027', officialTag='GEMINI 777 ZEBRA')
+        self.assertEqual({('breakingLabel', '2027'), ('officialTag', '777')},
+                         {(i['field'], i['detail'].split()[1]) for i in got if i['code'] == 'provenance-number'})
+        self.assertEqual([], [i for i in got if i['code'] in ('provenance-latin', 'provenance-thai')])      # words stay exempt
+        self.assertEqual([], [i for i in lint(breakingLabel='BREAKING', officialTag='PROMPT ENGINEERING') if i['code'].startswith('provenance')])
+        # dateLabel / brand / page.* stay completely exempt chrome
+        self.assertEqual([], [i for i in lint(dateLabel='11 พ.ย. 2027', brand='AI 999', page={'domain': 'x.com', 'path': '/777'}) if i['code'].startswith('provenance')])
 
     def test_fraction_passes_via_source_within_40_chars(self):
         self.assertNotIn('provenance-number', codes(self.lint('เป้า 8/10', source='a score of 8 out of 10 overall')))
@@ -81,6 +135,43 @@ class ProvenanceTests(unittest.TestCase):
         self.assertNotIn('provenance-number', codes(self.lint('13,000 บรรทัด')))
         self.assertNotIn('provenance-number', codes(self.lint('๑๓,๐๐๐ บรรทัด')))
         self.assertIn('provenance-number', codes(self.lint('500,000 บรรทัด')))
+
+    # ---- dateLabel numbers are known provenance for endcard.* ONLY ----
+    def lint_endcard(self, eyebrow, date_label='11 พ.ย. 2026', beat_text=None):
+        beat = pip(5.0, **{'headline': 'x', **(beat_text or {})})
+        ep = ed._finish([dict(t=0, mode='full'), beat, dict(t=15.0, mode='full')],
+                        {'vo_end': 100.0, 'end_card_seconds': 4.0,
+                         'top': {'dateLabel': date_label, 'endcard': {'eyebrow': eyebrow, 'titleA': 'A', 'titleB': 'B', 'cta': 'C'}}},
+                        'test', 100.0, None)
+        return lc.lint_content(ep, self.inputs(), {})[0]
+
+    def number_issues(self, issues, field=None):
+        return [i for i in issues if i['code'] == 'provenance-number' and (field is None or i['field'].startswith(field))]
+
+    def test_endcard_number_from_datelabel_is_known(self):
+        self.assertEqual([], self.number_issues(self.lint_endcard('AI TECH NEWS · NOVEMBER 2026'), 'endcard.'))
+
+    def test_endcard_number_not_in_datelabel_or_script_is_still_reported(self):
+        got = self.number_issues(self.lint_endcard('AI TECH NEWS · 2027'), 'endcard.')
+        self.assertEqual(['endcard.eyebrow'], [i['field'] for i in got])
+        self.assertIn('2027', got[0]['detail'])
+
+    def test_datelabel_does_not_help_beats(self):
+        for key, val in (('kicker', 'ปี 2026'), ('headline', 'ปี 2026'), ('stats', [{'at': 6.0, 'dur': 3.0, 'big': '2026', 'label': 'x'}])):
+            with self.subTest(key=key):
+                issues = self.lint_endcard('AI TECH NEWS', beat_text={key: val})
+                self.assertTrue(self.number_issues(issues, key), key)
+
+    def test_datelabel_does_not_help_cta(self):
+        ep = ed._finish([dict(t=0, mode='full'), pip(5.0, headline='x'), dict(t=15.0, mode='full')],
+                        {'vo_end': 100.0, 'end_card_seconds': 4.0, 'cta': 'ปี 2026', 'cta_t': 90.0, 'top': {'dateLabel': '11 พ.ย. 2026'}}, 'test', 100.0, None)
+        issues = lc.lint_content(ep, self.inputs(), {})[0]
+        self.assertTrue(self.number_issues(issues, 'cta'))
+
+    def test_datelabel_thai_digits_are_normalised(self):
+        self.assertEqual([], self.number_issues(self.lint_endcard('NOVEMBER 2026', date_label='๑๑ พ.ย. ๒๐๒๖'), 'endcard.'))
+        self.assertEqual([], self.number_issues(self.lint_endcard('NOVEMBER ๒๐๒๖', date_label='11 พ.ย. 2026'), 'endcard.'))
+        self.assertTrue(self.number_issues(self.lint_endcard('NOVEMBER ๒๐๒๗', date_label='๑๑ พ.ย. ๒๐๒๖'), 'endcard.'))
 
     def test_number_boundary_five_is_not_inside_fifteen(self):
         self.assertIn('provenance-number', codes(self.lint('5 บรรทัด')))
@@ -203,6 +294,116 @@ class TimingTests(unittest.TestCase):
         self.assertFalse([c for c in codes(issues) if c.startswith('card-timing')])
 
 
+class TimingFarErrorTests(unittest.TestCase):
+    """A number on a timed item (stat / card / item) that is spoken only far from its window is card-timing-far (error)."""
+
+    def lint(self, beat, words=None, **th):
+        inp = make_inputs(words or [at_time(0, ['a']), at_time(300, ['ใช้', '777', 'ครั้ง', 'และ', '8', 'จาก', '10'])], source='777 8 10')
+        beats = [dict(t=0, mode='full'), beat, dict(t=60.0, mode='full'), dict(t=95.0, mode='full')]
+        return lc.lint_content(episode(beats, 400), inp, th)
+
+    def far(self, issues):
+        return [i for i in issues if i['code'] == 'card-timing-far']
+
+    def test_timed_items_spoken_only_far_away_are_errors(self):
+        for name, fields in (('stat', dict(stats=[{'at': 50.0, 'dur': 5.0, 'big': '777', 'label': 'x'}])),
+                             ('card', dict(media='typo', typo='card', cards=[{'at': 50.0, 'lines': ['ใช้ 777 ครั้ง']}], src=None, origin=None)),
+                             ('lower', dict(lower={'at': 50.0, 'dur': 3.0, 'title': 'ใช้ 777', 'sub': 'x'}))):
+            with self.subTest(name):
+                issues, m = self.lint(pip(50.0, **fields))
+                got = self.far(issues)
+                self.assertEqual(1, len(got), [(i['code'], i['field']) for i in issues])
+                self.assertEqual('error', got[0]['severity'])
+                self.assertIn('777', got[0]['anchor'])
+                self.assertEqual(300.5, got[0]['spoken'])
+                self.assertEqual(1, m['timing']['farErrors'])
+
+    def test_recap_beats_and_whole_beat_labels_are_exempt(self):
+        far_item = {'at': 50.0, 'text': 'ใช้ 777 ครั้ง'}
+        recap = dict(media='typo', typo='summary3', src=None, origin=None, items=[far_item, {'at': 52.0, 'text': 'ก'}, {'at': 54.0, 'text': 'ข'}])
+        self.assertEqual([], self.far(self.lint(pip(50.0, **recap))[0]))
+        recap4 = dict(media='typo', typo='final4', src=None, origin=None, sub='s', items=[far_item] + [{'at': 51.0 + k, 'text': 'ก'} for k in range(3)])
+        self.assertEqual([], self.far(self.lint(pip(50.0, **recap4))[0]))
+        self.assertEqual([], self.far(self.lint(pip(50.0, headline='ใช้ 777 ครั้ง'))[0]))                  # whole-beat label
+        self.assertEqual([], self.far(self.lint(pip(50.0, media='typo', typo='vs', src=None, origin=None, vs={'left': {'title': '777', 'badge': 'b', 'lines': ['l']},
+                                                                                                           'right': {'title': 't', 'badge': 'b', 'lines': ['l']}, 'conclusion': 'c'}))[0]))
+
+    def test_the_final_beat_is_label_like(self):
+        inp = make_inputs([at_time(0, ['a']), at_time(300, ['ใช้', '777'])], source='777')
+        beats = [dict(t=0, mode='full'), pip(50.0, stats=[{'at': 55.0, 'dur': 3.0, 'big': '777', 'label': 'x'}])]
+        self.assertEqual([], self.far(lc.lint_content(episode(beats, 400), inp, {})[0]))
+
+    def test_number_within_30_s_or_never_spoken_is_not_far(self):
+        words = [at_time(0, ['a']), at_time(70, ['ใช้', '777', 'ครั้ง'])]
+        self.assertEqual([], self.far(self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '777', 'label': 'x'}]), words)[0]))      # 20 s away
+        self.assertEqual([], self.far(self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '999', 'label': 'x'}]))[0]))               # never spoken: provenance
+        self.assertEqual(1, len(self.far(self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '777', 'label': 'x'}]), None)[0])))
+
+    def test_fractions_are_anchored_for_timing(self):
+        issues, _ = self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '8', 'label': 'จาก 10 คะแนน'}]))
+        self.assertEqual(['8/10'], [i['anchor'] for i in self.far(issues)])
+        issues, _ = self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '8/10', 'label': 'x'}]))
+        self.assertEqual(['8/10'], [i['anchor'] for i in self.far(issues)])
+        # a fraction spoken while it is shown is fine, and the numerator alone (denominator not next to it) is not the fraction
+        words = [at_time(0, ['a']), at_time(52, ['ได้', '8', 'จาก', '10'])]
+        self.assertEqual([], [i for i in self.lint(pip(50.0, stats=[{'at': 52.0, 'dur': 5.0, 'big': '8/10', 'label': 'x'}]), words)[0] if i['code'].startswith('card-timing')])
+        late = self.lint(pip(50.0, stats=[{'at': 58.0, 'dur': 3.0, 'big': '8/10', 'label': 'x'}]), words)[0]      # fractions get late / gone like any number
+        self.assertTrue({'card-timing-late', 'card-timing-gone-before-spoken'} & set(codes(late)))
+        words = [at_time(0, ['a']), at_time(52, ['ได้', '8', 'คน', 'แล้วยาวไปไกลมากมาย' * 6, '10'])]
+        issues = self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '8/10', 'label': 'x'}]), words)[0]
+        self.assertEqual([], [i for i in issues if i['code'].startswith('card-timing')])         # not spoken as a fraction: skipped, left to provenance
+
+    def test_lifting_the_cap_restores_the_old_nearest_rule(self):
+        issues, _ = self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '777', 'label': 'x'}]), timingMaxDistanceSeconds=1e9)
+        self.assertEqual([], self.far(issues))
+        self.assertIn('card-timing-gone-before-spoken', codes(issues))
+
+
+class TypoFillerTests(unittest.TestCase):
+    SCRIPT = [at_time(0, ['คำพูดจริงในสคริปต์', 'เครื่องยนต์เจ็ต', 'ภาพตัดขวาง'])]
+
+    def lint(self, texts, extra_beats=(), **th):
+        lines = [t for t in texts]
+        beat = pip(10.0, media='typo', typo='card', src=None, origin=None, layout='stage',
+                   cards=[{'at': 10.0 + k * 1.0, 'lines': [t]} for k, t in enumerate(lines)])
+        beats = [dict(t=0, mode='full'), beat, *extra_beats, dict(t=10.0 + len(lines) + 5, mode='full')]
+        return lc.lint_content(episode(beats, 100), make_inputs(self.SCRIPT), th)
+
+    OK, BAD = 'เครื่องยนต์เจ็ต', 'ข้อความอวดอ้างสรรพคุณเกินจริง'
+
+    def test_more_than_30_percent_unsupported_is_an_error_but_each_text_stays_a_warning(self):
+        issues, m = self.lint([self.OK, self.BAD, self.BAD])
+        self.assertIn('typo-filler', codes(issues, 'error'))
+        self.assertEqual({'warn'}, {i['severity'] for i in issues if i['code'] == 'provenance-thai'})
+        self.assertEqual(2, codes(issues).count('provenance-thai'))
+        self.assertEqual({'texts': 3, 'unsupported': 2, 'share': 0.6667, 'maxShare': 0.3}, m['typoFiller'])
+
+    def test_30_percent_or_less_passes(self):
+        issues, m = self.lint([self.OK] * 7 + [self.BAD] * 3)                  # exactly 30 %: not "more than"
+        self.assertNotIn('typo-filler', codes(issues))
+        self.assertEqual(0.3, m['typoFiller']['share'])
+        self.assertIn('typo-filler', codes(self.lint([self.OK] * 6 + [self.BAD] * 4)[0]))
+        self.assertNotIn('typo-filler', codes(self.lint([self.OK, self.OK, self.OK])[0]))
+
+    def test_only_typo_beats_count(self):
+        # unsupported Thai text on a source clip beat's stat / headline is the provenance warning only
+        clip = pip(5.0, headline=self.BAD, stats=[{'at': 5.0, 'dur': 3.0, 'big': '1', 'label': self.BAD}], src='yt_a')
+        issues, m = lc.lint_content(episode([dict(t=0, mode='full'), clip, dict(t=20.0, mode='full')], 100), make_inputs(self.SCRIPT), {})
+        self.assertNotIn('typo-filler', codes(issues))
+        self.assertEqual(0, m['typoFiller']['texts'])
+
+    def test_items_and_vs_texts_count_too(self):
+        beat = pip(10.0, media='typo', typo='summary3', src=None, origin=None, layout='stage',
+                   items=[{'at': 10.0, 'text': self.BAD}, {'at': 11.0, 'text': self.BAD}, {'at': 12.0, 'text': self.OK}])
+        issues, m = lc.lint_content(episode([dict(t=0, mode='full'), beat, dict(t=20.0, mode='full')], 100), make_inputs(self.SCRIPT), {})
+        self.assertIn('typo-filler', codes(issues, 'error'))
+        self.assertEqual(3, m['typoFiller']['texts'])
+
+    def test_the_share_is_a_named_threshold(self):
+        self.assertEqual(0.30, lc.THRESHOLDS['typoFillerMaxShare'])
+        self.assertNotIn('typo-filler', codes(self.lint([self.OK, self.BAD, self.BAD], typoFillerMaxShare=0.9)[0]))
+
+
 class TimingFarTests(unittest.TestCase):
     def test_lone_number_spoken_far_away_is_left_to_provenance_unless_cap_is_lifted(self):
         inp = make_inputs([at_time(0, ['a']), at_time(300, ['ใช้', '777', 'ครั้ง'])], source='777')
@@ -238,7 +439,7 @@ class AnchorTests(unittest.TestCase):
         anc, amb = self.anchors('RULES 3 & 4')
         self.assertEqual(([], 2), (anc, amb))
         anc, amb = self.anchors('คะแนน 5/10')
-        self.assertEqual(([], 0), (anc, amb))      # fractions are provenance-only
+        self.assertEqual(([('5/10', ('frac', '10'))], 0), ([(a[0], a[2]) for a in anc], amb))      # a fraction anchors on its numerator next to the denominator
 
     def test_short_number_with_unit_word_is_an_anchor_with_unit(self):
         anc, amb = self.anchors('ใช้เวลา 20 ชั่วโมง')
@@ -382,6 +583,15 @@ class SimpleCheckTests(unittest.TestCase):
         # legacy `t` key is honoured
         legacy = [dict(t=0, mode='full'), pip(10), dict(t=50, mode='full', punch=[{'t': 70, 'z': 1.2}])]
         self.assertIn('punch-forbidden', codes(lint(legacy, 65.0)))
+
+    def test_punch_copy_is_off_for_v4_objects_because_the_schema_owns_it(self):
+        """V4 object episodes: S12 (episode_schema.mjs, code `schema`) is the only punch rule; legacy data keeps punch-forbidden."""
+        beats = [dict(t=0, mode='full'), pip(10, punch=[{'at': 12, 'z': 1.2}]), dict(t=50, mode='full')]
+        for fmt, legacy, expect in (('json-object', False, False), ('json-object', True, True), ('json-list', False, True), ('test', False, True)):
+            with self.subTest(fmt=fmt, legacy=legacy):
+                ep = ed._finish(beats, {'cta_t': 60.0}, fmt, 100.0, None)
+                inp = make_inputs([at_time(0, ['x'])], legacy=legacy)
+                self.assertEqual(expect, 'punch-forbidden' in codes(lc.lint_content(ep, inp, {})[0]))
 
     def stock(self, origin='stock', src='desk', t=10):
         return [dict(t=0, mode='full'), dict(t=t, mode='pip', media='broll', src=src, origin=origin, layout='stage', chrome=False), dict(t=50, mode='full')]
@@ -567,7 +777,7 @@ class EvidenceTests(unittest.TestCase):
     def run_(self, inp, **kw):
         return lc.lint_content(episode(self.beats(**kw), 420), inp, {})[0]
 
-    ENTRY = {'t': 399.0, 'src': 'yt_jet_engine', 'cue_line': 2, 'subject_terms': ['jet engine'], 'seen': 'engine cutaway'}
+    ENTRY = {'t': 399.0, 'src': 'yt_jet_engine', 'cue_line': 2, 'subject_terms': ['jet engine'], 'seen': 'engine cutaway drawing'}
     TIMED = [{'start': 592.0, 'end': 598.0, 'text': 'now the jet engines are rebuilt'}]
 
     def test_evidence_missing_fails_closed_and_is_skipped_under_legacy(self):
@@ -584,15 +794,81 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn('cue-mismatch', codes(self.run_(self.inputs(evidence=[bad], timed=self.TIMED))))
         self.assertIn('cue-mismatch', codes(self.run_(self.inputs(evidence=[{**self.ENTRY, 'cue_line': 99}], timed=self.TIMED))))
 
-    def test_window_unavailable_when_no_transcript_ocr_or_chapter(self):
+    def test_window_unavailable_when_no_transcript_or_ocr(self):
         self.assertIn('window-evidence-unavailable', codes(self.run_(self.inputs(evidence=[self.ENTRY]))))
 
-    def test_subject_must_occur_in_window_from_transcript_ocr_or_chapter(self):
+    def test_subject_must_occur_in_window_from_transcript_or_ocr_never_from_a_chapter(self):
         wrong = [{'start': 592.0, 'end': 598.0, 'text': 'the fort is shown from above'}]
         self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong))))
-        # each of the three sources can carry it
+        # the two sources that can carry it
         self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong, frames={(399.0, 'yt_jet_engine'): ['Jet Engine cutaway']}))))
-        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong, chapters=[{'start': 580.0, 'end': 612.0, 'title': 'Jet engines'}]))))
+        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=self.TIMED))))
+        # a chapter title is NOT evidence of what is on screen
+        chapters = [{'start': 580.0, 'end': 612.0, 'title': 'Jet engines'}]
+        self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong, chapters=chapters))))
+        self.assertIn('window-evidence-unavailable', codes(self.run_(self.inputs(evidence=[self.ENTRY], chapters=chapters))))
+
+    def test_weak_subject_terms_are_evidence_weak(self):
+        timed = [{'start': 592.0, 'end': 598.0, 'text': 'the very thing that you have in 2026 with 4 jets'}]
+        for terms in (['the'], ['this', 'that'], ['jet'], ['4'], ['2026'], ['4 2026'], ['with from'], ['things'], ['really'], []):
+            with self.subTest(terms=terms):
+                got = codes(self.run_(self.inputs(evidence=[{**self.ENTRY, 'subject_terms': terms}], timed=timed)))
+                self.assertIn('evidence-weak', got)
+                self.assertNotIn('subject-not-in-window', got)
+        # one qualifying term is enough, and a short / stopword word inside a term does not matter
+        ok = self.run_(self.inputs(evidence=[{**self.ENTRY, 'subject_terms': ['the', 'jet engines 4']}], timed=[{'start': 592.0, 'end': 598.0, 'text': 'new jet engine parts'}]))
+        self.assertNotIn('evidence-weak', codes(ok))
+        self.assertNotIn('subject-not-in-window', codes(ok))
+
+    def test_stopword_list_is_the_explicit_one(self):
+        th = lc.THRESHOLDS
+        for w in ('this', 'that', 'with', 'from', 'have', 'will', 'very', 'about', 'there', 'their', 'which', 'would', 'could', 'should', 'these', 'those',
+                  'into', 'over', 'also', 'just', 'like', 'then', 'than', 'when', 'what', 'your', 'they', 'them', 'here', 'more', 'most', 'some', 'such',
+                  'only', 'really', 'going', 'thing', 'things'):
+            self.assertIn(w, th['subjectStopwords'])
+            self.assertEqual([], lc.qualifying_tokens(w.upper(), th))
+        self.assertEqual(['engine'], lc.qualifying_tokens('Jet engine 4 the', th))
+        self.assertEqual(4, th['subjectTokenMinLetters'])
+
+    def test_seen_must_be_a_real_description(self):
+        for seen in (None, '', '   ', 'engine', 'a' * 14, 5, ['x' * 20]):
+            with self.subTest(seen=seen):
+                entry = {**self.ENTRY, 'seen': seen}
+                self.assertIn('evidence-weak', codes(self.run_(self.inputs(evidence=[entry], timed=self.TIMED))))
+        entry = {**self.ENTRY, 'seen': 'x' * 15}
+        self.assertNotIn('evidence-weak', codes(self.run_(self.inputs(evidence=[entry], timed=self.TIMED))))
+        entry = {k: v for k, v in self.ENTRY.items() if k != 'seen'}
+        self.assertIn('evidence-weak', codes(self.run_(self.inputs(evidence=[entry], timed=self.TIMED))))
+
+    def test_with_a_frames_report_every_entry_needs_frames_in_it(self):
+        inp = self.inputs(evidence=[self.ENTRY], timed=self.TIMED)
+        inp.frames_given = True
+        inp.frame_counts = {}                                           # report given, but it has nothing for this beat
+        self.assertIn('evidence-missing', codes(self.run_(inp)))
+        inp.frame_counts = {(399.0, 'yt_jet_engine'): 0}
+        self.assertIn('evidence-missing', codes(self.run_(inp)))
+        inp.frame_counts = {(399.0, 'yt_other'): 5}
+        self.assertIn('evidence-missing', codes(self.run_(inp)))
+        inp.frame_counts = {(399.0, 'yt_jet_engine'): 5}
+        self.assertNotIn('evidence-missing', codes(self.run_(inp)))
+        # without a frames report nothing is demanded
+        self.assertNotIn('evidence-missing', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=self.TIMED))))
+
+    def test_report_names_which_source_matched_each_word(self):
+        inp = self.inputs(evidence=[{**self.ENTRY, 'subject_terms': ['jet engine']}], timed=[{'start': 592.0, 'end': 598.0, 'text': 'a jet is shown'}],
+                          frames={(399.0, 'yt_jet_engine'): ['Engine cutaway']})
+        issues, m = lc.lint_content(episode(self.beats(), 420), inp, {})
+        self.assertNotIn('subject-not-in-window', codes(issues))
+        term = m['evidence']['matches'][0]['terms'][0]
+        self.assertEqual({'term': 'jet engine', 'tokens': {'engine': ['ocr']}, 'matched': True}, term)
+        both = self.inputs(evidence=[self.ENTRY], timed=self.TIMED, frames={(399.0, 'yt_jet_engine'): ['JET ENGINES']})
+        self.assertEqual({'engine': ['transcript', 'ocr']}, lc.lint_content(episode(self.beats(), 420), both, {})[1]['evidence']['matches'][0]['terms'][0]['tokens'])
+
+    def test_frames_report_loader_counts_frames(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'f.json'
+            p.write_text(json.dumps({'beats': [{'t': 399.0, 'src': 'yt_jet_engine', 'frames': [{'ocr': ['x']}, {'ocr': []}]}, {'t': 5, 'src': 'a', 'frames': []}]}))
+            self.assertEqual({(399.0, 'yt_jet_engine'): 2, (5.0, 'a'): 0}, ed.load_frame_counts(p))
 
     def test_window_is_the_original_video_range_padded_three_seconds(self):
         shown = 590.0   # beat 399-408 -> original 590-599 (capped at source_out 610)
@@ -602,7 +878,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=late))))
         self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=near))))
 
-    def test_chapter_must_contain_the_whole_shown_range(self):
+    def test_chapters_are_still_loadable_but_never_part_of_the_window(self):
         straddle = [{'start': 500.0, 'end': 595.0, 'title': 'Jet engine'}, {'start': 595.0, 'end': 700.0, 'title': 'Other'}]
         self.assertIn('window-evidence-unavailable', codes(self.run_(self.inputs(evidence=[self.ENTRY], chapters=straddle))))
 

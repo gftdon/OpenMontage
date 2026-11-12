@@ -2,11 +2,14 @@
 """Integrity lock for the gate files of this skill.
 
 gates_lock.py write  --skill-dir S [--external REPO_REL ...] --repo-root W --out S/scripts/gates.lock.json
-gates_lock.py verify --skill-dir S --repo-root W [--mirror DIR ...]
+  (always locks REQUIRED_EXTERNAL too; refuses when the skill tree holds a file git does not track or ignores)
+gates_lock.py verify --skill-dir S --repo-root W [--mirror DIR ...] [--require-external REPO_REL ...]
 
 verify() returns a list of problem strings ("<code>: detail"); an empty list means the skill dir (and every
 mirror) matches the lock, the lock matches HEAD, and every locked file matches HEAD. Fail-closed: no git,
-no lock, a symlink or an unexpected file is a problem.
+no lock, a symlink or an unexpected file is a problem. Every path of REQUIRED_EXTERNAL (and of the
+required_external argument, which replaces it when given) must appear under the lock's "external" map ("external-not-locked") - a lock that does not cover the engine file
+is refused even when everything it does list is intact.
 """
 import argparse
 import hashlib
@@ -15,6 +18,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 SCHEMA = 'yt-news-v4-gates-lock'
 VERSION = 1
@@ -22,6 +26,12 @@ LOCK_REL = 'scripts/gates.lock.json'
 EXCLUDED_DIR_NAMES = {'__pycache__'}
 EXCLUDED_REL_DIRS = set()   # tests and fixtures are locked too (they cannot be weakened)
 EXCLUDED_FILE_NAMES = {'.DS_Store'}
+# The ONE list of files outside the skill folder (repo-relative) that every lock must cover.  `write` always includes
+# them (plus any extra --external), `verify` and finalize refuse a lock that lacks one; the final list comes from the
+# engine team (CF-A66).  Adding a file later is a one-line change here.
+REQUIRED_EXTERNAL = ('remotion-composer/src/YtNewsStyle01V4.tsx',)
+GIT_BIN = 'git'            # finalize.py sets this to the realpath it resolved once at start
+GIT_TIMEOUT = 20           # per git call (seconds); a verify() runs ~6 of them, all bounded by the caller's deadline
 
 
 class GitUnavailable(Exception):
@@ -71,17 +81,56 @@ def _check_external_rel(rel):
     return p.as_posix()
 
 
-def build_lock(skill_dir, repo_root, external=()):
+def _tracked_set(repo_root, rels, deadline=None):
+    """-> (tracked, tracked_but_ignored): repo-relative posix paths among `rels` that are in the git index / ignored."""
+    paths = sorted(rels)
+    if not paths:
+        return set(), set()
+    tracked, ignored = set(), set()
+    for args, target in ((('ls-files', '-z', '--cached', '--'), tracked),
+                         (('ls-files', '-z', '--cached', '--ignored', '--exclude-standard', '--'), ignored)):
+        r = _git(repo_root, *args, *paths, deadline=deadline)
+        if r.returncode:
+            raise ValueError('git ls-files failed: %s' % r.stderr.decode().strip())
+        target.update(x for x in r.stdout.decode().split('\0') if x)
+    return tracked, ignored
+
+
+def check_tracked(skill_dir, repo_root, files, external, deadline=None):
+    """A lock may only be written over files git tracks (and does not ignore): returns the offending paths."""
+    skill_dir, repo_root = Path(skill_dir).resolve(), Path(repo_root).resolve()
+    base = skill_dir.relative_to(repo_root).as_posix()
+    rels = {base + '/' + rel: rel for rel in files}
+    rels.update({rel: rel for rel in external})
+    tracked, ignored = _tracked_set(repo_root, rels, deadline)
+    bad = ['%s (%s)' % (p, 'ignored by git' if p in ignored else 'not tracked by git') for p in sorted(rels)
+           if p not in tracked or p in ignored]
+    return bad
+
+
+def build_lock(skill_dir, repo_root, external=(), check_git=True, deadline=None, required=None):
+    """check_git: refuse (ValueError naming the files) when the skill tree - or an external file - holds a file that git
+    does not track or that is ignored: a lock can never be written over junk.  Tracked means in the index (git add)."""
     skill_dir, repo_root = Path(skill_dir), Path(repo_root)
     files, problems = scan(skill_dir)
     if problems:
         raise ValueError('; '.join(problems))
     ext = {}
+    # required=None -> REQUIRED_EXTERNAL; tests that need a deliberately incomplete lock pass required=()
+    external = list(REQUIRED_EXTERNAL if required is None else required) + list(external)
     for rel in sorted(set(_check_external_rel(e) for e in external)):
         f = repo_root / rel
         if not f.is_file() or f.is_symlink():
             raise ValueError('external file missing or not regular: %s' % rel)
         ext[rel] = sha256_file(f)
+    if check_git:
+        try:
+            bad = check_tracked(skill_dir, repo_root, files, ext, deadline)
+        except (GitUnavailable, ValueError, OSError) as e:
+            raise ValueError('cannot check that git tracks every file of the skill: %s' % e)
+        if bad:
+            raise ValueError('refusing to lock: %d file(s) are not tracked by git or are ignored (remove them or git add them): %s'
+                             % (len(bad), ', '.join(bad[:20]) + (', ...' if len(bad) > 20 else '')))
     return {'schema': SCHEMA, 'version': VERSION, 'skill': skill_dir.resolve().name, 'files': files, 'external': ext}
 
 
@@ -91,42 +140,49 @@ def lock_bytes(lock):
 
 # ---------------------------------------------------------------- git helpers
 def _git_env():
-    return {k: v for k, v in os.environ.items() if not k.startswith('GIT_')} | {'GIT_OPTIONAL_LOCKS': '0'}
+    """No GIT_* from the caller (GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE, replace refs ...) except what is set here."""
+    return {k: v for k, v in os.environ.items() if not k.startswith('GIT_')} | {'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
 
 
-def _git(repo_root, *args, input_bytes=None):
+def _git(repo_root, *args, input_bytes=None, deadline=None):
+    """deadline: absolute time.monotonic() value; every call is bounded by min(GIT_TIMEOUT, time left)."""
+    timeout = GIT_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise GitUnavailable('time budget exhausted before git could run')
     try:
-        return subprocess.run(['git', '--literal-pathspecs', '-C', str(repo_root), *args], input=input_bytes,
-                              capture_output=True, env=_git_env(), timeout=120)
+        return subprocess.run([GIT_BIN, '-c', 'core.fsmonitor=false', '--literal-pathspecs', '-C', str(repo_root), *args],
+                              input=input_bytes, capture_output=True, env=_git_env(), timeout=timeout)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         raise GitUnavailable(str(e))
 
 
-def git_head(repo_root):
+def git_head(repo_root, deadline=None):
     try:
-        r = _git(repo_root, 'rev-parse', 'HEAD')
+        r = _git(repo_root, 'rev-parse', 'HEAD', deadline=deadline)
     except GitUnavailable:
         return None
     return r.stdout.decode().strip() if r.returncode == 0 else None
 
 
-def _git_problems(repo_root, entries):
+def _git_problems(repo_root, entries, deadline=None):
     """entries: {repo-relative posix path: kind} where kind in 'file','lock','external'."""
     problems = []
     try:
-        top = _git(repo_root, 'rev-parse', '--show-toplevel')
-        head = _git(repo_root, 'rev-parse', 'HEAD')
+        top = _git(repo_root, 'rev-parse', '--show-toplevel', deadline=deadline)
+        head = _git(repo_root, 'rev-parse', 'HEAD', deadline=deadline)
         if top.returncode or head.returncode:
             return ['git-unavailable: not a git repository with a HEAD commit (%s)' % (top.stderr or head.stderr).decode().strip()]
         if Path(top.stdout.decode().strip()).resolve() != Path(repo_root).resolve():
             return ['repo-root: --repo-root %s is not the git top level %s' % (repo_root, top.stdout.decode().strip())]
         paths = sorted(entries)
-        st = _git(repo_root, 'status', '--porcelain', '--untracked-files=all', '-z', '--', *paths)
+        st = _git(repo_root, 'status', '--porcelain', '--untracked-files=all', '-z', '--', *paths, deadline=deadline)
         if st.returncode:
             return ['git-unavailable: git status failed: %s' % st.stderr.decode().strip()]
         for rec in filter(None, st.stdout.decode().split('\0')):
             problems.append('git-dirty: %s' % rec)
-        ls = _git(repo_root, 'ls-tree', '-r', '-z', 'HEAD', '--', *paths)
+        ls = _git(repo_root, 'ls-tree', '-r', '-z', 'HEAD', '--', *paths, deadline=deadline)
         if ls.returncode:
             return ['git-unavailable: git ls-tree failed: %s' % ls.stderr.decode().strip()]
         blobs = {}
@@ -136,7 +192,7 @@ def _git_problems(repo_root, entries):
         present = [p for p in paths if (Path(repo_root) / p).is_file()]
         hashes = {}
         if present:
-            ho = _git(repo_root, 'hash-object', '--stdin-paths', input_bytes=('\n'.join(present) + '\n').encode())
+            ho = _git(repo_root, 'hash-object', '--stdin-paths', input_bytes=('\n'.join(present) + '\n').encode(), deadline=deadline)
             if ho.returncode:
                 return ['git-unavailable: git hash-object failed: %s' % ho.stderr.decode().strip()]
             out = ho.stdout.decode().split()
@@ -169,7 +225,7 @@ def _compare(label, skill_dir, lock):
     return problems
 
 
-def verify(skill_dir, repo_root, mirror_dirs=()):
+def verify(skill_dir, repo_root, mirror_dirs=(), required_external=None, deadline=None):
     skill_dir, repo_root = Path(skill_dir).resolve(), Path(repo_root).resolve()
     mirror_dirs = [Path(m).resolve() for m in mirror_dirs]
     lock_path = skill_dir / LOCK_REL
@@ -189,6 +245,14 @@ def verify(skill_dir, repo_root, mirror_dirs=()):
     except (ValueError, AttributeError) as e:
         return ['lock-invalid: %s' % e]
     problems = []
+    for rel in (REQUIRED_EXTERNAL if required_external is None else required_external):
+        try:
+            wanted = _check_external_rel(rel)
+        except ValueError as e:
+            problems.append('external-not-locked: %s' % e)
+            continue
+        if wanted not in lock['external']:
+            problems.append('external-not-locked: %s is not listed under "external" in the lock' % wanted)
     if lock.get('skill') != skill_dir.name:
         problems.append('skill-name-mismatch: lock says %r, directory is %r' % (lock.get('skill'), skill_dir.name))
     problems += _compare('', skill_dir, lock)
@@ -220,7 +284,7 @@ def verify(skill_dir, repo_root, mirror_dirs=()):
     for rel in lock['external']:
         entries[rel] = 'external'
     if entries:
-        problems += _git_problems(repo_root, entries)
+        problems += _git_problems(repo_root, entries, deadline)
     return problems
 
 
@@ -237,6 +301,7 @@ def main(argv=None):
     v.add_argument('--skill-dir', required=True)
     v.add_argument('--repo-root', required=True)
     v.add_argument('--mirror', action='append', default=[])
+    v.add_argument('--require-external', action='append', default=[], help='extra to REQUIRED_EXTERNAL (never instead of it)')
     args = ap.parse_args(argv)
     try:
         if args.cmd == 'write':
@@ -244,7 +309,7 @@ def main(argv=None):
             Path(args.out).write_bytes(lock_bytes(lock))
             print('wrote %s (%d files, %d external)' % (args.out, len(lock['files']), len(lock['external'])))
             return 0
-        problems = verify(args.skill_dir, args.repo_root, args.mirror)
+        problems = verify(args.skill_dir, args.repo_root, args.mirror, list(REQUIRED_EXTERNAL) + args.require_external)
     except (ValueError, OSError) as e:
         print('error: %s' % e, file=sys.stderr)
         return 2

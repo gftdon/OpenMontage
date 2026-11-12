@@ -32,5 +32,5 @@ for f in "$@"; do
     -c:v libx264 -preset veryfast -crf 19 -pix_fmt yuv420p -an "$OUT/$f.mp4" && echo "done $f"
   python3 -I "$SCRIPT_DIR/media_manifest.py" "$SRC" "$OUT" "$f"
 done
-echo "--- durations (paste into BROLL_DUR) ---"
-for m in "$OUT"/*.mp4; do printf "  %s: %s,\n" "$(basename "$m" .mp4)" "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$m")"; done
+echo "--- paste into episode.json brollDur ---"
+for m in "$OUT"/*.mp4; do printf "  \"%s\": %s,\n" "$(basename "$m" .mp4)" "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$m")"; done

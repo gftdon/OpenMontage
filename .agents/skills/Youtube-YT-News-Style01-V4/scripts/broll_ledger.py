@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""B-roll ledger for the YT-News V3 skill: which footage has been used before.
+"""B-roll ledger for the YT-News V4 skill: which footage has been used before.
 
 Run from the repo root (defaults are relative to the cwd):
 
   python broll_ledger.py seed   [--public-root remotion-composer/public]
                                 [--projects-root projects]
                                 [--ledger projects/_broll_ledger.json]
-  python broll_ledger.py record <mediaDir> --composition <CompId.tsx>
+  python broll_ledger.py record <mediaDir> --episode <episode.json>
                                 [--manifest PATH] [--public-root ...] [--ledger ...]
   python broll_ledger.py show   [--ledger ...]
 
@@ -25,9 +25,10 @@ Ledger file (JSON, "schema": 1):
             Episode identity: <mediaDir> for public files, <slug> for project files.
   files   : {"<abs path>": {"size", "mtime_ns", "md5"}}   md5 cache (re-runs do not
             re-hash ~2 GB of footage)
-  episodes: {"<mediaDir>": {"comp", "slug", "recorded_at"}}   written by `record`
+  episodes: {"<mediaDir>": {"comp", "slug", "recorded_at"}}   written by `record` (comp = episode_key(): the project
+            folder of episode.json; V4 has no per-episode TSX, the field keeps its V3 name)
 
-Shared helpers (md5 cache, ledger I/O, seed scan, BEATS parser) are imported by
+Shared helpers (md5 cache, ledger I/O, seed scan; legacy TSX BEATS parser) are imported by
 check_broll.py and fetch_broll.py.
 """
 from __future__ import annotations
@@ -329,6 +330,8 @@ def auto_seed(ledger_path, public_root, projects_root, quiet=False) -> dict:
 
 
 # --------------------------------------------------------------- BEATS tokenizer
+# LEGACY (V3 .tsx compositions). V4 reads episode.json via episode_data.load_episode; the only remaining caller of
+# parse_beats is episode_data._from_tsx (legacy replay). Do not use it for new code.
 
 class BeatsParseError(Exception):
     pass
@@ -647,6 +650,15 @@ def footage_beats(beats: list[dict]) -> list[dict]:
     return out
 
 
+NO_TSX_MESSAGE = "V4 has no per-episode TSX; pass --episode <episode.json>"
+
+
+def episode_key(path) -> str:
+    """Identity of an episode for the ledger: the project folder (projects/<slug>/artifacts/episode.json) else the file name."""
+    p = Path(path).resolve()
+    return p.parent.parent.name if p.parent.name == "artifacts" else p.name
+
+
 def read_composition_text(path) -> str:
     p = Path(path)
     if not p.exists():
@@ -679,10 +691,17 @@ def cmd_seed(args) -> int:
 
 
 def cmd_record(args) -> int:
+    if args.composition:
+        print(f"ERROR: {NO_TSX_MESSAGE}", file=sys.stderr)
+        return 2
+    if not args.episode:
+        print("ERROR: --episode <episode.json> is required", file=sys.stderr)
+        return 2
     try:
-        text = read_composition_text(args.composition)
-        used = footage_beats(parse_beats(text))
-    except (FileNotFoundError, BeatsParseError) as e:
+        from broll_plan import load_v4_episode
+        episode = load_v4_episode(args.episode)
+        used = footage_beats([b for b in episode["beats"] if b.get("mode") != "full" and b.get("media") != "typo"])
+    except (OSError, ValueError) as e:  # EpisodeFormatError / BeatsParseError are ValueErrors / Exceptions
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     manifest = {}
@@ -695,7 +714,7 @@ def cmd_record(args) -> int:
             return 2
         slug = slug_from_raw_dir(Path(args.manifest).resolve().parent)
     media_dir = args.mediaDir
-    comp_name = Path(args.composition).name
+    comp_name = episode_key(args.episode)
     keys = sorted({u["src"] for u in used if u["src"] and not is_yt_key(u["src"])})
     broll_dir = Path(args.public_root) / media_dir / "broll"
     recorded = 0
@@ -703,7 +722,7 @@ def cmd_record(args) -> int:
     with locked_ledger(args.ledger) as ledger:
         mk = ledger["episodes"].get(media_dir)
         if isinstance(mk, dict) and mk.get("comp") and mk["comp"] != comp_name:
-            print(f"ERROR: mediaDir {media_dir} was already recorded for composition {mk['comp']}; "
+            print(f"ERROR: mediaDir {media_dir} was already recorded for episode {mk['comp']}; "
                   "use a new mediaDir for a new video", file=sys.stderr)
             return 1
         for key in keys:
@@ -731,7 +750,7 @@ def cmd_record(args) -> int:
             recorded += 1
         ledger["episodes"][media_dir] = {"comp": comp_name, "slug": slug, "recorded_at": _now()}
     print(f"record: {recorded}/{len(keys)} stock files recorded for episode {media_dir} "
-          f"(composition {comp_name})")
+          f"(episode {comp_name})")
     return rc
 
 
@@ -775,7 +794,8 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("record", help="record the stock files an episode actually uses")
     p.add_argument("mediaDir")
-    p.add_argument("--composition", required=True, help="CompId.tsx (path, or name under remotion-composer/src)")
+    p.add_argument("--episode", help="episode.json (yt-news-v4-episode/1)")
+    p.add_argument("--composition", help=argparse.SUPPRESS)  # V3 flag: hard error with a clear message
     p.add_argument("--manifest", help="projects/<slug>/assets/broll/_manifest.json from fetch_broll.py")
     common(p)
     p.set_defaults(fn=cmd_record)

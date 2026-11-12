@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ import broll_costs as costs
 import gen_stills as images
 import score_relevance as relevance
 
+EPISODE = Path(__file__).resolve().parent / 'fixtures/a67/broll/single-stock-beat.json'
 JPEG = b'\xff\xd8\xff\xc0\x00\x0b\x08\x02\x40\x04\x00\x01\x01\x11\x00\xff\xd9'
 
 class NoApprovalHandoffTests(unittest.TestCase):
@@ -63,9 +65,9 @@ class NoApprovalHandoffTests(unittest.TestCase):
   args=['score_relevance.py','--project',str(self.project)]
   for name,value in inputs.items():
    p=self.project/(name+'.json'); p.write_text(json.dumps(value)); args += ['--'+name,str(p)]
-  beats=self.project/'beats.tsx'; beats.write_text('const VO_END_SEC = 2;'); args += ['--beats',str(beats),'--public',str(self.project),'--out',str(self.project/'score.json')]
+  beats=self.project/'episode.json'; shutil.copy(EPISODE,beats); args += ['--beats',str(beats),'--public',str(self.project),'--out',str(self.project/'score.json')]
   (self.project/'stock.mp4').write_bytes(b'media')
-  with patch.object(sys,'argv',args),patch('broll_ledger.parse_beats',return_value=[{'t':0,'src':'stock','origin':'stock','media':'broll','layout':'full'}]),patch.object(relevance,'validate_plan',return_value=[]),patch.object(relevance,'reconcile_plan',return_value=[]),patch.object(relevance,'parse_renderer_durations',return_value={'stock':3}),patch.object(relevance,'probe_duration',return_value=3),patch.object(relevance,'extract_frame',return_value=JPEG):
+  with patch.object(sys,'argv',args),patch.object(relevance,'validate_plan',return_value=[]),patch.object(relevance,'reconcile_plan',return_value=[]),patch.object(relevance,'probe_duration',return_value=3),patch.object(relevance,'extract_frame',return_value=JPEG):
    self.assertEqual(relevance.main(),0)
   report=json.loads((self.project/'score.json').read_text())
   self.assertFalse(report['paid_calls_enabled']); self.assertTrue(report['pass'])

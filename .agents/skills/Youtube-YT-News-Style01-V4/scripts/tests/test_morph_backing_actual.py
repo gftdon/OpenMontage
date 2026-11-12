@@ -1,11 +1,14 @@
-"""Actual-frame diagnostic assertions; MORPH_QC_REPORT selects a retained run."""
+"""Actual-frame diagnostic assertions; MORPH_QC_REPORT selects a retained run.
+
+V4: the beats are read from the episode JSON of that run (MORPH_QC_EPISODE, default: the engine sample
+remotion-composer/src/ytNewsStyle01V4Sample.json); the engine no longer contains `const BEATS`."""
 import json
 import os
-import re
 import unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[5]
 REPORT=os.environ.get('MORPH_QC_REPORT')
+EPISODE=Path(os.environ.get('MORPH_QC_EPISODE') or ROOT/'remotion-composer/src/ytNewsStyle01V4Sample.json')
 
 def overlaps(a,b):
  return min(a['x']+a['width'],b['x']+b['width'])>max(a['x'],b['x']) and min(a['y']+a['height'],b['y']+b['height'])>max(a['y'],b['y'])
@@ -14,8 +17,7 @@ def overlaps(a,b):
 class ActualMorphBackingTests(unittest.TestCase):
  def test_visible_headline_backing_never_overlaps_avatar_and_settles(self):
   report=json.loads(Path(REPORT).read_text());run=Path(report['artifactDirectory'])
-  source=(ROOT/'remotion-composer/src/YtNewsStyle01V4.tsx').read_text()
-  beats=json.loads(re.search(r'const BEATS[^=]*=\s*(\[.*?\n\]);',source,re.S)[1]);checked=0;settled=0
+  beats=json.loads(EPISODE.read_text())['beats'];checked=0;settled=0
   for frame in report['requestedFrames']:
    data=json.loads((run/f'{frame}.json').read_text());t=frame/25
    index=max(i for i,b in enumerate(beats) if b['t']<=t);beat=beats[index]

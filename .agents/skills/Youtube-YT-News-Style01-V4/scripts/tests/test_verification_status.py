@@ -1,5 +1,6 @@
 """Additive report contract; all provider interaction is local test stubs."""
 import json
+import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -51,7 +52,7 @@ class VerificationStatusTests(unittest.TestCase):
   for key in ('project','plan','context','beats','manifest','cuts','public','out'):
    path=self.p/key
    if key in ('plan','context','manifest','cuts'):path.write_text('{}')
-   if key=='beats':path.write_text('const VO_END_SEC=1;')
+   if key=='beats':shutil.copy(handoff_fixture.EPISODE,path)
    args += ['--'+key,str(path)]
   (self.p/'out').mkdir()  # Real prepare_rows creates the frames/output parent.
   with patch.object(sys,'argv',args),patch.object(b,'prepare_rows',return_value=[self.row]):self.assertEqual(b.main(),0)
@@ -71,8 +72,8 @@ class LegacyVerificationTests(unittest.TestCase):
   values={'plan':{'beats':[]},'context':{},'manifest':{},'cuts':{'clips':{}}}
   for key,value in values.items():
    path=self.project/(key+'.json');path.write_text(json.dumps(value));args += ['--'+key,str(path)]
-  beats=self.project/'beats.tsx';beats.write_text('const VO_END_SEC = 2;');args += ['--beats',str(beats),'--public',str(self.project),'--out',str(self.project/'invalid.json')]
-  with patch.object(sys,'argv',args),patch('broll_ledger.parse_beats',return_value=[]),patch.object(s,'validate_plan',return_value=['invalid structure']),patch.object(s,'reconcile_plan',return_value=[]),patch.object(s,'parse_renderer_durations',return_value={}):self.assertEqual(s.main(),1)
+  beats=self.project/'episode.json';shutil.copy(handoff_fixture.EPISODE,beats);args += ['--beats',str(beats),'--public',str(self.project),'--out',str(self.project/'invalid.json')]
+  with patch.object(sys,'argv',args),patch.object(s,'validate_plan',return_value=['invalid structure']),patch.object(s,'reconcile_plan',return_value=[]):self.assertEqual(s.main(),1)
   report=json.loads((self.project/'invalid.json').read_text());self.assertEqual(report['verification_status'],'failed');self.assertFalse(report['pass'])
  def test_known_rejection_batch_status_failed(self):
   handoff_fixture.NoApprovalHandoffTests.test_known_zero_and_text_reject_survive_noapproval_no_transports(self)

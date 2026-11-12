@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""V3 native relevance preview/batch. No default paid transport or credentials.
+"""V4 native relevance preview/batch (reads episode.json). No default paid transport or credentials.
 Main injects count(raw_generate_bytes,model) and generate(raw_generate_bytes,model).
 """
 import argparse
 import json
 import http.client
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -13,7 +12,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 import score_relevance as sr
 import native_paid as native
 from broll_costs import Budget,StopPaid,config_sha256
-from broll_plan import validate_plan,reconcile_plan,normalize_beats,parse_renderer_durations,probe_duration,file_sha256,manifest_identity,check_usage,derive_usage
+from broll_plan import validate_plan,reconcile_plan,load_v4_episode,probe_duration,file_sha256,manifest_identity,check_usage,derive_usage
 from media_manifest import save_json
 
 def rows_digest(rows):
@@ -31,13 +30,11 @@ class PreparedRows(list):
   if [r['id'] for r in self]!=self._coverage['full_plan_ids']:errors.append('prepared plan IDs missing/reordered')
   return not errors and self._coverage['complete'],errors
 
-def prepare_rows(plan,context,composition,records,public_dir,out_dir,config,diagnostic_subset=False):
- import broll_ledger as bl
- beats=normalize_beats(bl.parse_beats(composition));match=re.search(r'const\s+VO_END_SEC\s*=\s*([\d.]+)',composition)
- if not match:raise ValueError('missing VO_END_SEC')
- vo=float(match[1]);errors=validate_plan(plan,context)+reconcile_plan(plan,beats,records,diagnostic_subset,vo)
+def prepare_rows(plan,context,episode,records,public_dir,out_dir,config,diagnostic_subset=False):
+ """`episode` is the dict from broll_plan.load_v4_episode (beats, vo_end, broll_dur, sha256)."""
+ beats=episode['beats'];vo=episode['vo_end'];errors=validate_plan(plan,context)+reconcile_plan(plan,beats,records,diagnostic_subset,vo)
  if errors:raise ValueError('; '.join(errors))
- table=parse_renderer_durations(composition);public=Path(public_dir);out=Path(out_dir);out.mkdir(parents=True,exist_ok=True);actual={}
+ table=episode['broll_dur'];public=Path(public_dir);out=Path(out_dir);out.mkdir(parents=True,exist_ok=True);actual={}
  for beat in beats:
   if beat.get('mode')=='full' or beat.get('media') not in ('clip','broll'):continue
   name=beat['src'];record=records[name];media=public/(name+'.mp4')
@@ -52,7 +49,7 @@ def prepare_rows(plan,context,composition,records,public_dir,out_dir,config,diag
   if beat['origin']=='source':identity['source_sha256']=record['source_sha256']
   if beat['origin']=='ai':identity['image_sha256']=record['image_sha256']
   rows.append({'id':item['id'],'t':item['t'],'end':item['end'],'spoken':item['spoken'],'frame':frame,'frame_path':str(frame_path.resolve()),'identity':identity})
- coverage={'complete':not diagnostic_subset,'full_plan_ids':[item['id'] for item in plan['beats']],'plan_sha256':sr.digest(json.dumps(plan,sort_keys=True,ensure_ascii=False).encode()),'context_sha256':context_hash,'composition_sha256':sr.digest(composition.encode()),'manifest_sha256':sr.digest(json.dumps(records,sort_keys=True,ensure_ascii=False).encode())}
+ coverage={'complete':not diagnostic_subset,'full_plan_ids':[item['id'] for item in plan['beats']],'plan_sha256':sr.digest(json.dumps(plan,sort_keys=True,ensure_ascii=False).encode()),'context_sha256':context_hash,'episode_sha256':episode['sha256'],'manifest_sha256':sr.digest(json.dumps(records,sort_keys=True,ensure_ascii=False).encode())}
  return PreparedRows(rows,coverage)
 
 def run_rows(budget,rows,out_dir,count_runner=None,generate_runner=None,key_identity=None,complete=False):
@@ -87,7 +84,7 @@ def main():
  for key in ('project','plan','context','beats','manifest','cuts','public','out'):ap.add_argument('--'+key,required=True)
  ap.add_argument('--diagnostic-subset',action='store_true');a=ap.parse_args();config=Budget(a.project,None).config;records=json.loads(Path(a.manifest).read_text());cuts=json.loads(Path(a.cuts).read_text());records.update(cuts.get('clips',cuts));out=Path(a.out)
  try:
-  rows=prepare_rows(json.loads(Path(a.plan).read_text()),json.loads(Path(a.context).read_text()),Path(a.beats).read_text(),records,a.public,out/'frames',config,a.diagnostic_subset)
+  rows=prepare_rows(json.loads(Path(a.plan).read_text()),json.loads(Path(a.context).read_text()),load_v4_episode(a.beats),records,a.public,out/'frames',config,a.diagnostic_subset)
   # Preview does NOT inspect or mutate real outcome/journal state; requests + rows only.
   summary=[]
   for row in rows:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Pre-render b-roll uniqueness gate for the YT-News V3 skill.
+"""Pre-render b-roll uniqueness gate for the YT-News V4 skill.
 
-  python check_broll.py <CompId.tsx> --media-dir <mediaDir>
-                        --manifest projects/<slug>/assets/broll/_manifest.json
+  python check_broll.py <episode.json> --media-dir <mediaDir>
+                        --manifest projects/<slug>/assets/broll/_manifest.json --cuts <_cuts.json>
                         [--public-root remotion-composer/public] [--projects-root projects]
                         [--ledger projects/_broll_ledger.json] [--max-old 2]
 
@@ -13,27 +13,39 @@ public + project folders on every run, so a missing or stale ledger cannot cause
 episode (it is a key in --manifest, the raw file still matches the manifest md5) AND its
 content (public file and raw file) is not found in any other episode. Everything else is
 "old"; at most --max-old (hard cap 2) old stock files are allowed. Checks:
-  1. BEATS parsed fail-closed (real tokenizer; spreads / .map / duplicate decls = exit 2)
-  2. every footage beat has an explicit `src` (media broll/clip/typo)
-  3. no src is used by more than one beat
+  1. episode.json read through episode_data.load_episode (anything that is not a V4 episode object = exit 2)
+  2. every cutaway beat (pip, media broll/clip) has an explicit `src`
+  3. a src used by more than one beat follows schema rule S10: a source clip (`yt_*`, origin source) may be
+     reused when the played ranges [round(from*25), +shown frames) are disjoint; stock / ai are never reused
   4. every referenced file exists as public/<mediaDir>/broll/<src>.mp4
   5. no two different srcs are byte-identical (renamed copies)
   6. yt_ clips must be cut from this episode's source: content found in another episode
      is a hard violation (never counted toward the allowance)
   7. old stock files (see above) <= --max-old
   8. raw file of a manifest key unchanged since fetch
-  9. composition's assetDir == --media-dir
- 10. mediaDir not already recorded for a different composition
+  9. episode.json's assetDir == --media-dir
+ 10. mediaDir not already recorded for a different episode (ledger `comp` = project folder of episode.json)
+Durations (loop length, shown range) come from the episode's `brollDur` table and are compared with ffprobe.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broll_ledger as bl  # noqa: E402
+
+FPS = 25
+
+
+def played_frames(beat):
+    """Source frames a cutaway beat plays, exactly as schema rule S10 counts them: [round(from*25), + shown frames)."""
+    start = math.floor((beat.get("from") or 0) * FPS + 0.5)
+    shown = math.ceil(beat["end"] * FPS) - math.ceil(beat["t"] * FPS)
+    return start, start + shown
 
 
 def _eps(s, limit=4) -> str:
@@ -43,40 +55,58 @@ def _eps(s, limit=4) -> str:
 
 def check(beats, media_dir, public_root, ledger, max_old, manifest, raw_dir, slug,
           comp_name=None, asset_dirs=None):
-    """Returns (violations, rows, warnings). rows = [{src, kind, uses, ts, status}]."""
+    """Returns (violations, rows, warnings). rows = [{src, kind, uses, ts, status}].
+
+    beats: normalised episode beats ({t, end, mode, media, src, origin, from, ...}); comp_name: bl.episode_key().
+    """
     violations: list[str] = []
     warnings: list[str] = []
     own = (media_dir, slug)
 
     mk = ledger.get("episodes", {}).get(media_dir)
     if comp_name and isinstance(mk, dict) and mk.get("comp") and mk["comp"] != comp_name:
-        violations.append(f"mediaDir `{media_dir}` was already recorded for composition {mk['comp']}, "
+        violations.append(f"mediaDir `{media_dir}` was already recorded for episode {mk['comp']}, "
                           f"not {comp_name} — use a new mediaDir for a new video")
 
     if asset_dirs is not None:
         if not asset_dirs:
-            warnings.append("no `assetDir: \"...\"` found in the composition — cannot verify it "
+            warnings.append("no `assetDir` found in episode.json — cannot verify it "
                             f"points at public/{media_dir}")
         for d in sorted(set(asset_dirs)):
             if d != media_dir:
-                violations.append(f"composition assetDir is `{d}` but --media-dir is `{media_dir}` — "
+                violations.append(f"episode assetDir is `{d}` but --media-dir is `{media_dir}` — "
                                   "renders would play another episode's folder")
 
     # Engine cards and presenter tracks are not cutaway B-roll.
     eligible = [b for b in beats if b.get('mode') != 'full' and b.get('media') != 'typo']
     uses: dict[str, list] = {}
-    for fb in bl.footage_beats(eligible):
-        if fb["src"] is None:
+    plays: dict[str, list] = {}
+    for b in eligible:
+        src = b.get("src")
+        if not isinstance(src, str) or not src:
             violations.append(
-                f"beat t={fb['t']} (media={fb['media']}) has no `src` — the component silently "
-                "falls back to a default file; set an explicit src")
+                f"beat t={b.get('t')} (media={b.get('media')}) has no `src` — the engine has no default "
+                "file; set an explicit src")
             continue
-        uses.setdefault(fb["src"], []).append(fb["t"])
+        uses.setdefault(src, []).append(b.get("t"))
+        plays.setdefault(src, []).append(b)
 
-    for src, ts in uses.items():
-        if len(ts) > 1:
-            violations.append(f"`{src}` is used by {len(ts)} beats (t={', '.join(str(t) for t in ts)}); "
-                              "each footage file may be used by at most one beat")
+    # S10: reuse is allowed only for a source clip whose played ranges are disjoint.
+    for src, bs in plays.items():
+        if len(bs) < 2:
+            continue
+        ts = ", ".join(str(b["t"]) for b in bs)
+        if any(b.get("origin") != "source" or not bl.is_yt_key(src) for b in bs):
+            violations.append(f"`{src}` is used by {len(bs)} beats (t={ts}) but is not a source clip; "
+                              "only a yt_ source clip may be reused (stock / ai footage at most once)")
+            continue
+        ranges = [played_frames(b) for b in bs]
+        for k in range(1, len(bs)):
+            for m in range(k):
+                if ranges[k][0] < ranges[m][1] and ranges[m][0] < ranges[k][1]:
+                    violations.append(
+                        f"source ranges of `{src}` overlap: beat t={bs[m]['t']} plays frames "
+                        f"[{ranges[m][0]}, {ranges[m][1]}), beat t={bs[k]['t']} plays [{ranges[k][0]}, {ranges[k][1]})")
 
     broll_dir = Path(public_root) / media_dir / "broll"
     md5s: dict[str, str] = {}
@@ -171,8 +201,8 @@ def _max_old(v: str) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Check b-roll uniqueness of a Remotion composition.")
-    ap.add_argument("composition", help="CompId.tsx (path, or name under remotion-composer/src)")
+    ap = argparse.ArgumentParser(description="Check b-roll uniqueness of a V4 episode.")
+    ap.add_argument("episode", help="episode.json (yt-news-v4-episode/1)")
     ap.add_argument("--media-dir", required=True, help="folder name under remotion-composer/public/")
     ap.add_argument("--manifest", required=True,
                     help="projects/<slug>/assets/broll/_manifest.json written by fetch_broll.py")
@@ -194,28 +224,23 @@ def main(argv=None) -> int:
         manifest = json.loads(mpath.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ValueError("manifest must be a JSON object")
-        text = bl.read_composition_text(args.composition)
-        beats = bl.parse_beats(text)
-        asset_dirs = bl.find_asset_dirs(text)
-        bl.footage_beats(beats)
+        import broll_plan as bp
+        episode = bp.load_v4_episode(args.episode)
+        beats = episode["beats"]
         bl.auto_seed(args.ledger, args.public_root, args.projects_root)
         ledger = bl.load_ledger(args.ledger)
         violations, rows, warnings = check(
             beats, args.media_dir, args.public_root, ledger, args.max_old, manifest, mpath.parent, slug,
-            comp_name=Path(args.composition).name, asset_dirs=asset_dirs)
-        import broll_plan as bp
-        import re
+            comp_name=bl.episode_key(args.episode), asset_dirs=[episode["asset_dir"]])
         cuts = json.loads(Path(args.cuts).read_text())
         records = {**manifest, **cuts.get('clips', cuts)}
-        match = re.search(r'const\s+VO_END_SEC\s*=\s*([\d.]+)', text)
-        if not match: raise ValueError('missing VO_END_SEC')
-        actual_durations={}
+        actual_durations = {}
         for b in beats:
-            if b.get('mode')!='full' and b.get('media') in ('broll','clip'):
-                file=Path(args.public_root)/args.media_dir/'broll'/(b['src']+'.mp4')
-                actual_durations[b['src']]=bp.probe_duration(file)
-        beats = bp.normalize_beats(beats)
-        usages = bp.derive_usage(beats, records, float(match[1]), actual_durations, bp.parse_renderer_durations(text))
+            if b.get('mode') != 'full' and b.get('media') in ('broll', 'clip') and isinstance(b.get('src'), str):
+                file = Path(args.public_root) / args.media_dir / 'broll' / (b['src'] + '.mp4')
+                if file.exists():
+                    actual_durations[b['src']] = bp.probe_duration(file)
+        usages = bp.derive_usage(beats, records, episode["vo_end"], actual_durations, episode["broll_dur"])
         for u in usages:
             file = Path(args.public_root) / args.media_dir / 'broll' / (u['src']+'.mp4')
             record = records.get(u['src'], {})
@@ -227,7 +252,7 @@ def main(argv=None) -> int:
         violations.extend(identity['violations']); warnings.extend(identity['warnings'])
         if args.usage_report:
             Path(args.usage_report).write_text(json.dumps({**identity,'usages':usages,'pass':not violations},ensure_ascii=False,indent=2))
-    except (OSError, bl.BeatsParseError, ValueError) as e:  # json errors are ValueErrors
+    except (OSError, ValueError) as e:  # json / episode format errors are ValueErrors
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 

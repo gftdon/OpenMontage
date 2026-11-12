@@ -1,6 +1,6 @@
 #!/bin/bash
 # cut_clips.sh — cut muted 1080p25 clips from the YouTube source and print
-# BROLL_DUR-ready duration lines for the composition.
+# brollDur-ready duration lines for episode.json.
 #
 #   cut_clips.sh SOURCE.mp4 OUT_DIR name:start:end [name:start:end ...]
 #
@@ -11,8 +11,9 @@
 #   - pad the in-point 2-3 s before the visual you want; survey frames and the
 #     renderer can disagree by about a second, and a beat that opens on a
 #     transition/title card looks like a mistake
-#   - make available duration after `from` LONGER than the beat; V3 broll/clip
-#     both honor `from` and Loop uses floor((BROLL_DUR-from)*25)-2 frames
+#   - make available duration after `from` LONGER than the beat; V4 broll/clip
+#     both honor `from` and Loop uses floor((brollDur[src]-from)*25)-2 frames
+#     (a source clip must not loop at all: schema rule S09)
 #   - skip the source's sponsor/promo-code segments entirely
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
@@ -26,9 +27,9 @@ for spec in "$@"; do
     "$OUT/$name.mp4" -y
 done
 python3 -I "$SCRIPT_DIR/cut_manifest.py" "$SRC" "$OUT" "$@"
-echo "--- paste into BROLL_DUR ---"
+echo "--- paste into episode.json brollDur ---"
 for spec in "$@"; do
   name="${spec%%:*}"
   dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUT/$name.mp4")
-  printf "  %s: %.2f,\n" "$name" "$dur"
+  printf "  \"%s\": %.2f,\n" "$name" "$dur"
 done

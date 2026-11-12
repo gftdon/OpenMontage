@@ -12,7 +12,7 @@ bash "$SKILL/scripts/yt_survey.sh" "<YOUTUBE_URL>" $P/assets/ytsource
 bash "$SKILL/scripts/yt_survey.sh" --frames-only $P/assets/ytsource/source.mp4 $P/assets/ytsource
 ```
 
-ผลลัพธ์ใน `$P/assets/ytsource/`: `source.mp4`, `chapters.txt`, `survey/sheetA.jpg` + `sheetB.jpg` (ภาพรวม), `survey/dense/sheet_<start>-<end>.jpg` + `survey/dense/index.json` (ทั้งวิดีโอ: 1 tile ต่อ 10 วินาที, 6×5 tile = 5 นาทีต่อ sheet, tile i = `start + 10*i`, เรียงซ้าย→ขวา บน→ล่าง) และ `transcript_timed.json` `[{start,end,text}]` เมื่อดึง auto-subtitle ได้
+ผลลัพธ์ใน `$P/assets/ytsource/`: `source.mp4`, `chapters.txt`, `survey/sheetA.jpg` + `sheetB.jpg` (ภาพรวม), `survey/dense/sheet_<start>-<end>.jpg` + `survey/dense/index.json` (ทั้งวิดีโอ: 1 tile ต่อ 10 วินาที, 6×5 tile = 5 นาทีต่อ sheet, tile i = `start + 10*i`, เรียงซ้าย→ขวา บน→ล่าง) และ `transcript_timed.json` `[{start,end,text}]` เมื่อดึง auto-subtitle ได้ (finalize อ่านจาก `$P/assets/ytsource/transcript_timed.json`, `transcript.txt` และ `chapters.txt` ที่ path นี้เท่านั้น)
 
 - **Chapters** = แผนที่หัวข้อ (ชื่อ + เวลาเริ่ม) ช่วยบอกว่าควรดูตรงไหนก่อน ไม่ใช่หลักฐานว่าภาพอะไรอยู่บนจอ
 - **Timed transcript** = หลักฐานว่าต้นฉบับ "พูด/แสดง" อะไรเมื่อไร ถ้า `yt_survey.sh` พิมพ์ WARNING ว่าไม่มี transcript (429/ไม่มี subtitle) ให้สร้างเองแบบ local offline — ห้ามข้าม เพราะ `lint_content.py` ใช้ตรวจว่าช่วงที่ตัดมีหัวข้อที่ป้ายอ้าง:
@@ -27,7 +27,7 @@ python3 "$SKILL/scripts/source_timed.py" merge $P/assets/ytsource/part_*.json --
 python3 -c "import json,sys;print('\n'.join(r['text'] for r in json.load(open(sys.argv[1]))))" $P/assets/ytsource/transcript_timed.json > $P/assets/ytsource/transcript.txt
 ```
 
-exit 4 = ไม่มี model/venv (ไม่ดาวน์โหลดให้) → ขั้นล้ม รายงานเหตุผล
+exit 4 = ไม่มี model/venv (ไม่ดาวน์โหลดให้) → ขั้นล้ม รายงานเหตุผล; exit 2 = อินพุตผิด; exit 1 = ล้มอื่น ๆ (`from-audio` ที่เสร็จแล้วรันซ้ำด้วยอาร์กิวเมนต์เดิมจะพิมพ์ "already done")
 
 ## 2. Look before you cut (ต้องเปิดภาพดูด้วยเครื่องมือ Read ทุกครั้ง)
 
@@ -50,9 +50,10 @@ mkdir -p remotion-composer/public/<assetDir>/broll && cp $P/assets/ytsource/clip
 
 - ตั้งชื่อ `yt_<topic>` (ต้องตรงกับ `^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`) ไม่ชนกับ stock
 - **`from`** ใน `episode.json` = วินาทีที่เริ่มเล่น **ภายในไฟล์ที่ตัดแล้ว** (ไม่ใช่เวลาในวิดีโอต้นฉบับ; เวลาต้นฉบับอยู่ใน `_cuts.json`: `source_in` + `from` = เวลาที่เห็นจริง) ไม่ใส่ = เล่นตั้งแต่เฟรมแรก ซึ่งพลาดสิ่งที่ป้ายอ้างถึงได้ง่าย ถ้าภาพที่ต้องการเริ่มที่วินาทีที่ 9 ของ clip ให้ตั้ง `from:9` หรือ (ดีกว่า) ตัดใหม่ให้เริ่มที่นั่น เว้นช่วงนำ 0.5–1 วินาทีเผื่อ transition
-- ตัดให้ "สิ่งที่ป้ายพูดถึง" อยู่บนจอ**ตลอด beat** ไม่ใช่แค่เฟรมแรก: จำนวนวินาทีที่แสดงต้อง ≤ `brollDur[src] − from − ~0.1 s` เพราะ source beat เล่นวนไม่ได้ (`source-loop` = error) beat ยาว 12 s ต้องมี clip ≥ 12.1 s หลัง `from`
+- ตัดให้ "สิ่งที่ป้ายพูดถึง" อยู่บนจอ**ตลอด beat** ไม่ใช่แค่เฟรมแรก: จำนวนวินาทีที่แสดง **บวกหางของภาพเก่าตอนเปลี่ยนฉาก (สูงสุด 0.92 s)** ต้อง ≤ `brollDur[src] − from − ~0.1 s` เพราะ source beat เล่นวน/ค้างเฟรมสุดท้ายไม่ได้ (schema S09 และ `source-loop` = error) beat ยาว 12 s ต้องมี clip ≥ ~13 s หลัง `from` (ข้อความ error ของ S09 บอกจำนวนวินาทีที่ต้องลด `from`)
 - `brollDur[src]` ใน `episode.json` = ความยาวจริงของไฟล์ใน **public** (`ffprobe`) ไม่ใช่ตัวเลขที่ `cut_clips.sh` พิมพ์จากความตั้งใจ และไฟล์ใน `public/<assetDir>/broll/` ต้องเป็นไฟล์เดียวกับใน `assets/ytsource/clips/` (`cmp`)
-- ใช้ source clip แต่ละช่วงครั้งเดียว: ช่วงเวลาเดียวกันภายใต้สองชื่อยังนับเป็นการซ้ำ (`source-reuse`, `shot-reuse`)
+- ใช้ source clip แต่ละช่วงครั้งเดียว: ช่วงเวลาเดียวกันภายใต้สองชื่อยังนับเป็นการซ้ำ (`source-reuse`, `shot-reuse`) ข้อยกเว้นเดียว: ไฟล์เดิมเล่นต่อใน beat **ติดกัน** ด้วยช่วงที่เล่นหลังกว่า (กรณี S10) ไม่ใช่การซ้ำ แต่ถูกคุมโดย `static-hold`
+- ภาพที่ผู้ชมเห็น (ส่วนหลัง `srcCrop`) ต้องเปลี่ยนจริงอย่างน้อยทุก 10 s ข้าม beat `clip` ติดกัน (`static-hold`, error จาก `frame_checks.py cutaways`) — เลือกช่วงตัดที่ภาพเปลี่ยน (UI ขยับ/สลับหน้า) แทนช่วงที่นิ่ง ถ้านิ่งเกินให้ย่อ beat, สลับ stage↔wide หรือแทรกการ์ด ไม่ใช่ขยับ `srcCrop` นิดหน่อย
 
 ## 4. จับคู่บรรทัด script → ช่วงต้นฉบับ
 
@@ -74,7 +75,7 @@ mkdir -p remotion-composer/public/<assetDir>/broll && cp $P/assets/ytsource/clip
 
 ## 5. `srcCrop` (เมื่อภาพสำคัญเป็นแค่ส่วนหนึ่งของเฟรมต้นฉบับ)
 
-`srcCrop {x,y,w,h}` เป็นพิกเซลบนเฟรม 1920×1080 ของต้นฉบับ สัดส่วน ≈16:9 (คลาดเกิน 25 % = error, เกิน 10 % = warning) ไม่ใส่ = ใส่ทั้งเฟรม; ใส่แล้วภาพถูก cover ลงกรอบ และ punch ซูมต่อจากการ crop
+`srcCrop {x,y,w,h}` เป็นพิกเซลบนเฟรม 1920×1080 ของต้นฉบับ สัดส่วน ≈16:9 (คลาดเกิน 25 % = error, เกิน 10 % = warning) ไม่ใส่ = ใส่ทั้งเฟรม; ใส่แล้วภาพถูก cover ลงกรอบ (V4 ไม่มี punch บน footage)
 
 ```bash
 python3 "$SKILL/scripts/frame_checks.py" crop-propose --video remotion-composer/public/<assetDir>/broll/<src>.mp4 --in <A> --out <B> --report $P/qc/crop_<src>.json
@@ -85,7 +86,7 @@ python3 "$SKILL/scripts/frame_checks.py" crop-check   --video <เดิม> --i
 
 ## 6. หลักฐานภาพ (`artifacts/visual_evidence.json`)
 
-หลังเขียน `episode.json` ให้ดึงเฟรมจากช่วงที่ "แสดงจริง" ของทุก source cutaway แล้วเปิดดูทีละภาพ (`frame_checks.py cutaways` เขียน jpg ชื่อ `b<idx>_<src>_<ms>.jpg` ใน `--frames-dir`) แล้วเขียนหนึ่ง entry ต่อ source beat: `{ "t": <beat.t>, "src": "yt_...", "cue_line": <เลขบรรทัด script ที่พูดตอนนั้น>, "subject_terms": ["<คำภาษาอังกฤษตามที่ปรากฏในเสียง/บนจอของต้นฉบับ>"], "seen": "<สิ่งที่เห็นจริงในเฟรม>" }` `lint_content.py` ตรวจว่า `cue_line` ทับ beat นั้น และ `subject_terms` ครบทุกคำอยู่ในช่วงที่แสดง (transcript ±3 s / OCR เฟรม / chapter) ถ้าสิ่งที่เห็นไม่ใช่สิ่งที่บรรทัดนั้นพูดถึง ให้แก้ **การตัด** (`from`, ช่วงตัด, clip อื่น, หรือเปลี่ยนเป็นการ์ด) ไม่ใช่แก้หลักฐาน
+หลังเขียน `episode.json` ให้ดึงเฟรมจากช่วงที่ "แสดงจริง" ของทุก source cutaway แล้วเปิดดูทีละภาพ (`frame_checks.py cutaways` เขียน jpg ชื่อ `b<idx 3 หลัก>_<src>_<ms 8 หลัก>.jpg` ใน `--frames-dir`) แล้วเขียนหนึ่ง entry ต่อ source beat: `{ "t": <beat.t>, "src": "yt_...", "cue_line": <เลขบรรทัด script ที่พูดตอนนั้น>, "subject_terms": ["<คำภาษาอังกฤษตามที่ปรากฏในเสียง/บนจอของต้นฉบับ>"], "seen": "<สิ่งที่เห็นจริงในเฟรม>" }` `lint_content.py` ตรวจว่า `cue_line` ทับ beat นั้น และ `subject_terms` ครบทุกคำอยู่ในช่วงที่แสดง (transcript ±3 s / OCR เฟรม / chapter) ถ้าสิ่งที่เห็นไม่ใช่สิ่งที่บรรทัดนั้นพูดถึง ให้แก้ **การตัด** (`from`, ช่วงตัด, clip อื่น, หรือเปลี่ยนเป็นการ์ด) ไม่ใช่แก้หลักฐาน
 
 ## 7. สิ่งที่ใช้ร่วมกับ format web-news
 

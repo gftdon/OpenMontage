@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Validate agent-authored semantics and underlying media identity, without AI calls.
 Validation proves linkage/contracts, NOT semantic relevance. No keyword mapper.
+
+V4 input: `--beats` is the episode JSON (`episode.json`, schema yt-news-v4-episode/1) read through
+episode_data.load_episode (see load_v4_episode). Top-level `voEndSec`, `brollDur` and `assetDir` come from
+that file; there is no per-episode TSX and no text parsing here.
 """
 import argparse
 import hashlib
@@ -149,7 +153,7 @@ def derive_usage(beats,records,vo_end=None,actual_durations=None,renderer_durati
         duration=r.get('duration')
         if actual_durations is not None or renderer_durations is not None:
             actual=(actual_durations or {}).get(src);rendered=(renderer_durations or {}).get(src)
-            if not finite(actual) or not finite(rendered) or abs(actual-rendered)>1/25+1e-8:raise ValueError(f'{src}: missing/mismatched actual duration and BROLL_DUR (>1 frame)')
+            if not finite(actual) or not finite(rendered) or abs(actual-rendered)>1/25+1e-8:raise ValueError(f'{src}: missing/mismatched actual duration and brollDur (>1 frame)')
             duration=rendered
         u={**b,'end':end,'path':src,'identity':identity,'duration':duration,'actual_duration':(actual_durations or {}).get(src),'decoded_sha256':r.get('decoded_sha256'),'dhash':r.get('dhash')}
         if finite(duration) and finite(end):
@@ -177,34 +181,52 @@ def probe_duration(path):
     value=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','json',str(path)],text=True))
     return float(value['format']['duration'])
 
-def parse_renderer_durations(text):
-    import re
-    match=re.search(r'const\s+BROLL_DUR[^=]*=\s*\{([^}]+)\}',text,re.S)
-    if not match:raise ValueError('missing literal BROLL_DUR')
-    entries={}
-    for key,value in re.findall(r'[\"\x27]?([\w-]+)[\"\x27]?\s*:\s*([\d.]+)',match[1]):entries[key]=float(value)
-    if not entries:raise ValueError('empty BROLL_DUR')
-    return entries
+NO_TSX_MESSAGE='V4 has no per-episode TSX; pass --episode <episode.json>'
+# Numeric fields of a V4 beat that must be finite numbers (JSON numbers, or numeric strings from hand-edited input).
+NUMERIC_KEYS=('t','end','from','at','dur','z','fx','fy','x','y','w','h')
 
 def normalize_beats(beats):
     def convert(value,key=None):
         if isinstance(value,list):return [convert(v) for v in value]
         if isinstance(value,dict):return {k:convert(v,k) for k,v in value.items()}
-        if key in ('t','end','from','z','fx','fy','dur'):
+        if key in NUMERIC_KEYS:
             number=float(value)
-            if not math.isfinite(number):raise ValueError('nonfinite BEATS '+key)
+            if not math.isfinite(number):raise ValueError('nonfinite beat field '+key)
             return number
-        if key=='chrome' and value in ('true','false'):return value=='true'
         return value
     return convert(beats)
 
+def load_v4_episode(path):
+    """Read a V4 episode.json through the shared loader (episode_data.load_episode).
+
+    Returns {'beats':[{t,end,...}], 'vo_end', 'total', 'broll_dur':{src:seconds}, 'asset_dir', 'sha256', 'path'}.
+    Raises ValueError (EpisodeFormatError is one) for anything that is not a V4 episode object; schema rules
+    (S01..S20) are NOT re-checked here, that is episode_schema.mjs.
+    """
+    import sys
+    sys.path.insert(0,str(Path(__file__).resolve().parent))
+    import episode_data as ed
+    p=Path(path)
+    if p.suffix.lower() in ('.tsx','.ts','.jsx','.js'):raise ValueError(NO_TSX_MESSAGE)
+    episode=ed.load_episode(p)
+    top=episode.get('top') or {}
+    if episode.get('format')!='json-object' or top.get('schema')!='yt-news-v4-episode/1':raise ValueError('not a V4 episode.json (expected an object with "schema": "yt-news-v4-episode/1")')
+    table=top.get('brollDur')
+    if not isinstance(table,dict) or not table:raise ValueError('episode.json has no brollDur table')
+    broll_dur={}
+    for key,value in table.items():
+        number=ed.num(value)
+        if number is None or number<=0:raise ValueError('brollDur['+str(key)+'] must be a positive number')
+        broll_dur[key]=number
+    asset_dir=top.get('assetDir')
+    if not isinstance(asset_dir,str) or not asset_dir:raise ValueError('episode.json has no assetDir')
+    return {'beats':normalize_beats(episode['beats']),'vo_end':episode['vo_end'],'total':ed.num(top.get('totalDurationSec')),'broll_dur':broll_dur,'asset_dir':asset_dir,'sha256':file_sha256(p),'path':str(p)}
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--plan',required=True);ap.add_argument('--context',required=True);ap.add_argument('--out',required=True)
-    ap.add_argument('--beats',required=True,help='actual composition TSX');ap.add_argument('--manifest',required=True);ap.add_argument('--cuts',required=True);ap.add_argument('--diagnostic-subset',action='store_true');args=ap.parse_args()
-    import sys,re
-    sys.path.insert(0,str(Path(__file__).resolve().parent));import broll_ledger as bl
+    ap.add_argument('--beats',required=True,help='episode.json (yt-news-v4-episode/1)');ap.add_argument('--manifest',required=True);ap.add_argument('--cuts',required=True);ap.add_argument('--diagnostic-subset',action='store_true');args=ap.parse_args()
     plan=json.loads(Path(args.plan).read_text());context=json.loads(Path(args.context).read_text());errors=validate_plan(plan,context)
-    text=Path(args.beats).read_text();beats=normalize_beats(bl.parse_beats(text));vo=float(re.search(r'const\s+VO_END_SEC\s*=\s*([\d.]+)',text)[1])
+    episode=load_v4_episode(args.beats);beats=episode['beats'];vo=episode['vo_end']
     records=json.loads(Path(args.manifest).read_text());cuts=json.loads(Path(args.cuts).read_text());records.update(cuts.get('clips',cuts))
     errors+=reconcile_plan(plan,beats,records,args.diagnostic_subset,vo)
     Path(args.out).write_text(json.dumps({'schema':PLAN_SCHEMA,'pass':not errors and not args.diagnostic_subset,'diagnosticPass':not errors,'complete':not args.diagnostic_subset,'semantic_relevance':'not-evaluated','errors':errors},ensure_ascii=False,indent=2)+'\n')

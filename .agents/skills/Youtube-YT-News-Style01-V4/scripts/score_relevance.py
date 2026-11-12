@@ -16,8 +16,9 @@ import uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from broll_costs import Budget,StopPaid,config_sha256
-from broll_plan import file_sha256,probe_duration,validate_plan,reconcile_plan,derive_usage,parse_renderer_durations,normalize_beats,shown_timing,stable_identity,manifest_identity
+from broll_plan import file_sha256,probe_duration,validate_plan,reconcile_plan,derive_usage,load_v4_episode,shown_timing,stable_identity,manifest_identity
 from media_manifest import save_json
+import episode_data as ed
 VERSION='a44-relevance-1'
 AI_VERSION='a44-relevance-ai-1'
 AI_SYSTEM_SUFFIX=' Also check the AI illustration for any readable text: any legible letters or numbers, including tiny labels, means readable_text true. Do not hallucinate words from abstract shapes. Return readable_text as a boolean together with score and reason.'
@@ -238,17 +239,35 @@ def _score_asset(budget,frame,spoken,identity,runner=None,exposure_verified=Fals
 
 def hard_failure(results):return any((type(r.get('score')) is int and r['score']==0) or r.get('readable_text') is True for r in results)
 
+# The formula and the picture boxes live in ONE place: episode_data.visible_region / PICTURE_BOX (engine srcCropStyle,
+# spec section 6; where spec and engine differ the ENGINE wins: no-crop = cover, no punch term on footage, schema S12).
+# Frames are extracted from 1920x1080 clips, so the region is in the same pixels as srcCrop.
+PICTURE_BOX=ed.PICTURE_BOX
+SOURCE_W,SOURCE_H=ed.SOURCE_W,ed.SOURCE_H
+
+def visible_region(crop,box):
+ """Thin wrapper over episode_data.visible_region for a 1920x1080 file; `box` must be one of PICTURE_BOX. -> {x,y,w,h}"""
+ layout=next((k for k,v in PICTURE_BOX.items() if tuple(v)==tuple(box)),None)
+ if layout is None:raise ValueError('unsupported picture box '+str(box))
+ x,y,w,h=ed.visible_region(layout,SOURCE_W,SOURCE_H,crop)
+ return {'x':x,'y':y,'w':w,'h':h}
+
+def region_filter(region):
+ """ffmpeg filter: normalise to 1920x1080 (engine objectFit fill), cut the visible region, scale to 1024x576.
+ A cover-fitted region always lies inside its crop, so with a valid srcCrop (S11) it lies inside the frame; fail closed otherwise."""
+ x,y,w,h=region['x'],region['y'],region['w'],region['h']
+ if x<-1e-6 or y<-1e-6 or x+w>SOURCE_W+1e-6 or y+h>SOURCE_H+1e-6:raise ValueError('visible region leaves the source frame (srcCrop outside 1920x1080)')
+ return f'scale={SOURCE_W}:{SOURCE_H},crop={w:.4f}:{h:.4f}:{max(x,0):.4f}:{max(y,0):.4f},scale=1024:576'
+
 def frame_spec(beat,duration):
  end=beat['end'];offset=beat.get('from',0);timing=shown_timing(beat['t'],end,offset,duration)
  mid_frame=(timing['beat_start_frame']+timing['end_frame_exclusive']-1)//2;mid=mid_frame/25;loop=timing['loop_frames']/25
  seek=(timing['from_frame']+(mid_frame-timing['beat_start_frame'])%timing['loop_frames'])/25
- punch=next((p for p in reversed(beat.get('punch',[])) if mid>=p['t']),{});crop={k:punch.get(k,default) for k,default in [('z',1),('fx',.5),('fy',.5)]}
- if not all(isinstance(v,(int,float)) and math.isfinite(v) for v in crop.values()) or crop['z']<1 or not 0<=crop['fx']<=1 or not 0<=crop['fy']<=1:raise ValueError('unsupported crop')
- # Preserve source-stage contain black bars, otherwise cover, then actual hard punch.
- full=beat.get('layout')=='full';width=1920 if full else 1190;height=1080 if full else 520-(52 if beat.get('origin')=='source' and beat.get('chrome') else 0)
- fit=f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2' if beat.get('origin')=='source' and not full else f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}'
- z=crop['z'];vf=fit+f",crop=iw/{z}:ih/{z}:(iw-iw/{z})*{crop['fx']}:(ih-ih/{z})*{crop['fy']},scale=1024:576"
- return {'seek':seek,'at':mid,'crop':crop,'loop_seconds':loop,'filter':vf}
+ layout=beat.get('layout');crop=beat.get('srcCrop')
+ box=PICTURE_BOX.get(layout)
+ if box is None:raise ValueError('unsupported layout '+str(layout))
+ x,y,w,h=ed.visible_region(layout,SOURCE_W,SOURCE_H,crop);region={'x':x,'y':y,'w':w,'h':h}
+ return {'seek':seek,'at':mid,'layout':layout,'box':list(box),'crop':crop,'region':region,'loop_seconds':loop,'filter':region_filter(region)}
 
 def extract_frame(path,spec,out,config):
  subprocess.run(['ffmpeg','-v','error','-y','-ss',str(spec['seek']),'-i',str(path),'-frames:v','1','-vf',spec['filter'],'-q:v','5',str(out)],check=True)
@@ -270,10 +289,8 @@ def durable_stop_reason(budget):
 def main():
  ap=argparse.ArgumentParser(description=__doc__)
  for k in ('project','plan','context','beats','manifest','cuts','public','out'):ap.add_argument('--'+k,required=True)
- ap.add_argument('--approval');a=ap.parse_args();project=Path(a.project);plan=json.loads(Path(a.plan).read_text());context=json.loads(Path(a.context).read_text());text=Path(a.beats).read_text()
- import broll_ledger as bl
- import re
- beats=normalize_beats(bl.parse_beats(text));vo=float(re.search(r'const\s+VO_END_SEC\s*=\s*([\d.]+)',text)[1]);records=json.loads(Path(a.manifest).read_text());cuts=json.loads(Path(a.cuts).read_text());records.update(cuts.get('clips',cuts));table=parse_renderer_durations(text)
+ ap.add_argument('--approval');a=ap.parse_args();project=Path(a.project);plan=json.loads(Path(a.plan).read_text());context=json.loads(Path(a.context).read_text())
+ episode=load_v4_episode(a.beats);beats=episode['beats'];vo=episode['vo_end'];table=episode['broll_dur'];records=json.loads(Path(a.manifest).read_text());cuts=json.loads(Path(a.cuts).read_text());records.update(cuts.get('clips',cuts))
  errors=validate_plan(plan,context)+reconcile_plan(plan,beats,records,False,vo)
  report={'schema':VERSION,'runId':uuid.uuid4().hex,'inputs':{k:file_sha256(getattr(a,k)) for k in ('plan','context','beats','manifest','cuts')},'errors':errors,'results':[],'wire':'schema-only; live envelope not verified','paid_calls_enabled':False}
  if not errors:
@@ -285,7 +302,7 @@ def main():
    try:
     if record['sha256']!=file_sha256(media):raise ValueError('stale public media hash')
     actual=probe_duration(media)
-    if src not in table or abs(actual-table[src])>1/25:raise ValueError('BROLL_DUR mismatch')
+    if src not in table or abs(actual-table[src])>1/25:raise ValueError('brollDur mismatch')
     spec=frame_spec(beat,table[src]);frame=extract_frame(media,spec,frames/(digest(item['id'].encode())+'.jpg'),budget.config)
     result=score_asset(budget,frame,item['spoken'],{'origin':beat['origin'],'sha256':record['sha256'],'identity':manifest_identity(beat['origin'],record),'cue_ids':item['cue_ids'],'context_sha256':digest(json.dumps({'timing_inputs':context['timing_inputs'],'narration_cues':context['narration_cues']},sort_keys=True,ensure_ascii=False).encode()),'frame_spec':spec})
     # Offline runner=None always checks verdict/cache, even under durable stop.

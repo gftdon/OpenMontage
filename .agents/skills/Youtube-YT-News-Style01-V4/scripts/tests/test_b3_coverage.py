@@ -11,13 +11,16 @@ import batch_relevance as b
 import native_paid as n
 import score_relevance as s
 import broll_costs as bc
+import broll_plan as bp
+FIXTURES=Path(__file__).resolve().parent/'fixtures/a67/broll'
 JPEG=b'\xff\xd8\xff\xc0\x00\x0b\x08\x02\x40\x04\x00\x01\x01\x11\x00\xff\xd9'
 class CoverageTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.p=Path(self.tmp.name).resolve();c=bc.load_config();a={'approved':True,'project':str(self.p),'config_sha256':bc.config_sha256(),'caps':c['caps'],**{k:{x:c[k][x] for x in ('provider','model')} for k in ('image','relevance')}};self.budget=bc.Budget(self.p,a,today='2026-11-08');self.identity={'origin':'stock','identity':'pixabay:1','cue_ids':['c1'],'context_sha256':'a'*64};self.row={'id':'one','frame':JPEG,'spoken':'spoken','identity':self.identity}
  def prepared(self,diagnostic=False):
-  media=self.p/'stock.mp4';media.write_bytes(b'media');records={'stock':{'pixabay_id':'1','sha256':s.file_sha256(media),'duration':3}};beats=[{'t':0,'end':2,'mode':'pip','media':'broll','origin':'stock','src':'stock','layout':'full'},{'t':2,'mode':'full'}];plan={'beats':[{'id':'one','t':0,'end':2,'spoken':'spoken','cue_ids':['c1']}]};ctx={'timing_inputs':{},'narration_cues':[]}
-  with patch('broll_ledger.parse_beats',return_value=beats),patch.object(b,'validate_plan',return_value=[]),patch.object(b,'reconcile_plan',return_value=[]),patch.object(b,'parse_renderer_durations',return_value={'stock':3}),patch.object(b,'probe_duration',return_value=3),patch.object(s,'extract_frame',return_value=JPEG):return b.prepare_rows(plan,ctx,'const VO_END_SEC = 4;',records,self.p,self.p/'frames',self.budget.config,diagnostic)
+  media=self.p/'stock.mp4';media.write_bytes(b'media');records={'stock':{'pixabay_id':'1','sha256':s.file_sha256(media),'duration':3}};plan={'beats':[{'id':'one','t':0,'end':2,'spoken':'spoken','cue_ids':['c1']}]};ctx={'timing_inputs':{},'narration_cues':[]}
+  episode=bp.load_v4_episode(FIXTURES/'one-stock-beat.json')
+  with patch.object(b,'validate_plan',return_value=[]),patch.object(b,'reconcile_plan',return_value=[]),patch.object(b,'probe_duration',return_value=3),patch.object(s,'extract_frame',return_value=JPEG):return b.prepare_rows(plan,ctx,episode,records,self.p,self.p/'frames',self.budget.config,diagnostic)
  def live(self,rows,complete=True):
   return b.run_rows(self.budget,rows,self.p/'run',count_runner=lambda *_:{'totalTokens':10},generate_runner=lambda *_:{'candidates':[{'content':{'parts':[{'text':'{"score":2,"reason":"matches"}'}]}}],'usageMetadata':{'promptTokenCount':10,'candidatesTokenCount':10,'totalTokenCount':20}},key_identity='same-key',complete=complete)
  def test_plain_or_diagnostic_cannot_be_promoted_by_complete_flag(self):

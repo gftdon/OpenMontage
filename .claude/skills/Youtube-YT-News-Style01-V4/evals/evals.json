@@ -7,9 +7,9 @@
    "expected_output": "Actual-video baseline stills fail layout gate; V4 full planned DOM samples, beat lint and final encoded audio pass. Deliver 9/89/172s stills, final MP4 and measured pass1/pass2/final reports. Explicitly exclude editorial accuracy, opening hook and semantic stock choice from engine acceptance.",
    "assertions": [
     "stock has no source chrome",
-    "source full layout has visible credit",
-    "all holds <=10s including adjacent identical/avatar/typo",
-    "slow zoom never resets hold",
+    "source stage/wide beat shows the credit label once settled (within 0.55 s of the beat start)",
+    "no source-clip picture static >10s on the timeline (frame_checks static-hold, measured from real frames of the visible region), no typo card or stock/AI picture unchanged >10s (lint_beats hold), no presenter-only run >12s (lint_content presenter-run)",
+    "overlays, a slightly different srcCrop, slow zoom and punch never reset a hold",
     "missing probe/fonts/sample hard-fails",
     "measured final audio I=-14 +/-0.5 TP<=-1",
     "V2 unchanged and skill mirrors byte-identical"

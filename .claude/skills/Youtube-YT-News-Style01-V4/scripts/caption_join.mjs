@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
-export const CAPTION_ALGORITHM_VERSION='a44-exact-icu-start-5';
+export const CAPTION_ALGORITHM_VERSION='a44-exact-icu-start-6';
 const whitespace=c=>/\s/u.test(c);
 export const activeChunk=(chunk,t)=>t>=chunk.displayStart&&t<chunk.displayEnd;
 /** Exact script is authoritative for whitespace; ASR whitespace is not semantic.
@@ -48,17 +48,27 @@ export function buildCaptionPages(timedTokens,exactScript,options={}){
   }
   // Attach dependent closing marks, and merge simultaneous starts into one visible
   // display group. Original timing tokens remain untouched in `sourceTokens`.
+  // absorb(prev,u,i): u (= units[i]) becomes part of prev's display group; prev keeps its own start.
+  const absorb=(prev,u,i)=>{
+    const text=prev.text+u.spaceBefore+u.text;
+    prev.sourceTokens??=prev.tokens;prev.sourceTokens=prev.sourceTokens.concat(u.sourceTokens??u.tokens);
+    prev.tokens=[{w:text,s:prev.tokens[0].s,e:Math.max(...prev.sourceTokens.map(t=>t.e))}];prev.text=text;prev.scriptEnd=u.scriptEnd;prev.merged_from.push(...u.merged_from);units.splice(i,1);
+  };
   for(let i=1;i<units.length;){
     const u=units[i],prev=units[i-1];
     if(/\n/u.test(u.spaceBefore)){
-      if(u.tokens[0].s===prev.tokens[0].s)throw new Error('unsupported simultaneous starts across newline; explicit display group required, no words dropped');
+      if(u.tokens[0].s===prev.tokens[0].s){
+        // start-6: the aligner collapsed the last word of a line onto the start of the next line, so that word's own
+        // display window is empty. It joins the display group of the word before it ON THE SAME LINE: no timestamp is
+        // invented, no word is dropped and the line break stays. A word that is alone on its line still fails closed.
+        const before=units[i-2];
+        if(!before||/\n/u.test(prev.spaceBefore))throw new Error('unsupported simultaneous starts across newline; explicit display group required, no words dropped');
+        absorb(before,prev,i-1);i--;continue;
+      }
       i++;continue;
     }
-    if(/^[ๆฯ)\]}.!?。！？,;:]+$/u.test(u.text)||u.tokens[0].s===prev.tokens[0].s){
-      const text=prev.text+u.spaceBefore+u.text;
-      prev.sourceTokens??=prev.tokens;prev.sourceTokens=prev.sourceTokens.concat(u.sourceTokens??u.tokens);
-      prev.tokens=[{w:text,s:prev.tokens[0].s,e:Math.max(...prev.sourceTokens.map(t=>t.e))}];prev.text=text;prev.scriptEnd=u.scriptEnd;prev.merged_from.push(...u.merged_from);units.splice(i,1);
-    }else i++;
+    if(/^[ๆฯ)\]}.!?。！？,;:]+$/u.test(u.text)||u.tokens[0].s===prev.tokens[0].s)absorb(prev,u,i);
+    else i++;
   }
   for(const [i,unit] of units.entries()){
     const explicit=options.phraseBounds?.find(b=>b.scriptEnd===unit.scriptEnd);
@@ -115,9 +125,11 @@ export const CAPTION_PAGES:CaptionPage[]=${JSON.stringify(result.pages)};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
  const args=process.argv.slice(2),get=key=>args[args.indexOf(key)+1];
- for(const flag of ['--tokens','--script','--options','--out','--module'])if(!args.includes(flag))throw Error('missing '+flag);
+ // V4: the engine reads the --out JSON directly (episode data, no per-episode TSX), so there is no --module any more.
+ if(args.includes('--module')){console.error('caption_join: --module is not supported in V4 (no per-episode TSX); the engine reads the --out JSON');process.exit(2);}
+ for(const flag of ['--tokens','--script','--options','--out'])if(!args.includes(flag)){console.error('caption_join: missing '+flag);process.exit(2);}
  const data=JSON.parse(fs.readFileSync(get('--tokens'),'utf8'));
  const tokens=data.flatMap(p=>p.words??[p]);
  const result=buildCaptionPages(tokens,fs.readFileSync(get('--script'),'utf8'),JSON.parse(fs.readFileSync(get('--options'),'utf8')));
- fs.writeFileSync(get('--out'),JSON.stringify(result,null,2)+'\n');fs.writeFileSync(get('--module'),generateCaptionModule(result));
+ fs.writeFileSync(get('--out'),JSON.stringify(result,null,2)+'\n');
 }

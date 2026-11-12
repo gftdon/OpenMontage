@@ -21,4 +21,42 @@ class AudioTests(unittest.TestCase):
         m=self.module()
         for i,tp,ok in [(-14,-1,True),(-14.5,-1.1,True),(-13.5,-1.1,True),(-14.51,-1.1,False),(-14,-.99,False),(float('nan'),-2,False)]:
             self.assertEqual(ok,m.acceptance({'input_i':i,'input_tp':tp}))
+
+    def run_cli(self, args, env=None):
+        import subprocess, sys, tempfile
+        d = Path(tempfile.mkdtemp(prefix='loud-'))
+        self.addCleanup(__import__('shutil').rmtree, d, True)
+        r = subprocess.run([sys.executable, '-B', str(P), *args, '--report', str(d / 'r.json')], capture_output=True, text=True, env=env)
+        return r.returncode, d
+
+    def test_exit_codes_missing_ffmpeg_is_4_unreadable_or_no_audio_is_2(self):
+        import os, shutil, subprocess, tempfile
+        if not shutil.which('ffmpeg'):
+            self.skipTest('ffmpeg required')
+        d = Path(tempfile.mkdtemp(prefix='loud-'))
+        self.addCleanup(shutil.rmtree, d, True)
+        subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=25:d=1', '-pix_fmt', 'yuv420p', str(d / 'noaudio.mp4')], check=True)
+        code, _ = self.run_cli([str(d / 'noaudio.mp4')])
+        self.assertEqual(2, code)
+        code, _ = self.run_cli([str(d / 'does-not-exist.mp4')])
+        self.assertEqual(2, code)
+        (d / 'junk.mp4').write_bytes(b'not a video')
+        code, _ = self.run_cli([str(d / 'junk.mp4')])
+        self.assertEqual(2, code)
+        env = dict(os.environ, PATH=str(d))      # no ffmpeg on PATH
+        code, out = self.run_cli([str(d / 'noaudio.mp4')], env=env)
+        self.assertEqual(4, code)
+        self.assertIn('ffmpeg not found', (out / 'r.json').read_text())
+
+    def test_silent_audio_is_still_a_quality_failure(self):
+        import shutil, subprocess, tempfile
+        if not shutil.which('ffmpeg'):
+            self.skipTest('ffmpeg required')
+        d = Path(tempfile.mkdtemp(prefix='loud-'))
+        self.addCleanup(shutil.rmtree, d, True)
+        subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono', '-t', '2', str(d / 'silent.wav')], check=True)
+        code, _ = self.run_cli([str(d / 'silent.wav')])
+        self.assertEqual(1, code)
+
+
 if __name__=='__main__':unittest.main()

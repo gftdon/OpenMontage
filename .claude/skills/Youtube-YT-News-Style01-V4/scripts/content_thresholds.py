@@ -38,8 +38,11 @@ THRESHOLDS = {
     'sourceReuseOverlapSeconds': 0.05,
 
     # provenance
-    'lineNeighbors': 1,              # script lines either side of the beat's overlapping lines
+    # A fraction ("8/10", "8 เต็ม 10", "8 of 10", "8 out of 10") is said when both numbers occur in ONE script line, or in two ADJACENT
+    # script lines no further apart than this many characters (and in the source: within this many characters).
     'fractionSourceWindowChars': 40,
+    # Fields printed for the whole video whose NUMBERS (not words) need provenance; dateLabel / brand / page.* stay exempt page chrome.
+    'chromeNumberFields': ['breakingLabel', 'officialTag'],
     'latinMinLetters': 3,
     # provenance-latin is always a warn (English chips/kickers are editorial translations of the Thai
     # narration); metrics.latin splits the count into editorial labels (these fields) and data-bearing fields.
@@ -60,5 +63,14 @@ LEGACY_OVERRIDES = {}
 THRESHOLDS.update({
     'evidenceWindowPadSeconds': 3.0,
     'labelLatinMinLetters': 4,       # Latin words in a source beat's headline checked against the window
-    'subjectTokenMinLetters': 3,
+    'subjectTokenMinLetters': 4,     # a subject term needs at least one word of this many characters (digits alone never count)
+    'evidenceSeenMinChars': 15,      # `seen` (what the judge saw in the frames) must be a string of at least this many characters
+    # Small explicit stoplist: function words and generic fillers that prove nothing about what is on screen.
+    'subjectStopwords': ['this', 'that', 'with', 'from', 'have', 'will', 'very', 'about', 'there', 'their', 'which', 'would', 'could', 'should',
+                         'these', 'those', 'into', 'over', 'also', 'just', 'like', 'then', 'than', 'when', 'what', 'your', 'they', 'them', 'here',
+                         'more', 'most', 'some', 'such', 'only', 'really', 'going', 'thing', 'things'],
 })
+
+# typo-filler: the episode fails when more than this share of its typo card / item / vs texts has Thai words the script does not support
+# (the provenance-thai test). starting value set by the implementer, not an acceptance threshold -- report to lead.
+THRESHOLDS['typoFillerMaxShare'] = 0.30

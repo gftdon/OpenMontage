@@ -8,9 +8,15 @@ only 'error' fails the run.
 Checks: schema (delegated to episode_schema.mjs), provenance-number / -ordinal / -latin / -thai,
 card-timing-*, presenter-share/-run, cta-length, punch-forbidden, stock-unverified, source-reuse, and
 the shown-vs-said checks on source clips (evidence-missing, cue-mismatch, window-evidence-unavailable,
-subject-not-in-window, label-latin-not-in-window). Thresholds: content_thresholds.py.
-Structural episode rules (S01-S20) belong to the engine workstream's episode_schema.mjs; this file does
-not re-implement them.
+subject-not-in-window, evidence-weak, label-latin-not-in-window), typo-filler. Thresholds: content_thresholds.py.
+
+What the evidence checks prove, plainly: that a subject term (a word of >= 4 characters, not a stopword) occurs in the ORIGINAL video's
+transcript or in the OCR of the frames at the time the clip was cut from. They do NOT prove that the picture matches the narration; that needs
+a judge (a model or a person). Chapter titles are never evidence. `report.metrics.evidence.matches` lists, per source beat and term, which
+source (`ocr` / `transcript`) matched each word, so a human can audit it.
+Structural episode rules (S01-S20, including S09 clip length, S12 punch, S20 last beat / CTA) belong to the engine
+workstream's episode_schema.mjs; this file calls it and does not re-implement them. The only copy kept is
+punch-forbidden for legacy (list / TSX) replay data, where there is no schema.
 
 --relevance accepted formats (see load_relevance): the `results` rows of the report written by
 score_relevance.py / batch_relevance.py (matched to a beat by `src` if the row has one, else by beat start
@@ -35,7 +41,8 @@ VERSION = 1
 
 ORDINAL = re.compile(r'(?<![A-Za-z])(ขั้นตอนที่|รอบที่|ครั้งที่|ขั้นที่|ข้อที่|อันดับที่?|รุ่นที่|ตอนที่|เวอร์ชัน|Round|Step|Pass|Part)\s*(\d+)', re.IGNORECASE)
 ENGLISH_ORDINALS = {'round', 'step', 'pass', 'part'}
-FRACTION = re.compile(r'(?<![\d.,])(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)(?!\d)')
+# "8/10", "8 จาก 10", "8 ใน 10", "8 เต็ม 10", "8 of 10", "8 out of 10": one construct, the same provenance rule
+FRACTION = re.compile(r'(?<![\d.,])(\d+(?:\.\d+)?)\s*(?:/|จาก|ใน|เต็ม|(?:out\s+of|of)\b)\s*(\d+(?:\.\d+)?)(?!\d)', re.IGNORECASE)
 NUMBER = re.compile(r'(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?%?')
 LATIN = re.compile(r'[A-Za-z]+')
 THAI_CHAR = re.compile(r'[฀-๿]')
@@ -75,7 +82,7 @@ class Inputs:
     """Everything the checks read besides the episode."""
 
     def __init__(self, script_lines, tokens, line_starts, cuts, source=None, relevance=None, relevance_given=False,
-                 evidence=None, frames=None, timed=None, chapters=None, legacy=False):
+                 evidence=None, frames=None, timed=None, chapters=None, legacy=False, frames_given=False, frame_counts=None):
         self.script_lines = [ed.norm_digits(l) for l in script_lines]
         self.script = '\n'.join(self.script_lines)
         self.script_nospace = re.sub(r'\s+', '', self.script)
@@ -87,6 +94,8 @@ class Inputs:
         self.source = {'numbers': '', 'all': '', 'title': '', 'meta': '', **(source or {})}
         self.evidence = evidence or []
         self.frames = frames or {}          # {(t, src): [ocr line, ...]}
+        self.frames_given = frames_given    # a frame_checks report was supplied: every evidence entry must have frames in it
+        self.frame_counts = frame_counts or {}   # {(t, src): number of evidence frames in the report}
         self.timed = timed or []            # timed transcript of the original video
         self.chapters = chapters or []      # [{start, end, title}]
         self.legacy = legacy
@@ -94,15 +103,6 @@ class Inputs:
         self.relevance_given = relevance_given
         corpus = self.script + '\n' + self.source['all']
         self.latin_corpus = {w.lower() for w in LATIN.findall(corpus)}
-
-    def window_lines(self, t, end, neighbors):
-        """Script lines overlapping [t,end] by time, widened by +-neighbors lines -> [(line_no, text)]."""
-        hit = [r['line'] for r in self.line_starts if r['start'] < end and r['end'] > t]
-        if not hit:
-            nearest = min(self.line_starts, key=lambda r: min(abs(r['start'] - t), abs(r['end'] - t)))
-            hit = [nearest['line']]
-        lo, hi = min(hit) - neighbors, max(hit) + neighbors
-        return [(n, self.script_lines[n - 1]) for n in range(max(1, lo), min(len(self.script_lines), hi) + 1)]
 
 
 def _issue(code, severity, t, field, text, detail, **extra):
@@ -115,9 +115,20 @@ def _has_number(text, value):
     return ed.number_regex(value).search(text) is not None
 
 
-def _fraction_in_lines(lines, a, b):
+def _fraction_in_script(inp, a, b, window):
+    """Both numbers of a fraction occur in ONE script line, or in two ADJACENT lines no further apart than `window` characters
+    (numeric view: Thai number words read as digits, so "3 เต็ม สิบ" and "3/10" are the same)."""
     ra, rb = ed.number_regex(a), ed.number_regex(b)
-    return any(ra.search(l) and rb.search(l) for _, l in lines)
+    lines = inp.nlines
+    if any(ra.search(l) and rb.search(l) for l in lines):
+        return True
+    for i in range(len(lines) - 1):
+        joined = lines[i] + '\n' + lines[i + 1]
+        pa = [m.start() for m in ra.finditer(joined)]
+        pb = [m.start() for m in rb.finditer(joined)]
+        if any(abs(x - y) <= window for x in pa for y in pb):
+            return True
+    return False
 
 
 def _fraction_in_source(src, a, b, window):
@@ -176,32 +187,72 @@ def number_severity(raw, value, ntext, span, inp):
     return 'warn', ' (single digit: editorial count, its unit noun is not in the script; warn only)'
 
 
+def cross_stat_fractions(beat):
+    """Stats whose `big` + `label` together form one fraction ("8" + "/10", "3" + "จาก 10 รอบ", "5" + "of 10").
+    -> [(stat index, combined text, a, c)]; fractions that lie inside one field are found by numeric_tokens on that field."""
+    out = []
+    for i, st in enumerate(beat.get('stats') or []):
+        if not isinstance(st, dict) or not isinstance(st.get('big'), str) or not isinstance(st.get('label'), str):
+            continue
+        big, label = st['big'].strip(), st['label'].strip()
+        combined = big + ' ' + label
+        for a, c, span in numeric_tokens(combined)['fractions']:
+            if span[0] < len(big) < span[1]:          # crosses the boundary between the two fields
+                out.append((i, combined, a, c))
+    return out
+
+
 def check_provenance(ep, inp, th, issues, metrics):
-    """provenance-number/-ordinal/-latin/-thai. Numbers and ordinals are searched in the WHOLE script
-    (Thai number words read as numbers) plus the source transcript/title/description."""
+    """provenance-number/-ordinal/-latin/-thai (+ typo-filler). Numbers and ordinals are searched in the WHOLE script
+    (Thai number words read as numbers) plus the source transcript/title/description. A fraction ("8/10", "8 เต็ม 10",
+    "8 of 10", a stat's big + label) needs both numbers in one script line or two adjacent lines (see _fraction_in_script).
+    The chrome fields in `chromeNumberFields` (breakingLabel, officialTag) get the number / ordinal checks only."""
     script_ords = {(ordinal_key(m[1]), str(int(m[2]))) for m in ORDINAL.finditer(inp.nscript)}
     thai_ord_numbers = {n for (key, n) in script_ords if key not in ENGLISH_ORDINALS}
     english_ords = script_ords | {(ordinal_key(m[1]), str(int(m[2]))) for m in ORDINAL.finditer(inp.source['all'])}
     allow = {w.lower() for w in th['latinAllowlist']}
     editorial = set(th['latinEditorialFields'])
+    chrome_numbers = set(th['chromeNumberFields'])
+    win = th['fractionSourceWindowChars']
     tokenizer = None
     thai_unavailable = False
     latin = {'editorial': 0, 'dataBearing': 0}
+    typo = {'texts': 0, 'unsupported': 0, 'examples': []}
+    typo_ts = {b['t'] for b in ep['beats'] if b.get('media') == 'typo'}
+    # Numbers printed in the page's date label (e.g. "11 พ.ย. 2026") are known provenance for the end card ONLY
+    # (its eyebrow repeats the month / year); they never excuse a number in a beat, stat, card, kicker or cta.
+    date_label = (ep.get('top') or {}).get('dateLabel')
+    date_numbers = {v for v, _, _ in numeric_tokens(date_label)['numbers']} if isinstance(date_label, str) else set()
+    # fractions split over a stat's big + label: checked as ONE fraction; their two numbers are not checked again one by one
+    skip = {}
+    for b in ep['beats']:
+        for i, combined, a, c in cross_stat_fractions(b):
+            skip.setdefault((b['t'], 'stats[%d].big' % i), set()).add(a)
+            skip.setdefault((b['t'], 'stats[%d].label' % i), set()).add(c)
+            if not (_fraction_in_script(inp, a, c, win) or _fraction_in_source(inp.source['numbers'], a, c, win)):
+                issues.append(_issue('provenance-number', 'error', b['t'], 'stats[%d]' % i, combined,
+                                     'fraction %s/%s (big + label): %s and %s do not both occur in one script line or two adjacent lines (within %d chars) nor within %d chars in the source' % (a, c, a, c, win, win)))
     for ctx_t, ctx_end, it, (field, text, ws, we, kind) in iter_fields(ep):
-        if kind == 'chrome':
+        numbers_only = kind == 'chrome' and field in chrome_numbers
+        if kind == 'chrome' and not numbers_only:
             continue
         ntext = ed.norm_digits(text)
         tk = numeric_tokens(text)
+        skipped = skip.get((it, field), ())
         for value, raw, span in tk['numbers']:
+            if value in skipped:
+                continue
             if _has_number(inp.nscript, value) or _has_number(inp.source['numbers'], value):
+                continue
+            if field.startswith('endcard.') and value in date_numbers:
                 continue
             sev, why = number_severity(raw, value, ntext, span, inp)
             issues.append(_issue('provenance-number', sev, it, field, text,
                                  'number %s is not said anywhere in the script (digits or Thai number words) nor in the source transcript/title/description%s' % (raw, why)))
         for a, c, _ in tk['fractions']:
-            if not (_fraction_in_lines(list(enumerate(inp.nlines, 1)), a, c) or _fraction_in_source(inp.source['numbers'], a, c, th['fractionSourceWindowChars'])):
+            if not (_fraction_in_script(inp, a, c, win) or _fraction_in_source(inp.source['numbers'], a, c, win)):
                 issues.append(_issue('provenance-number', 'error', it, field, text,
-                                     'fraction %s/%s: %s and %s do not both occur in one script line nor within %d chars in the source' % (a, c, a, c, th['fractionSourceWindowChars'])))
+                                     'fraction %s/%s: %s and %s do not both occur in one script line or two adjacent lines (within %d chars) nor within %d chars in the source' % (a, c, a, c, win, win)))
         for raw_prefix, key, n, _ in tk['ordinals']:
             if key in ENGLISH_ORDINALS:
                 if (key, n) in english_ords:
@@ -214,6 +265,8 @@ def check_provenance(ep, inp, th, issues, metrics):
                                          'ordinal "%s %s" is never said (neither in English in script/source nor as a Thai ordinal)' % (raw_prefix, n)))
             elif (key, n) not in script_ords:
                 issues.append(_issue('provenance-ordinal', 'error', it, field, text, 'ordinal "%s %s" is never said (script)' % (raw_prefix, n)))
+        if numbers_only:
+            continue                        # page chrome: its words need no provenance
         seen = set()
         for w in LATIN.findall(text):
             lw = w.lower()
@@ -224,6 +277,9 @@ def check_provenance(ep, inp, th, issues, metrics):
                 latin['editorial' if field in editorial else 'dataBearing'] += 1
                 issues.append(_issue('provenance-latin', 'warn', it, field, text,
                                      'Latin word "%s" not in script, source transcript/title/description/chapters or allowlist (may be a translation)' % w, word=w))
+        is_typo_text = it in typo_ts and field.startswith(('cards[', 'items[', 'vs.'))
+        if is_typo_text:
+            typo['texts'] += 1
         if THAI_CHAR.search(text) and not thai_unavailable and field != 'cta' and not field.startswith('endcard.'):
             if tokenizer is None:
                 tokenizer = thai_tokenizer()
@@ -240,7 +296,19 @@ def check_provenance(ep, inp, th, issues, metrics):
                     issues.append(_issue('provenance-thai', 'warn', it, field, text,
                                          'only %.2f of Thai tokens occur in the script (min %.2f); missing: %s' % (share, th['thaiShareMin'], ' '.join(missing)),
                                          share=round(share, 3)))
+                    if is_typo_text:
+                        typo['unsupported'] += 1
+                        if len(typo['examples']) < 5:
+                            typo['examples'].append({'t': it, 'field': field, 'text': text})
     metrics['latin'] = {**latin, 'warn': latin['editorial'] + latin['dataBearing'], 'error': 0}
+    share = typo['unsupported'] / typo['texts'] if typo['texts'] else 0.0
+    metrics['typoFiller'] = {'texts': typo['texts'], 'unsupported': typo['unsupported'], 'share': round(share, 4), 'maxShare': th['typoFillerMaxShare']}
+    if typo['texts'] and not thai_unavailable and share > th['typoFillerMaxShare']:
+        issues.append(_issue('typo-filler', 'error', None, None, None,
+                             '%d of %d typo card / item texts (%.0f %%) have Thai words the script does not support (max %.0f %%); first: %s' % (
+                                 typo['unsupported'], typo['texts'], share * 100, th['typoFillerMaxShare'] * 100,
+                                 '; '.join('t=%.2f %s "%s"' % (e['t'], e['field'], e['text']) for e in typo['examples'])),
+                             share=round(share, 4), unsupported=typo['unsupported'], texts=typo['texts']))
 
 
 def _norm_name(s):
@@ -279,6 +347,8 @@ def anchors(field, text, th, inp=None, counts=None):
     out, ambiguous = [], 0
     for raw_prefix, _, n, _ in tk['ordinals']:
         out.append(('%s %s' % (raw_prefix, n), re.compile(re.escape(raw_prefix) + r'\s*' + ed.number_regex(n).pattern, re.IGNORECASE), None, 'num'))
+    for a, c, _ in tk['fractions']:
+        out.append(('%s/%s' % (a, c), ed.number_regex(a), ('frac', c), 'num'))       # spoken as the numerator next to the denominator
     for value, raw, span in tk['numbers']:
         if is_product_number(ntext, span, raw, inp):
             if counts is not None:
@@ -297,22 +367,38 @@ def anchors(field, text, th, inp=None, counts=None):
     return out, ambiguous
 
 
+def _timing_anchors(b, field, text, th, inp, counts):
+    """Anchors of one on-screen string, plus the fractions that a stat's `big` + `label` form together."""
+    anc, amb = anchors(field, text, th, inp, counts)
+    if field.endswith('.label') and field.startswith('stats['):
+        i = int(field[len('stats['):field.index(']')])
+        for si, combined, fa, fc_ in cross_stat_fractions(b):
+            if si == i:
+                anc.append(('%s/%s' % (fa, fc_), ed.number_regex(fa), ('frac', fc_), 'num'))
+    return anc, amb
+
+
 def check_timing(ep, inp, th, issues, metrics):
     """card-timing-*. Whole-beat labels (kind 'beat', and every text of the final beat) can only be
     gone-before-spoken (a label may recap something said earlier); timed items (stats, cards, items with
-    `at`, lower) also get late / early with the tolerance."""
+    `at`, lower) also get late / early with the tolerance, and card-timing-far when their number is spoken
+    only further than timingMaxDistanceSeconds away. Recap beats (typo summary3 / final4) and whole-beat
+    labels are exempt from -far: they may legitimately restate something said long before."""
     tol = th['timingToleranceSeconds']
     cache = {}
-    checked = skipped = far = ambiguous = product = 0
+    checked = skipped = far = far_errors = ambiguous = product = 0
     seen = set()
+    far_seen = set()
     last = ep['beats'][-1]
+    win = th['fractionSourceWindowChars']
     for b in ep['beats']:
+        recap = b.get('typo') in ('summary3', 'final4')
         for field, text, ws, we, kind in ed.text_fields(b):
             if field == 'cta':
                 continue
             label_like = kind == 'beat' or b is last
             counts = {}
-            anc, amb = anchors(field, text, th, inp, counts)
+            anc, amb = _timing_anchors(b, field, text, th, inp, counts)
             ambiguous += amb
             product += counts.get('product', 0)
             for label, rx, unit, view in anc:
@@ -320,7 +406,10 @@ def check_timing(ep, inp, th, issues, metrics):
                 if key not in cache:
                     if view == 'num':
                         occ = [o for o in inp.clock.occurrences_numeric(rx) if o[2] is not None]
-                        if unit:
+                        if isinstance(unit, tuple):       # fraction: the denominator must be spoken right next to the numerator
+                            dpos = [m.start() for m in ed.number_regex(unit[1]).finditer(inp.nscript)]
+                            occ = [o for o in occ if any(abs(d - (o[4] - len(o[1]))) <= win for d in dpos)]
+                        elif unit:
                             occ = [o for o in occ if inp.nscript[o[4]:].lstrip().casefold().startswith(unit.casefold())]
                     else:
                         occ = [o for o in inp.clock.occurrences(rx) if o[2] is not None]
@@ -337,6 +426,14 @@ def check_timing(ep, inp, th, issues, metrics):
                 s = best[2]
                 if dist(best) > th['timingMaxDistanceSeconds']:
                     far += 1
+                    fkey = (b['t'], field, label)
+                    if not label_like and not recap and fkey not in far_seen:
+                        far_seen.add(fkey)
+                        far_errors += 1
+                        issues.append(_issue('card-timing-far', 'error', b['t'], field, text,
+                                             '"%s" is shown %.2f-%.2f but never spoken within %.0f s of that window (nearest spoken at %.2f, %.0f s away)' % (
+                                                 label, ws, we, th['timingMaxDistanceSeconds'], s, dist(best)),
+                                             anchor=label, spoken=round(s, 3), start=round(ws, 3), end=round(we, 3), distance=round(dist(best), 3)))
                     continue
                 dkey = (b['t'], field, s)
                 if dkey in seen:      # same number reached via both the number and the whole-`big` anchor
@@ -354,7 +451,7 @@ def check_timing(ep, inp, th, issues, metrics):
                 elif ws < s - tol:
                     issues.append(_issue('card-timing-early', 'error', b['t'], field, text,
                                          '"%s" appears at %.2f, %.2f s before it is spoken (%.2f; tolerance %.1f)' % (label, ws, s - ws, s, tol), error=round(s - ws, 3), **info))
-    metrics['timing'] = {'anchorsChecked': checked, 'anchorsNeverSpoken': skipped, 'anchorsOnlySpokenFar': far,
+    metrics['timing'] = {'anchorsChecked': checked, 'anchorsNeverSpoken': skipped, 'anchorsOnlySpokenFar': far, 'farErrors': far_errors,
                          'ambiguousAnchors': ambiguous, 'productNameAnchors': product, 'toleranceSeconds': tol,
                          'maxDistanceSeconds': th['timingMaxDistanceSeconds'],
                          'thaiNumberRunsInScript': len(inp.clock.number_runs),
@@ -413,11 +510,15 @@ def check_cta(ep, th, issues, metrics):
         issues.append(_issue('cta-length', 'error', None, 'cta', cta, 'CTA has %d non-space characters (max %d)' % (n, th['maxCtaChars']), chars=n))
 
 
-def check_punch(ep, issues):
+def check_punch(ep, issues, schema_owns=False):
     """Punch is allowed only on presenter full-screen beats (mode 'full') and never at/after ctaT.
 
     Without ctaT (legacy data) the fallback is: no punch on the final beat.
+    For a V4 episode object this is episode_schema.mjs rule S12 (reported by us as code `schema`), so
+    `schema_owns` switches this copy off and the two can never disagree; it stays for legacy list / TSX replays.
     """
+    if schema_owns:
+        return
     last = ep['beats'][-1]
     cta_t = ep.get('cta_t')
     for b in ep['beats']:
@@ -541,12 +642,35 @@ def _ocr_for(frames, t, src):
     return None
 
 
+def qualifying_tokens(term, th):
+    """Words of a subject term that can serve as evidence: >= subjectTokenMinLetters characters, not a stopword, not a number."""
+    stop = {w.lower() for w in th['subjectStopwords']}
+    return [x for x in re.findall(r'[^\W_]+', term)
+            if len(x) >= th['subjectTokenMinLetters'] and not x.isdigit() and x.lower() not in stop]
+
+
+def _token_hits(token, parts):
+    """Which evidence sources ('transcript' / 'ocr') contain `token` (stem-insensitive for Latin words)."""
+    hits = []
+    for name, text in parts:
+        if not text:
+            continue
+        if token.isascii():
+            ok = stem(token) in _stems(text)
+        else:
+            ok = token.lower() in text.lower()
+        if ok:
+            hits.append(name)
+    return hits
+
+
 def check_evidence(ep, inp, th, issues, metrics):
-    """Shown-vs-said checks on source clip beats (see module docstring)."""
+    """Shown-vs-said checks on source clip beats (see module docstring). The window is the ORIGINAL video's timed transcript around the
+    shown range plus the OCR of the frames of the beat; chapter titles are not evidence of what is on screen."""
     pad = th['evidenceWindowPadSeconds']
     allow = {w.lower() for w in th['latinAllowlist']}
     title_words = {w.lower() for w in LATIN.findall(inp.source.get('title', ''))}
-    m = {'sourceBeats': 0, 'withEvidence': 0, 'derivedFromSlug': 0, 'windowUnavailable': 0}
+    m = {'sourceBeats': 0, 'withEvidence': 0, 'derivedFromSlug': 0, 'windowUnavailable': 0, 'weak': 0, 'matches': []}
     for b in ep['beats']:
         if b.get('origin') != 'source' or b.get('media') not in ('clip', 'broll'):
             continue
@@ -556,9 +680,19 @@ def check_evidence(ep, inp, th, issues, metrics):
         if entry is None and not inp.legacy:
             issues.append(_issue('evidence-missing', 'error', t, 'src', src, 'no visual-evidence entry for beat t=%.2f src=%s' % (t, src)))
             continue
+        weak = False
         if entry is not None:
             m['withEvidence'] += 1
             terms = [x for x in (entry.get('subject_terms') or []) if isinstance(x, str)]
+            if inp.frames_given and not inp.frame_counts.get(_frames_key(inp.frame_counts, t, src), 0):
+                issues.append(_issue('evidence-missing', 'error', t, 'frames', src,
+                                     'the evidence entry names no frames: beat t=%.2f src=%s has no frames in the frame_checks report it must be judged from' % (t, src)))
+                continue
+            seen_txt = entry.get('seen')
+            if not isinstance(seen_txt, str) or len(seen_txt.strip()) < th['evidenceSeenMinChars']:
+                weak = True
+                issues.append(_issue('evidence-weak', 'error', t, 'seen', seen_txt if isinstance(seen_txt, str) else None,
+                                     '`seen` must describe what the frames show (a string of at least %d characters)' % th['evidenceSeenMinChars']))
             cue = entry.get('cue_line')
             if cue is not None:
                 row = next((r for r in inp.line_starts if r['line'] == cue), None)
@@ -574,7 +708,7 @@ def check_evidence(ep, inp, th, issues, metrics):
         # shown range in the ORIGINAL video
         clip = inp.cuts.get(src)
         s_in = ed.num(clip.get('source_in')) if isinstance(clip, dict) else None
-        parts = []
+        transcript = []
         s0 = s1 = None
         if s_in is not None:
             s0 = s_in + (ed.num(b.get('from')) or 0.0)
@@ -582,27 +716,33 @@ def check_evidence(ep, inp, th, issues, metrics):
             s_out = ed.num(clip.get('source_out'))
             if s_out is not None:
                 s1 = min(s1, s_out)
-            parts += [r['text'] for r in inp.timed if r['start'] < s1 + pad and (r['end'] if r['end'] is not None else r['start']) > s0 - pad]
-            parts += [c['title'] for c in inp.chapters if c['start'] <= s0 and s1 <= c['end']]
-        parts += _ocr_for(inp.frames, t, src) or []
-        window = '\n'.join(parts).strip()
+            transcript = [r['text'] for r in inp.timed if r['start'] < s1 + pad and (r['end'] if r['end'] is not None else r['start']) > s0 - pad]
+        ocr = _ocr_for(inp.frames, t, src) or []
+        sources = [('transcript', '\n'.join(transcript)), ('ocr', '\n'.join(ocr))]
+        window = '\n'.join(x for _, x in sources).strip()
         if not window:
             m['windowUnavailable'] += 1
             issues.append(_issue('window-evidence-unavailable', 'error', t, 'src', src,
-                                 'no timed transcript, OCR text or chapter title for the shown range of %s (original %s)' % (src, 'unknown' if s0 is None else '%.1f-%.1f' % (s0, s1))))
+                                 'no timed transcript or frame OCR text for the shown range of %s (original %s); chapter titles are not evidence' % (src, 'unknown' if s0 is None else '%.1f-%.1f' % (s0, s1))))
             continue
         wstems = _stems(window)
-        wlow = window.lower()
-        usable = []
-        for term in terms:
-            toks = [x for x in re.findall(r'[^\W_]+', term) if len(x) >= th['subjectTokenMinLetters']]
-            if toks:
-                usable.append(toks)
+        usable = [(term, toks) for term, toks in ((term, qualifying_tokens(term, th)) for term in terms) if toks]
+        beat_match = {'t': t, 'src': src, 'terms': []}
+        for term, toks in usable:
+            hit = {x: _token_hits(x, sources) for x in toks}
+            beat_match['terms'].append({'term': term, 'tokens': hit, 'matched': all(hit.values())})
+        m['matches'].append(beat_match)
         if not usable:
-            issues.append(_issue('subject-not-in-window', 'error', t, 'subject_terms', ', '.join(terms), 'no usable subject term (tokens >= %d letters) to check against the window' % th['subjectTokenMinLetters']))
-        elif not any(all((stem(x) in wstems) if x.isascii() else (x.lower() in wlow) for x in toks) for toks in usable):
+            if entry is not None:
+                m['weak'] += 1
+                issues.append(_issue('evidence-weak', 'error', t, 'subject_terms', ', '.join(terms),
+                                     'no subject term has a qualifying word (>= %d characters, not a stopword, not a number)' % th['subjectTokenMinLetters']))
+            else:
+                issues.append(_issue('subject-not-in-window', 'error', t, 'subject_terms', ', '.join(terms),
+                                     'no usable subject term (words >= %d characters) to check against the window' % th['subjectTokenMinLetters']))
+        elif not any(x['matched'] for x in beat_match['terms']):
             issues.append(_issue('subject-not-in-window', 'error', t, 'subject_terms', ', '.join(terms),
-                                 'no subject term has ALL its words in the window evidence (original %s +-%.0f s: transcript, frame OCR, chapter)' % ('%.1f-%.1f' % (s0, s1) if s0 is not None else 'range unknown', pad)))
+                                 'no subject term has ALL its words in the window evidence (original %s +-%.0f s: transcript, frame OCR)' % ('%.1f-%.1f' % (s0, s1) if s0 is not None else 'range unknown', pad)))
         headline = b.get('headline')
         if isinstance(headline, str):
             for w in dict.fromkeys(LATIN.findall(headline)):
@@ -612,6 +752,13 @@ def check_evidence(ep, inp, th, issues, metrics):
                 issues.append(_issue('label-latin-not-in-window', 'error', t, 'headline', headline,
                                      'headline word "%s" is not in the shown window evidence nor the source title' % w, word=w))
     metrics['evidence'] = m
+
+
+def _frames_key(counts, t, src):
+    for (ft, fsrc) in counts:
+        if fsrc == src and abs(ft - t) < 0.05:
+            return (ft, fsrc)
+    return None
 
 
 def run_schema(episode_path, captions_path, validator, timeout=60):
@@ -650,7 +797,7 @@ def lint_content(ep, inp, thresholds=None):
     check_timing(ep, inp, th, issues, metrics)
     check_presenter(ep, th, issues, metrics)
     check_cta(ep, th, issues, metrics)
-    check_punch(ep, issues)
+    check_punch(ep, issues, schema_owns=(ep['format'] == 'json-object' and not inp.legacy))
     check_stock(ep, inp, issues)
     check_source_reuse(ep, inp, th, issues)
     check_evidence(ep, inp, th, issues, metrics)
@@ -715,6 +862,7 @@ def main(argv=None):
         relevance = load_relevance(a.relevance) if a.relevance else None
         evidence = ed.load_evidence(a.evidence) if a.evidence else []
         frames = ed.load_frames_report(a.frames_report) if a.frames_report else {}
+        frame_counts = ed.load_frame_counts(a.frames_report) if a.frames_report else {}
         timed = ed.load_timed_transcript(a.source_timed) if a.source_timed else []
         chapters = ed.load_chapters(a.chapters) if a.chapters else []
         ep = ed.load_episode(a.beats, vo_end=a.vo_end, fallback_vo_end=line_starts[-1]['end'])
@@ -734,7 +882,8 @@ def main(argv=None):
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 2
     inp = Inputs(script_lines, tokens, line_starts, cuts, source, relevance, relevance_given=bool(a.relevance),
-                 evidence=evidence, frames=frames, timed=timed, chapters=chapters, legacy=a.legacy)
+                 evidence=evidence, frames=frames, timed=timed, chapters=chapters, legacy=a.legacy,
+                 frames_given=bool(a.frames_report), frame_counts=frame_counts)
     issues, metrics = lint_content(ep, inp, thresholds)
     issues = schema_issues + issues
     metrics['schema'] = schema_summary

@@ -22,9 +22,25 @@ blank (a few bright UI pixels are enough). Subtype in the detail: white (median 
 A run needs at least two consecutive low-information samples (first-to-last span >= run_min_seconds), so a
 single-sample flash is never reported; a range shorter than the run minimum is reported only when all of it is blank.
 
-V4 playback semantics (engine spec S09-S11): `from` is the offset inside the public cut file; source beats never
-loop (-> `source-loop` error); stock loops restart at `from` with loop length floor((brollDur - from) * 25) - 2
-frames, so only [from, from + loop length] is ever shown.
+V4 playback semantics (episode_schema.mjs S09-S11): `from` is the offset inside the public cut file; stock loops
+restart at `from` with loop length floor((brollDur - from) * 25) - 2 frames, so only [from, from + loop length] is
+ever shown. Clip length / looping against the DECLARED brollDur is the schema's rule S09 (a source clip that would
+loop or freeze is an S09 error, reported by lint_content as code `schema`); this file only reports what the schema
+cannot see, i.e. the same checks against the REAL file on disk: `source-loop` (source beat longer than the file
+allows), `from-out-of-range` (`from` leaves nothing of the real file) and `broll-dur-mismatch`. They are skipped
+for a clip whose declared brollDur matches the file within one frame (the schema owns it then).
+
+blank-frame on a source clip beat (cutaways) is measured frame by frame on the visible region: a blank picture lasting >= 1.0 s
+(`blank_error_seconds`, locked by lead 2026-11-12) is an ERROR naming the beat, the clip and the blank range inside the clip file; a shorter one
+(>= `run_min_seconds`) stays a warning. Stock / ai blank-frame stays an error as before.
+
+static-hold (cutaways, error): source video clips (media `clip`, origin `source`) are sampled over their whole shown range
+(`static_sample_fps` per second) in the part the viewer really sees (episode_data.visible_region: srcCrop cover-fitted into the stage /
+wide picture box) and hashed (dHash). A stretch of samples whose hash stays within `reuse_max_distance` of the stretch's first sample
+continues across consecutive pip clip beats (also across files) and is reset by a presenter (`full`), typo, stock / ai beat, a
+layout change or a visible change. Longer than `maxHoldSeconds` (qc_thresholds.json; missing file or key = tool missing, exit 4) ->
+one `static-hold` error per stretch. A beat whose visible region cannot be computed is `static-hold-region-unknown` (error), never
+skipped. The report carries `staticHold.runs` with the longest static stretch of every run of consecutive clip beats.
 """
 from __future__ import annotations
 
@@ -77,9 +93,16 @@ THRESHOLDS = {
     "crop_dark_tstd": 3.0,
     "crop_uniform_vstd": 10.0,
     "crop_max_bar_fraction": 0.4,   # more than this per side is not a bar, it is content
+    # blank-frame on SOURCE clips: a low-information picture that lasts at least this long (continuously, measured frame by frame on the
+    # visible region) is an error, a shorter one stays a warning. locked by lead 2026-11-12
+    "blank_error_seconds": 1.0,
+    # static-hold (maxHoldSeconds itself comes from qc_thresholds.json, never from here)
+    "static_sample_fps": 4.0,       # samples per second of shown time (>= 1; a stretch is measured first sample -> last sample)
+    "static_work_size": (160, 90),  # the visible region is area-downscaled to this before the dHash
     # engine
     "engine_fps": 25,
 }
+QC_THRESHOLDS_PATH = Path(__file__).resolve().parent / "qc_thresholds.json"
 REF_W, REF_H = 1920, 1080
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -175,13 +198,9 @@ def scale_crop(crop, fw, fh):
     return (px, py, pw - pw % 2, ph - ph % 2)
 
 
-def luma_samples(video, a, b, crop_px=None):
-    """-> per-sample stats [{t, mean, median, info}] for [a, b]. crop_px is in FILE pixels.
-    info = fraction of pixels whose luma differs from the frame median by more than infoDelta."""
+def luma_stats(arr, a, fps):
+    """(n, h, w) uint8 luma frames -> per-frame stats [{t, mean, median, info}] (t = a + i / fps)."""
     T = THRESHOLDS
-    fps = T["sample_fps"]
-    w, h = T["sample_size"]
-    arr = decode_gray(video, a, b, _crop_vf(crop_px), w, h, fps)
     stats = []
     for i in range(arr.shape[0]):
         f = arr[i].astype(np.float32)
@@ -189,6 +208,15 @@ def luma_samples(video, a, b, crop_px=None):
         stats.append({"t": round(a + i / fps, 3), "mean": float(f.mean()), "median": med,
                       "info": float((np.abs(f - med) > T["infoDelta"]).mean())})
     return stats
+
+
+def luma_samples(video, a, b, crop_px=None):
+    """-> per-sample stats [{t, mean, median, info}] for [a, b]. crop_px is in FILE pixels.
+    info = fraction of pixels whose luma differs from the frame median by more than infoDelta."""
+    T = THRESHOLDS
+    fps = T["sample_fps"]
+    w, h = T["sample_size"]
+    return luma_stats(decode_gray(video, a, b, _crop_vf(crop_px), w, h, fps), a, fps)
 
 
 def _runs(flags, times, a, b, fps, min_span):
@@ -285,8 +313,14 @@ def dhash(path, box=None):
             x1, y1 = min(g.width, x0 + int(round(box[2] * sx))), min(g.height, y0 + int(round(box[3] * sy)))
             if x1 - x0 >= 8 and y1 - y0 >= 8:
                 g = g.crop((x0, y0, x1, y1))
-        small = np.asarray(g.resize((9, 8), Image.LANCZOS), dtype=np.int16)
-        flat = float(np.asarray(g.resize((16, 16), Image.BILINEAR), dtype=np.float32).std()) < THRESHOLDS["reuse_flat_std"]
+        return _dhash_image(g)
+
+
+def _dhash_image(g):
+    """-> (hex dHash (64 bit), flat?) of a PIL grayscale image."""
+    from PIL import Image
+    small = np.asarray(g.resize((9, 8), Image.LANCZOS), dtype=np.int16)
+    flat = float(np.asarray(g.resize((16, 16), Image.BILINEAR), dtype=np.float32).std()) < THRESHOLDS["reuse_flat_std"]
     bits = (small[:, 1:] > small[:, :-1]).flatten()
     v = 0
     for bit in bits:
@@ -294,8 +328,177 @@ def dhash(path, box=None):
     return f"{v:016x}", flat
 
 
+def dhash_gray(arr):
+    """dHash of a decoded (h, w) uint8 luma array -> (hex, flat?). Same hash as dhash() gives for the same picture."""
+    from PIL import Image
+    return _dhash_image(Image.fromarray(arr, mode="L"))
+
+
 def hamming(h1, h2):
     return bin(int(h1, 16) ^ int(h2, 16)).count("1")
+
+
+# ----------------------------------------------------------------------------------------------
+# static-hold (picture that hardly changes)
+# ----------------------------------------------------------------------------------------------
+
+def load_max_hold(path=None):
+    """maxHoldSeconds from qc_thresholds.json. Missing / unreadable file or key = ToolMissing (exit 4): never a default."""
+    p = Path(path or QC_THRESHOLDS_PATH)
+    try:
+        v = json.loads(p.read_text(encoding="utf-8"))["maxHoldSeconds"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ToolMissing(f"cannot read maxHoldSeconds from {p}: {e}") from e
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        raise ToolMissing(f"maxHoldSeconds in {p} must be a positive number, got {v!r}")
+    return float(v)
+
+
+def is_clip_source(beat):
+    """Beats that are measured: source VIDEO clips in the picture box (not presenter, typo, stock or ai)."""
+    return beat.get("mode") != "full" and beat.get("media") == "clip" and beat.get("origin") == "source"
+
+
+def region_px(region, fw, fh):
+    """visible_region() floats -> integer crop (x, y, w, h) inside a fw x fh file."""
+    x, y, w, h = region
+    x0, y0 = max(0, min(int(round(x)), fw - 2)), max(0, min(int(round(y)), fh - 2))
+    return (x0, y0, max(2, min(int(round(w)), fw - x0)), max(2, min(int(round(h)), fh - y0)))
+
+
+def decode_region(path, a, b, region):
+    """Every frame (at the engine fps) of the visible region of [a, b] -> (n, h, w) uint8 luma, frame i at a + i / engine_fps."""
+    w, h = THRESHOLDS["static_work_size"]
+    return decode_gray(path, a, b, _crop_vf(region), w, h, THRESHOLDS["engine_fps"])
+
+
+def samples_from_frames(arr, a):
+    """dHash samples (`static_sample_fps` per second, plus the last frame shown) from the frames of decode_region.
+    -> [{"local": file second, "dhash": hex, "flat": bool}]"""
+    T = THRESHOLDS
+    fps = T["engine_fps"]
+    n = arr.shape[0]
+    idx, m = [], 0
+    while n and round(m * fps / T["static_sample_fps"]) < n:
+        idx.append(round(m * fps / T["static_sample_fps"]))
+        m += 1
+    if n and idx[-1] != n - 1:          # a stretch is measured up to the last frame of the beat, not only to the last grid sample
+        idx.append(n - 1)
+    out = []
+    for i in idx:
+        d, flat = dhash_gray(arr[i])
+        out.append({"local": round(a + i / fps, 3), "dhash": d, "flat": flat})
+    return out
+
+
+def static_samples(path, a, b, region):
+    """dHash samples of the visible region of [a, b] (file seconds). -> [{"local", "dhash", "flat"}]"""
+    return samples_from_frames(decode_region(path, a, b, region), a)
+
+
+def dense_blank_issues(stats, a, b, src, beat_t):
+    """blank-frame runs of a SOURCE clip beat from per-frame stats of its visible region (see decode_region / luma_stats).
+    A run of low-information frames lasting >= blank_error_seconds is an ERROR, a shorter run (>= run_min_seconds) a warning; the
+    detail names the beat, the clip and the blank range INSIDE THE CLIP FILE so `from` can be moved past it."""
+    T = THRESHOLDS
+    fps = T["engine_fps"]
+    flags = [s_["info"] < T["infoMinFraction"] for s_ in stats]
+    issues, i, n = [], 0, len(flags)
+    while i < n:
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and flags[j + 1]:
+            j += 1
+        t0, t1 = stats[i]["t"], min(b, round(stats[j]["t"] + 1.0 / fps, 3))
+        dur = (j - i + 1) / fps
+        i = j + 1
+        if dur < T["run_min_seconds"] - 1e-9 and not (t0 <= a + 1e-9 and t1 >= b - 1e-9):
+            continue
+        sel = [s_ for s_ in stats if t0 - 1e-9 <= s_["t"] < t1 - 1e-9]
+        med = float(np.mean([s_["median"] for s_ in sel]))
+        sub = "white" if med > T["whiteMedian"] else "black" if med < T["blackMedian"] else "flat"
+        err = dur >= T["blank_error_seconds"] - 1e-9
+        issues.append({"code": "blank-frame", "severity": "error" if err else "warn", "range": [round(t0, 3), round(t1, 3)], "duration": round(dur, 3),
+                       "detail": f"beat t={beat_t:g} clip {src}: blank picture ({sub}) for {dur:.2f}s from {t0:.2f}s to {t1:.2f}s inside the clip file "
+                                 f"(visible region; median luma {med:.0f}, info fraction max {max(s_['info'] for s_ in sel):.4f}); "
+                                 + (f"an error from {T['blank_error_seconds']:g}s: move `from` past {t1:.2f}s" if err else
+                                    f"a warning below {T['blank_error_seconds']:g}s")})
+    return issues
+
+
+def same_picture(h0, flat0, h1, flat1):
+    """No visible change = dHash distance <= reuse_max_distance (the shot-reuse threshold). Two flat frames are the same picture."""
+    if flat0 and flat1:
+        return True
+    return hamming(h0, h1) <= THRESHOLDS["reuse_max_distance"]
+
+
+def static_timeline(beats, statics, max_hold):
+    """Accumulate the on-screen timeline.
+    beats: the episode beats (with t, end, layout, src, ...); statics: {beat index: {"samples": [...], "from": file second of the first
+    shown frame} | {"error": text}} for the measured clip beats. -> (issues, runs)
+
+    A stretch starts at a sample and continues while later samples stay within the hash threshold of ITS FIRST sample. It spans
+    consecutive pip clip beats (any file) and is closed by a non-clip beat, a layout change, a beat without samples or a visible
+    change. runs: one entry per run of consecutive clip beats with the longest stretch (start, end, duration, srcs)."""
+    issues, runs = [], []
+    state = {"run": None, "st": None}
+
+    def close_stretch():
+        st = state["st"]
+        state["st"] = None
+        if st is None:
+            return
+        dur = st["last"] - st["first"]
+        run = st["run"]
+        if dur > run["_best"] + 1e-9 or run["longestStatic"] is None:
+            run["_best"] = dur
+            run["longestStatic"] = {"start": round(st["first"], 3), "end": round(st["last"], 3), "duration": round(dur, 3), "srcs": st["srcs"],
+                                    "beat_t": st["beat_t"]}
+        if dur > max_hold + 1e-9:
+            issues.append({"code": "static-hold", "severity": "error", "beat_t": st["beat_t"], "src": st["srcs"][0], "origin": "source",
+                           "srcs": st["srcs"], "range": [round(st["first"], 3), round(st["last"], 3)], "duration": round(dur, 3),
+                           "detail": f"the visible picture hardly changes for {dur:.2f}s (from t={st['first']:.2f}s to t={st['last']:.2f}s, "
+                                     f"src {', '.join(st['srcs'])}); maximum {max_hold:g}s (dHash distance <= {THRESHOLDS['reuse_max_distance']} "
+                                     f"to the first sample of the stretch)"})
+
+    def close_run():
+        close_stretch()
+        run = state["run"]
+        state["run"] = None
+        if run is not None:
+            run.pop("_best")
+            runs.append(run)
+
+    for i, b in enumerate(beats):
+        if not is_clip_source(b):
+            close_run()
+            continue
+        if state["run"] is None:
+            state["run"] = {"start": b["t"], "beats": [], "longestStatic": None, "_best": -1.0}
+        state["run"]["beats"].append(b["t"])
+        info = statics.get(i)
+        if not info or "samples" not in info:
+            close_stretch()
+            continue
+        st = state["st"]
+        if st is not None and st["layout"] != b.get("layout"):
+            close_stretch()
+        for smp in info["samples"]:
+            at = b["t"] + (smp["local"] - info["from"])
+            st = state["st"]
+            if st is not None and same_picture(st["h0"], st["flat0"], smp["dhash"], smp["flat"]):
+                st["last"] = at
+                if b.get("src") not in st["srcs"]:
+                    st["srcs"].append(b.get("src"))
+                continue
+            close_stretch()
+            state["st"] = {"first": at, "last": at, "h0": smp["dhash"], "flat0": smp["flat"], "srcs": [b.get("src")], "beat_t": b["t"],
+                           "layout": b.get("layout"), "run": state["run"]}
+    close_run()
+    return issues, runs
 
 
 # ----------------------------------------------------------------------------------------------
@@ -520,8 +723,8 @@ def is_source_beat(beat):
 
 
 def severity_for(code, beat):
-    """blank-frame is a defect on stock / ai media (error) but source content on a source beat (warn);
-    every other code is an error."""
+    """blank-frame is a defect on stock / ai media (error) but source content on a source beat (warn; cutaways measure source clips
+    frame by frame in dense_blank_issues, which sets its own severity: error from blank_error_seconds); every other code is an error."""
     if code == "blank-frame" and is_source_beat(beat or {}):
         return "warn"
     return "error"
@@ -537,7 +740,9 @@ def count_issues(issues):
 
 def plan_range(beat, fdur, dur_declared=None):
     """Which local range of the file the beat really shows (engine spec 1a / S09).
-    -> {"segment": [a, b] | None, "loops": bool, "source_loop": bool, "loop_len": s | None}
+    -> {"segment": [a, b] | None, "loops": bool, "source_loop": bool, "loop_len": s | None, "out_of_range": bool}
+    `source_loop` / `out_of_range` are judged on the REAL file and are False when the declared brollDur matches the file
+    (episode_schema.mjs S09 owns that verdict).
 
     The renderer mounts the clip in a Loop of L = floor((D - from) * fps) - 2 frames starting at `from`
     (D = brollDur[src], else the real file duration); a loop restarts at `from`, never at 0."""
@@ -546,14 +751,20 @@ def plan_range(beat, fdur, dur_declared=None):
     frm = float(beat.get("from") or 0.0)
     D = float(dur_declared) if dur_declared else fdur
     L = math.floor((D - frm) * fps + 1e-9) - 2
+    # what the SCHEMA cannot see: the real file. When the declared brollDur matches it (within one frame) S09 owns the verdict.
+    schema_owns = bool(dur_declared) and abs(D - fdur) <= 1.0 / fps + 0.02
+    L_real = math.floor((fdur - frm) * fps + 1e-9) - 2
+    out_of_range = not schema_owns and (frm < 0 or frm >= fdur or L_real < 1)
     if frm < 0 or frm >= min(D, fdur) or L < 1:
-        return {"segment": None, "loops": False, "source_loop": False, "loop_len": None}
+        return {"segment": None, "loops": False, "source_loop": False, "loop_len": None, "out_of_range": out_of_range}
     t, end = float(beat["t"]), float(beat["end"])
     shown_frames = math.ceil(end * fps - 1e-9) - math.ceil(t * fps - 1e-9)
     loops = shown_frames > L
     seg_len = min(end - t, L / fps)
     seg = [frm, min(frm + seg_len, fdur)]
-    return {"segment": seg, "loops": loops, "source_loop": loops and is_source_beat(beat), "loop_len": L / fps}
+    source_loop = not schema_owns and is_source_beat(beat) and shown_frames > L_real
+    return {"segment": seg, "loops": loops, "source_loop": source_loop, "loop_len": L / fps, "real_loop_len": L_real / fps,
+            "out_of_range": out_of_range}
 
 
 def _beat_job(idx, beat, path, frames_dir, broll_dur):
@@ -565,15 +776,33 @@ def _beat_job(idx, beat, path, frames_dir, broll_dur):
     crop_px = scale_crop(crop, fw, fh)
     plan = plan_range(beat, fdur, declared)
     res = {"idx": idx, "file": str(path), "plan": plan, "fdur": fdur, "res": [fw, fh], "crop": crop, "crop_px": crop_px,
-           "issues": [], "frames": [], "luma": {}, "hash_box": {"kind": "frame", "box": None}}
+           "issues": [], "frames": [], "luma": {}, "hash_box": {"kind": "frame", "box": None},
+           "secs": {"staticSampling": 0.0, "blank": 0.0, "cropPropose": 0.0, "frameExtract": 0.0}}
     if declared and abs(float(declared) - fdur) > 1.0 / THRESHOLDS["engine_fps"] + 0.02:
         res["issues"].append({"code": "broll-dur-mismatch", "range": None,
                               "detail": f"brollDur[{src}]={declared} but the file is {fdur:.3f}s (must match within 1 frame)"})
     if plan["segment"] is None:
         return res
     a, b = plan["segment"]
-    stats = luma_samples(path, a, b, crop_px)
-    res["issues"] += pixel_issues(stats, a, b)
+    dense = None
+    if is_clip_source(beat):
+        t0 = time.time()
+        try:
+            region = _episode_data().visible_region(beat.get("layout"), fw, fh, beat.get("srcCrop"))
+            px = region_px(region, fw, fh)
+            dense = decode_region(path, a, b, px)       # ONE decode of the visible region serves static-hold AND blank-frame
+            res["static"] = {"from": a, "region": [round(v, 2) for v in region], "regionPx": list(px), "samples": samples_from_frames(dense, a)}
+        except ValueError as e:
+            res["static"] = {"error": str(e)}
+        res["secs"]["staticSampling"] += time.time() - t0
+    t0 = time.time()
+    if dense is not None and dense.shape[0]:
+        stats = luma_stats(dense, a, THRESHOLDS["engine_fps"])
+        res["issues"] += dense_blank_issues(stats, a, b, src, beat["t"])
+    else:
+        stats = luma_samples(path, a, b, crop_px)
+        res["issues"] += pixel_issues(stats, a, b)
+    res["secs"]["blank"] += time.time() - t0
     if not stats:
         res["issues"].append({"code": "no-frames", "range": [round(a, 3), round(b, 3)],
                               "detail": "ffmpeg decoded no frames in the shown range"})
@@ -582,23 +811,44 @@ def _beat_job(idx, beat, path, frames_dir, broll_dur):
     if crop is not None:
         res["hash_box"] = {"kind": "srcCrop", "box": None}      # evidence frames are already cropped
     elif is_source_beat(beat):
+        t0 = time.time()
         try:
             pr = propose_crop(path, a, b)
         except BadInput:
             pr = None
+        res["secs"]["cropPropose"] += time.time() - t0
         T = THRESHOLDS
         if pr and pr["confidence"] >= T["reuse_box_min_confidence"] and pr["w"] * pr["h"] < T["reuse_box_max_area"] * REF_W * REF_H:
             res["hash_box"] = {"kind": "crop-propose", "box": [pr["x"], pr["y"], pr["w"], pr["h"]]}
     prefix = f"b{idx:03d}_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(src))[:40]}"
+    t0 = time.time()
     frames, failed = collect_frames(path, a, b, crop_px, frames_dir, prefix)
+    res["secs"]["frameExtract"] += time.time() - t0
     for t in failed:
         res["issues"].append({"code": "frame-missing", "range": [t, t], "detail": f"could not extract a frame at t={t}s"})
     res["frames"] = frames
     return res
 
 
+def continuous_playback(a, b):
+    """The ONE shot-reuse exception: same src file, adjacent in the beat list, both source clip beats, and b's played range starts at or
+    after the end of a's (forward playback; the S10-allowed case, covered by static-hold). The ranges are the renderer's frame ranges
+    [floor(from * 25 + .5), + shown frames) exactly as schema rule S10 counts them. Needs the optional keys index / media / origin /
+    playFrames; entries without them never qualify."""
+    if a.get("index") is None or b.get("index") is None or b["index"] != a["index"] + 1:
+        return False
+    if a.get("src") is None or a["src"] != b["src"]:
+        return False
+    if not all(x.get("media") == "clip" and x.get("origin") == "source" for x in (a, b)):
+        return False
+    if not a.get("playFrames") or not b.get("playFrames"):
+        return False
+    return b["playFrames"][0] >= a["playFrames"][1]
+
+
 def reuse_issues(beat_results):
-    """Cross-beat shot reuse from the evidence-frame dHashes. beat_results: [{t, src, origin, frames:[{t,dhash,flat}]}]"""
+    """Cross-beat shot reuse from the evidence-frame dHashes. beat_results: [{t, src, origin, frames:[{t,dhash,flat}]}]
+    (+ optional index, media, playFrames: see continuous_playback)."""
     T = THRESHOLDS
     issues = []
     order = sorted(range(len(beat_results)), key=lambda i: beat_results[i]["t"])
@@ -607,6 +857,8 @@ def reuse_issues(beat_results):
             A, B = beat_results[i], beat_results[j]
             if B["t"] - A["t"] >= T["reuse_window_seconds"]:
                 break
+            if continuous_playback(A, B):
+                continue
             pairs = []
             for fa in A["frames"]:
                 for fb in B["frames"]:
@@ -628,6 +880,7 @@ def reuse_issues(beat_results):
 
 def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode_end=None, workers=None):
     t_start = time.time()
+    max_hold = load_max_hold()
     ed = _episode_data()
     try:
         ep = ed.load_episode(beats_path, fallback_vo_end=episode_end)
@@ -666,23 +919,27 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
             continue
         jobs.append((i, b, path))
     workers = workers or min(4, os.cpu_count() or 2)
+    t1 = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         results = list(ex.map(lambda j: _beat_job(j[0], j[1], j[2], frames_dir, broll_dur), jobs))
+    phase1 = time.time() - t1
 
     # phase 2: OCR every evidence frame of the run in ONE batch
     allframes = [f for r in results for f in r["frames"]]
+    t2 = time.time()
     ocr_res = run_ocr(runner, [f["path"] for f in allframes])
+    phase2 = time.time() - t2
     beat_out = []
     for r in results:
         i, b = r["idx"], beats[r["idx"]]
         plan = r["plan"]
-        if plan["segment"] is None:
+        if plan["out_of_range"]:
             issues.append({"code": "from-out-of-range", "severity": severity_for("from-out-of-range", b), **base(i), "range": None,
-                           "detail": f"from={b.get('from', 0)} leaves no playable loop in the clip ({r['fdur']:.2f}s)"})
+                           "detail": f"from={b.get('from', 0)} leaves no playable loop in the real file ({r['fdur']:.2f}s)"})
         elif plan["source_loop"]:
             need = math.ceil(b["end"] * THRESHOLDS["engine_fps"] - 1e-9) - math.ceil(b["t"] * THRESHOLDS["engine_fps"] - 1e-9)
             issues.append({"code": "source-loop", "severity": severity_for("source-loop", b), **base(i), "range": plan["segment"],
-                           "detail": f"source beat shows {need / THRESHOLDS['engine_fps']:.2f}s but only {plan['loop_len']:.2f}s of the cut "
+                           "detail": f"source beat shows {need / THRESHOLDS['engine_fps']:.2f}s but only {plan['real_loop_len']:.2f}s of the real file "
                                      f"remains after from={b.get('from', 0)} (source beats never loop)"})
         hb = r["hash_box"]["box"]
         for f in r["frames"]:
@@ -693,8 +950,12 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
                                "detail": f"OCR could not read the frame at t={f['t']}s: {o.get('error')}"})
             f["dhash"], f["flat"] = dhash(f["path"], hb)
         for iss in r["issues"] + text_issues(r["frames"]):
-            issues.append({"code": iss["code"], "severity": severity_for(iss["code"], b), **base(i), "range": iss["range"], "detail": iss["detail"]})
-        entry = {"t": b["t"], "src": b.get("src"), "origin": b.get("origin"), "file": r["file"], "resolution": r["res"],
+            issues.append({"code": iss["code"], "severity": iss.get("severity") or severity_for(iss["code"], b), **base(i), "range": iss["range"],
+                           "detail": iss["detail"], **({"duration": iss["duration"]} if "duration" in iss else {})})
+        fps_ = THRESHOLDS["engine_fps"]
+        p0 = int(math.floor(float(b.get("from") or 0.0) * fps_ + 0.5))
+        entry_frames = [p0, p0 + math.ceil(b["end"] * fps_ - 1e-9) - math.ceil(b["t"] * fps_ - 1e-9)]
+        entry = {"t": b["t"], "index": i, "playFrames": entry_frames, "media": b.get("media"), "src": b.get("src"), "origin": b.get("origin"), "file": r["file"], "resolution": r["res"],
                  "shown": [round(x, 3) for x in plan["segment"]] if plan["segment"] else None, "loops": plan["loops"]}
         if plan["loop_len"] is not None:
             entry["loopSeconds"] = round(plan["loop_len"], 3)
@@ -719,6 +980,24 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
         if r["file"] not in inputs:
             inputs[r["file"]] = _sha256(r["file"])
 
+    # phase 2b: static-hold over the on-screen timeline
+    statics = {}
+    for r in results:
+        i, b = r["idx"], beats[r["idx"]]
+        st = r.get("static")
+        if st is not None and "error" in st:
+            issues.append({"code": "static-hold-region-unknown", "severity": "error", **base(i), "range": None,
+                           "detail": f"cannot compute the visible picture region of this source clip beat ({st['error']}); static-hold not measured"})
+        elif st is not None:
+            statics[i] = st
+        elif is_clip_source(b) and not r["plan"]["out_of_range"]:
+            issues.append({"code": "no-frames", "severity": "error", **base(i), "range": None,
+                           "detail": "static-hold not measured: no playable range of the clip is shown"})
+    hold_issues, hold_runs = static_timeline(beats, statics, max_hold)
+    issues += hold_issues
+    static_report = {"maxHoldSeconds": max_hold, "sampleFps": THRESHOLDS["static_sample_fps"], "hashDistance": THRESHOLDS["reuse_max_distance"],
+                     "runs": hold_runs}
+
     # phase 3: shot reuse across beats
     for iss in reuse_issues(beat_out):
         issues.append({**iss, "severity": "error"})
@@ -726,6 +1005,9 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
     issues.sort(key=lambda x: (order.get(x["beat_t"], 0), x["code"]))
     counts = count_issues(issues)
     return {"schema": SCHEMA, "version": VERSION, "pass": counts["error"] == 0, "counts": counts, "issues": issues, "beats": beat_out,
+            "staticHold": static_report,
+            "timing": {"workers": workers, "beatJobsWallSeconds": round(phase1, 1), "ocrWallSeconds": round(phase2, 1),
+                       "perJobSecondsSummed": {k: round(sum(r["secs"][k] for r in results), 1) for k in ("frameExtract", "staticSampling", "blank", "cropPropose")}},
             "tools": {"ocr": "vision-swift", "ocr_mode": getattr(runner, "mode", None),
                       "ocr_compile_seconds": round(getattr(runner, "compile_seconds", 0.0), 1),
                       "ocr_run_seconds": round(getattr(runner, "run_seconds", 0.0), 1),

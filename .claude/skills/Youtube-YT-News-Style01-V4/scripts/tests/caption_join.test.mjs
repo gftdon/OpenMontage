@@ -50,3 +50,55 @@ test('display switches at latest start, ignores overlapping long tails and uses 
  assert.equal(chunks[0].tokens[0].e,5);
  assert.equal(activeChunk(chunks[2],3),false);
 });
+
+// CLI (V4): the engine reads the --out JSON; there is no generated TSX module any more.
+import {spawnSync} from 'node:child_process';
+import fsCli from 'node:fs';
+import osCli from 'node:os';
+import pathCli from 'node:path';
+import {fileURLToPath as toPathCli} from 'node:url';
+const CLI=toPathCli(new URL('../caption_join.mjs',import.meta.url));
+function cliFixture(){
+ const dir=fsCli.mkdtempSync(pathCli.join(osCli.tmpdir(),'capjoin-'));
+ fsCli.writeFileSync(pathCli.join(dir,'tokens.json'),JSON.stringify([{words:[{w:'น้ำ',s:0,e:.4},{w:'ดี',s:.4,e:.9}]}]));
+ fsCli.writeFileSync(pathCli.join(dir,'script.txt'),'น้ำดี');
+ fsCli.writeFileSync(pathCli.join(dir,'options.json'),JSON.stringify({endTime:.9}));
+ return dir;
+}
+test('CLI writes the captions JSON with --out only (no --module needed)',()=>{
+ const dir=cliFixture(),out=pathCli.join(dir,'captions.json');
+ const r=spawnSync(process.execPath,[CLI,'--tokens',pathCli.join(dir,'tokens.json'),'--script',pathCli.join(dir,'script.txt'),'--options',pathCli.join(dir,'options.json'),'--out',out],{encoding:'utf8'});
+ assert.equal(r.status,0,r.stderr);
+ const result=JSON.parse(fsCli.readFileSync(out,'utf8'));
+ assert.equal(result.pages.map(p=>p.text).join(''),'น้ำดี');assert.match(result.inputSha256,/^[0-9a-f]{64}$/);
+ assert.deepEqual(fsCli.readdirSync(dir).sort(),['captions.json','options.json','script.txt','tokens.json']);
+ fsCli.rmSync(dir,{recursive:true});
+});
+test('CLI refuses --module and a missing flag with exit 2 and writes nothing',()=>{
+ const dir=cliFixture(),out=pathCli.join(dir,'captions.json');
+ const base=['--tokens',pathCli.join(dir,'tokens.json'),'--script',pathCli.join(dir,'script.txt'),'--options',pathCli.join(dir,'options.json')];
+ const a=spawnSync(process.execPath,[CLI,...base,'--out',out,'--module',pathCli.join(dir,'x.ts')],{encoding:'utf8'});
+ assert.equal(a.status,2);assert.match(a.stderr,/--module is not supported/);
+ const b=spawnSync(process.execPath,[CLI,...base],{encoding:'utf8'});
+ assert.equal(b.status,2);assert.match(b.stderr,/missing --out/);
+ assert.equal(fsCli.existsSync(out),false);assert.equal(fsCli.existsSync(pathCli.join(dir,'x.ts')),false);
+ fsCli.rmSync(dir,{recursive:true});
+});
+
+// Real whisper alignment (V261111, tokens 719-722) collapses a word to zero length onto the start of the next line.
+test('a zero-length last word of a line joins the display group of the word before it; the line break is kept',()=>{
+ const tokens=[{w:'โปรแกรม',s:292.575,e:292.9},{w:'กราฟิก',s:292.9,e:292.9},{w:'ทำ',s:292.9,e:292.9},{w:'ให้การ',s:292.9,e:293.26},{w:'เปลี่ยน',s:293.26,e:293.58}];
+ const script='โปรแกรมกราฟิก\nทำให้การเปลี่ยน';
+ const r=build(tokens,script,{endTime:293.58});
+ assert.equal(join(r),script);
+ const chunks=r.pages.flatMap(p=>p.chunks);
+ assert.deepEqual(chunks.map(c=>c.text),['โปรแกรมกราฟิก','ทำให้การ','เปลี่ยน']);
+ assert.deepEqual(chunks.map(c=>[c.displayStart,c.displayEnd]),[[292.575,292.9],[292.9,293.26],[293.26,293.58]]);
+ assert.ok(/\n/u.test(chunks[1].spaceBefore),'line break stays between the two groups');
+ assert.deepEqual(chunks[0].sourceTokens.map(t=>t.w),['โปรแกรม','กราฟิก']);
+ assert.equal(r.pages.length,2);
+ for(const c of chunks)assert.ok(c.displayEnd>c.displayStart,'every group is visible for a non-zero time');
+});
+test('simultaneous starts across a newline still throw when the earlier word is alone on its line',()=>{
+ assert.throws(()=>build([{w:'ก่อน',s:0,e:1},{w:'หนึ่ง',s:1,e:1},{w:'สอง',s:1,e:2}],'ก่อน\nหนึ่ง\nสอง',{endTime:2}),/simultaneous.*newline/);
+});

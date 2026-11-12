@@ -11,7 +11,9 @@ class CliTests(unittest.TestCase):
   uses=bp.derive_usage([{'t':1.201,'end':2.001,'from':.02,'mode':'pip','media':'clip','origin':'source','src':'yt_x'}],{'yt_x':{'source_sha256':'a','source_in':3,'source_out':8,'duration':5}})
   self.assertEqual(uses[0]['source_range'],[3.04,3.84])
 
- def test_literal_parser_numeric_strings_normalized_at_boundary(self):
-  b=bp.normalize_beats([{'t':'1.2','from':'2','chrome':'false','punch':[{'t':'1.4','z':'1.2'}],'mode':'pip','media':'broll','src':'x','origin':'stock'}])
-  self.assertEqual(b[0]['t'],1.2);self.assertEqual(b[0]['from'],2);self.assertFalse(b[0]['chrome']);self.assertEqual(b[0]['punch'][0]['z'],1.2)
+ def test_numeric_strings_normalized_at_boundary(self):
+  # V4 field names: punch[].at (presenter beats), stats[].at/dur, srcCrop x/y/w/h
+  b=bp.normalize_beats([{'t':'1.2','from':'2','punch':[{'at':'1.4','z':'1.2'}],'stats':[{'at':'1.5','dur':'3','label':'x'}],'srcCrop':{'x':'10','y':'20','w':'1280','h':'720'},'mode':'pip','media':'broll','src':'x','origin':'stock'}])
+  self.assertEqual(b[0]['t'],1.2);self.assertEqual(b[0]['from'],2);self.assertEqual(b[0]['punch'][0]['at'],1.4);self.assertEqual(b[0]['punch'][0]['z'],1.2)
+  self.assertEqual((b[0]['stats'][0]['at'],b[0]['stats'][0]['dur']),(1.5,3));self.assertEqual(b[0]['srcCrop'],{'x':10,'y':20,'w':1280,'h':720});self.assertEqual(b[0]['src'],'x')
   with self.assertRaises(ValueError):bp.normalize_beats([{'t':'NaN'}])

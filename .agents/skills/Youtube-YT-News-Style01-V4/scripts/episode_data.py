@@ -2,8 +2,9 @@
 """Shared loader for the content lint (lint_content.py) and cue_times.py.
 
 ALL knowledge of the episode file format lives in the "FORMAT ADAPTER" section.
-The V4 episode schema is owned by the engine workstream and is not final; when
-field names change only that section (and its tests) should need edits.
+The V4 episode schema (assets/episode.schema.json, validated by episode_schema.mjs) is owned by the engine
+workstream; when its field names change only that section (and its tests) should need edits.
+tests/test_real_fixtures.py runs this loader against the engine's own fixtures and a real V4 episode.
 
 Formats accepted by load_episode():
   * object JSON  yt-news-v4-episode/1: {"voEndSec","totalDurationSec","ctaT","cta","endcard","beats":[...],...}  (V4, primary)
@@ -50,7 +51,7 @@ def num(v):
 
 # ============================ FORMAT ADAPTER =================================
 # Every episode field-name assumption is in this section. Primary format: V4
-# `episode.json` ("yt-news-v4-episode/1", engine-spec.md 1a). Legacy V3 list JSON /
+# `episode.json` ("yt-news-v4-episode/1", assets/episode.schema.json). Legacy V3 list JSON /
 # TSX (stats[].t, cards[].t, lower.t, cardKind, ...) stays readable for replay.
 #
 # V4 beat: t, mode full|pip, media broll|clip|typo, layout stage|wide, src, from, origin,
@@ -343,6 +344,43 @@ def _from_tsx(text, vo_end, fallback_vo_end):
     return _finish(beats, meta, 'tsx', vo_end, fallback_vo_end)
 
 
+# ----------------------------- visible picture region ------------------------------
+
+SOURCE_W, SOURCE_H = 1920, 1080                       # srcCrop coordinates and the engine's video element are always 1920x1080
+PICTURE_BOX = {'stage': (1138, 640), 'wide': (1280, 720)}   # engine LANES split.picture / wide.picture
+
+
+def visible_region(layout, src_w, src_h, crop):
+    """Part of a source clip that the viewer actually sees -> (x, y, w, h) in PIXELS OF THE FILE (src_w x src_h).
+
+    The engine (YtNewsStyle01V4.tsx srcCropStyle) stretches the file to 1920x1080 (objectFit fill), takes `crop` (a srcCrop dict in
+    1920x1080 space; None = the whole frame) and cover-fits it into the picture box of the layout: s = max(boxW/cropW, boxH/cropH),
+    so the visible region is (boxW/s, boxH/s), centred on the crop. Results are floats, in file pixels (for a 1920x1080 file they
+    equal score_relevance.visible_region). Fails closed with ValueError: unknown layout, bad / non-positive resolution, a crop that
+    is not {x,y,w,h} of finite numbers, has w/h <= 0 or leaves the 1920x1080 frame. Never falls back to the whole frame.
+    """
+    box = PICTURE_BOX.get(layout) if isinstance(layout, str) else None
+    if box is None:
+        raise ValueError('unknown layout %r (expected one of %s)' % (layout, ', '.join(sorted(PICTURE_BOX))))
+    for name, v in (('width', src_w), ('height', src_h)):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+            raise ValueError('bad source %s %r' % (name, v))
+    if crop is None:
+        cx, cy, cw, ch = 0.0, 0.0, float(SOURCE_W), float(SOURCE_H)
+    else:
+        vals = [num(crop.get(k)) if isinstance(crop, dict) else None for k in 'xywh']
+        if any(v is None for v in vals):
+            raise ValueError('srcCrop must be {x, y, w, h} of finite numbers, got %r' % (crop,))
+        cx, cy, cw, ch = vals
+        if cw <= 0 or ch <= 0 or cx < 0 or cy < 0 or cx + cw > SOURCE_W + 1e-6 or cy + ch > SOURCE_H + 1e-6:
+            raise ValueError('srcCrop %r is outside the %dx%d frame' % (crop, SOURCE_W, SOURCE_H))
+    scale = max(box[0] / cw, box[1] / ch)
+    w0, h0 = box[0] / scale, box[1] / scale
+    x0, y0 = cx + (cw - w0) / 2, cy + (ch - h0) / 2
+    sx, sy = src_w / SOURCE_W, src_h / SOURCE_H
+    return (x0 * sx, y0 * sy, w0 * sx, h0 * sy)
+
+
 # ------------------------------ script / words -------------------------------
 
 def load_script_lines(path):
@@ -537,6 +575,18 @@ def load_frames_report(path):
             if isinstance(ocr, list):
                 lines += [x for x in ocr if isinstance(x, str)]
         out[(round(t, 2), b.get('src'))] = lines
+    return out
+
+
+def load_frame_counts(path):
+    """frame_checks.py `cutaways` report -> {(round(t,2), src): number of evidence frames extracted for that beat}."""
+    data = _read_json(path, 'frames report')
+    beats = data.get('beats') if isinstance(data, dict) else None
+    out = {}
+    for b in beats if isinstance(beats, list) else []:
+        t = num(b.get('t')) if isinstance(b, dict) else None
+        if t is not None:
+            out[(round(t, 2), b.get('src'))] = len([f for f in (b.get('frames') or []) if isinstance(f, dict)])
     return out
 
 

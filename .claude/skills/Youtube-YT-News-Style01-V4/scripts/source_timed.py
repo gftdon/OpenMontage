@@ -6,6 +6,7 @@
   source_timed.py from-audio <source.mp4> --out transcript_timed.json [--lang en] [--model REPO]
                              [--start SEC] [--duration SEC]
   source_timed.py merge <part1.json> <part2.json> ... --out transcript_timed.json
+                             (`merge part_*.json` is fine: the *.done.json markers of from-audio are ignored)
 
 Output: [{"start": sec, "end": sec, "text": "..."}] with every segment <= ~8 s, sorted by start.
 
@@ -17,6 +18,7 @@ one window of the video (times stay in source-video seconds); `merge` joins the 
 A finished from-audio leaves <out>.done.json (key = sha256 of audio + model + lang + window); calling it
 again with the same arguments prints "already done" and returns at once.
 
+Every malformed input ends as one `ERROR: ...` line on stderr (no traceback).
 Exit codes: 0 ok, 2 bad input, 4 tool/model/venv missing (nothing was downloaded), 1 other failure.
 """
 import argparse
@@ -44,6 +46,26 @@ class ToolMissing(Exception):
 
 
 # ---------------------------------------------------------------- shared helpers
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf')
+
+
+def load_part(path):
+    """One transcript part ([{start,end,text}], as written by from-vtt / from-json3 / from-audio) or BadInput."""
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+    except OSError as e:
+        raise BadInput(f'{path}: {e.strerror or e}')
+    except ValueError as e:
+        raise BadInput(f'{path}: not valid JSON ({e})')
+    if not isinstance(data, list):
+        raise BadInput(f'{path}: not a part file (expected a JSON list of {{start,end,text}} segments)')
+    for i, seg in enumerate(data):
+        if not (isinstance(seg, dict) and isinstance(seg.get('text'), str) and _is_num(seg.get('start')) and _is_num(seg.get('end'))):
+            raise BadInput(f'{path}: segment {i} is not {{start, end, text}} (not a part file)')
+    return data
+
 
 def _clean(text):
     return re.sub(r'\s+', ' ', text).strip()
@@ -158,11 +180,18 @@ def parse_json3(data):
     """YouTube json3 (events -> segs) -> segments, rolling duplicates removed."""
     if isinstance(data, (str, bytes)):
         data = json.loads(data)
+    if not isinstance(data, dict) or not isinstance(data.get('events') or [], list):
+        raise BadInput('not a YouTube json3 file (expected an object with an "events" list)')
     segs, last_text = [], ''
     for ev in data.get('events') or []:
+        if not isinstance(ev, dict):
+            raise BadInput('json3: every event must be an object')
         parts = ev.get('segs')
         if not parts or 'tStartMs' not in ev:
             continue
+        if (not isinstance(parts, list) or not all(isinstance(p, dict) for p in parts)
+                or not _is_num(ev['tStartMs']) or not _is_num(ev.get('dDurationMs') or 0)):
+            raise BadInput('json3: malformed event (segs must be a list of objects, tStartMs / dDurationMs numbers)')
         text = _clean(''.join(p.get('utf8', '') for p in parts))
         if not text:
             continue
@@ -320,7 +349,10 @@ def main(argv=None):
         elif a.cmd == 'from-json3':
             segs = parse_json3(Path(a.file).read_text(encoding='utf-8'))
         elif a.cmd == 'merge':
-            segs = merge_parts([json.loads(Path(f).read_text(encoding='utf-8')) for f in a.files])
+            files = [f for f in a.files if not Path(f).name.endswith('.done.json')]   # from-audio markers match `part_*.json`
+            if not files:
+                raise BadInput('merge: no part files left (only *.done.json markers were given)')
+            segs = merge_parts([load_part(f) for f in files])
         else:
             if not os.path.exists(a.file):
                 raise BadInput(f'no such file: {a.file}')
@@ -331,7 +363,7 @@ def main(argv=None):
             segs = from_audio(a.file, a.lang, a.model, a.start, a.duration)
         if not segs:
             raise BadInput('no caption text found in the input')
-    except (BadInput, OSError, json.JSONDecodeError) as e:
+    except (BadInput, OSError, ValueError) as e:      # ValueError: bad JSON / undecodable text
         print(f'ERROR: {e}', file=sys.stderr)
         return 2
     except ToolMissing as e:

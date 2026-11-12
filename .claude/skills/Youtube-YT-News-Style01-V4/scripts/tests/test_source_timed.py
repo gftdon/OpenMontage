@@ -92,6 +92,61 @@ class CliTests(unittest.TestCase):
             self.assertEqual(2, self.run_cli('from-vtt', str(Path(td) / 'missing.vtt'), '--out', str(Path(td) / 'o.json')).returncode)
             self.assertEqual(2, self.run_cli('from-audio', str(Path(td) / 'missing.mp4'), '--out', str(Path(td) / 'o.json')).returncode)
 
+    def part(self, td, name, segs):
+        p = Path(td) / name
+        p.write_text(json.dumps(segs))
+        return p
+
+    def assert_clean_error(self, proc, code=2):
+        self.assertEqual(code, proc.returncode, proc.stderr)
+        self.assertNotIn('Traceback', proc.stderr)
+        self.assertEqual(1, len(proc.stderr.strip().splitlines()), proc.stderr)   # one line
+        self.assertTrue(proc.stderr.startswith('ERROR: '), proc.stderr)
+
+    def test_merge_ignores_done_markers_of_the_documented_glob(self):
+        # `merge part_*.json` also matches the part_NNNN.json.done.json markers that from-audio writes next to each part
+        with tempfile.TemporaryDirectory() as td:
+            a = self.part(td, 'part_0001.json', [{'start': 0.0, 'end': 5.0, 'text': 'one'}])
+            b = self.part(td, 'part_0002.json', [{'start': 5.0, 'end': 9.0, 'text': 'two'}])
+            marks = [self.part(td, 'part_0001.json.done.json', {'key': 'k', 'segments': 1}), self.part(td, 'part_0002.json.done.json', {'key': 'k2'})]
+            out = Path(td) / 'merged.json'
+            proc = self.run_cli('merge', str(a), str(marks[0]), str(b), str(marks[1]), '--out', str(out))
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual(['one', 'two'], [x['text'] for x in json.loads(out.read_text())])
+            only_markers = self.run_cli('merge', str(marks[0]), '--out', str(out))
+            self.assert_clean_error(only_markers)
+
+    def test_merge_rejects_anything_that_is_not_a_part_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            good = self.part(td, 'part_0001.json', [{'start': 0.0, 'end': 5.0, 'text': 'one'}])
+            out = str(Path(td) / 'o.json')
+            for name, content in [('obj.json', {'key': 'k'}), ('str.json', 'text'), ('items.json', [1, 2]), ('nokeys.json', [{'text': 'x'}]),
+                                  ('badtime.json', [{'start': 'a', 'end': 1, 'text': 'x'}]), ('badtext.json', [{'start': 0, 'end': 1, 'text': 5}])]:
+                bad = self.part(td, name, content)
+                proc = self.run_cli('merge', str(good), str(bad), '--out', out)
+                self.assert_clean_error(proc)
+                self.assertIn(name, proc.stderr)
+            broken = Path(td) / 'broken.json'
+            broken.write_text('{not json')
+            self.assert_clean_error(self.run_cli('merge', str(good), str(broken), '--out', out))
+            self.assert_clean_error(self.run_cli('merge', str(good), str(Path(td) / 'missing.json'), '--out', out))
+
+    def test_malformed_input_of_other_subcommands_exits_2_without_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = str(Path(td) / 'o.json')
+            cases = [('from-json3', 'list.json3', '[1, 2]'), ('from-json3', 'str.json3', '"x"'), ('from-json3', 'ev.json3', '{"events": 5}'),
+                     ('from-json3', 'evitems.json3', '{"events": [1, "a"]}'), ('from-json3', 'segs.json3', '{"events": [{"tStartMs": 0, "segs": [1]}]}'),
+                     ('from-json3', 'time.json3', '{"events": [{"tStartMs": "x", "segs": [{"utf8": "a"}]}]}'),
+                     ('from-json3', 'broken.json3', '{nope')]
+            for cmd, name, content in cases:
+                f = Path(td) / name
+                f.write_text(content)
+                self.assert_clean_error(self.run_cli(cmd, str(f), '--out', out))
+            binary = Path(td) / 'bin.vtt'
+            binary.write_bytes(b'\xff\xfe\x00\x80\x81')
+            self.assert_clean_error(self.run_cli('from-vtt', str(binary), '--out', out))
+            self.assertFalse(Path(out).exists())
+
     def test_from_audio_exit_4_when_model_or_venv_missing_and_never_downloads(self):
         with tempfile.TemporaryDirectory() as td:
             src = Path(td) / 'a.wav'

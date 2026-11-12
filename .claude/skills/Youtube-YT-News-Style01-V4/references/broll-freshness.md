@@ -8,9 +8,7 @@
 
 ใน V4 beats อยู่ใน `artifacts/episode.json` (field `beats`; ตาราง `brollDur` อยู่ในไฟล์เดียวกัน) ไม่ใช่ `BEATS` ใน TSX
 
-<!-- TODO(lead): verify after rebase: check_broll.py ยังอ่าน TSX composition (positional `composition`); การแปลงให้อ่าน episode.json กำลังทำโดยทีมอื่น คำสั่งด้านล่างเขียนตามรูปแบบใหม่ที่คาดไว้ ตรวจ `--help` อีกครั้งหลัง rebase -->
-
-Production command (รันเมื่อได้รับอนุญาตให้เขียน ledger เท่านั้น; `--media-dir` และ `--cuts` บังคับ):
+Production command (รันเมื่อได้รับอนุญาตให้เขียน ledger เท่านั้น; `episode.json` เป็น positional แรก — ส่ง `.tsx` = exit 2; `--media-dir`, `--manifest` และ `--cuts` บังคับ; exit 0 = ผ่าน, 1 = พบการซ้ำ/ผิดกฎ, 2 = อินพุตผิด):
 
 ```bash
 python3 .claude/skills/Youtube-YT-News-Style01-V4/scripts/check_broll.py projects/<slug>/artifacts/episode.json \
@@ -20,5 +18,7 @@ python3 .claude/skills/Youtube-YT-News-Style01-V4/scripts/check_broll.py project
 ```
 
 `--manifest` คือ `_manifest.json` ที่ writer (`fetch_broll.py` / `transcode_broll.sh`) เขียน ห้ามเขียนมือ ถ้าตอนนี้ไม่มี stock เลยและไม่มีไฟล์นี้ ให้ข้าม `check_broll.py` แล้วจดในรายงานขั้นตอนว่า "ไม่มี stock" (source clip ถูกคุมซ้ำโดย `lint_content.py` `source-reuse` และ `frame_checks.py` `shot-reuse` อยู่แล้ว) `--usage-report <file>` เป็นตัวเลือก (รายงาน identity ใต้ผิว) `--max-old 0..2` จำกัดจำนวน stock เก่า (ค่าเริ่ม 2)
+
+เมื่อได้รับอนุญาตให้เขียน ledger และมี stock: บันทึกการใช้ด้วย `broll_ledger.py record <assetDir> --episode projects/<slug>/artifacts/episode.json [--manifest ...]` (ใช้ `--episode`; `--composition` เป็น error ใน V4) และ coverage/cache ของ `broll_plan.py`/`batch_relevance.py`/`score_relevance.py` ผูกกับ `episode_sha256` ของ `episode.json` (อ่านผ่าน `--beats <episode.json>`)
 
 Checker seed ledger ที่เลือกเองอัตโนมัติ สำหรับ regression test ให้ใช้ ledger/project/public root แยก ห้ามชี้ test ไปที่ ledger หลัก stock เก่าจาก regression ถือว่า "เก่า" เสมอ: gate ของ engine ผ่านไม่ได้แปลว่า freshness ผ่าน ห้ามลดเพดานหรือปลอม fetch manifest เพื่ออ้างว่า fresh ห้ามเขียน ledger จริงจากโปรเจกต์ทดสอบ และห้ามเขียน ledger หลักก่อนส่งมอบได้รับอนุญาต

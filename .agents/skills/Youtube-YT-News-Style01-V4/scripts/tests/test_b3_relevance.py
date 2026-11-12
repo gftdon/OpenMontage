@@ -73,12 +73,14 @@ class B3Tests(unittest.TestCase):
   import batch_relevance as b
   from unittest.mock import patch
   media=self.p/'stock.mp4';media.write_bytes(b'media');context={'timing_inputs':{'wordTimingSha256':'a'*64,'scriptSha256':'b'*64},'narration_cues':[{'id':'c1','start':0,'end':2,'text':'spoken'}],'inputs':{'w':'a'*64,'s':'b'*64},'timing_authority':'existing-word-spine','sync_verification':{'status':'accepted','reference':'test','wordTimingSha256':'a'*64,'scriptSha256':'b'*64}}
-  plan={'schema':'a44-broll-plan-1','beats':[{'id':'b1','t':0,'end':2,'cue_ids':['c1'],'spoken':'spoken','query':'specific scene','semantic_rationale':'shows scene','selected':{'tier':'stock','path':'stock.mp4','identity':'pixabay:1'},'rejected_tiers':[{'tier':'source','reason':'no matching source'},{'tier':'ai','reason':'real scene preferred'}]}]};beats=[{'t':0,'end':2,'src':'stock','origin':'stock','mode':'pip','media':'broll','layout':'full'},{'t':2,'mode':'full'},{'t':4,'mode':'pip','media':'typo','src':'card'}];records={'stock':{'pixabay_id':'1','sha256':s.file_sha256(media),'duration':3}}
-  with patch('broll_ledger.parse_beats',return_value=beats),patch.object(b,'probe_duration',return_value=3),patch.object(b,'parse_renderer_durations',return_value={'stock':3}),patch.object(s,'extract_frame',return_value=JPEG):
-   rows=b.prepare_rows(plan,context,'const VO_END_SEC = 6;',records,self.p,self.p/'frames',self.b.config)
+  plan={'schema':'a44-broll-plan-1','beats':[{'id':'b1','t':0,'end':2,'cue_ids':['c1'],'spoken':'spoken','query':'specific scene','semantic_rationale':'shows scene','selected':{'tier':'stock','path':'stock.mp4','identity':'pixabay:1'},'rejected_tiers':[{'tier':'source','reason':'no matching source'},{'tier':'ai','reason':'real scene preferred'}]}]};records={'stock':{'pixabay_id':'1','sha256':s.file_sha256(media),'duration':3}}
+  import broll_plan as bp
+  episode=bp.load_v4_episode(Path(__file__).resolve().parent/'fixtures/a67/broll/stock-full-typo.json')
+  with patch.object(b,'probe_duration',return_value=3),patch.object(s,'extract_frame',return_value=JPEG):
+   rows=b.prepare_rows(plan,context,episode,records,self.p,self.p/'frames',self.b.config)
    self.assertEqual(len(rows),1);self.assertEqual(rows[0]['identity']['identity'],'pixabay:1');self.assertEqual(rows[0]['identity']['cue_ids'],['c1']);self.assertEqual(rows[0]['identity']['sha256'],s.file_sha256(media))
    changed=json.loads(json.dumps(plan));changed['beats'][0]['selected']['identity']='pixabay:2'
-   with self.assertRaises(ValueError):b.prepare_rows(changed,context,'const VO_END_SEC = 6;',records,self.p,self.p/'frames',self.b.config)
+   with self.assertRaises(ValueError):b.prepare_rows(changed,context,episode,records,self.p,self.p/'frames',self.b.config)
  def test_http_failed_count_response_zero_generate_and_ai_true_single_native_call(self):
   import batch_relevance as b
   row={'id':'ai','frame':JPEG,'spoken':'spoken','identity':self.identity()};calls=[]

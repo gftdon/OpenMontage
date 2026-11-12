@@ -1,0 +1,23 @@
+{
+  "schema": "yt-news-v4-episode/1",
+  "assetDir": "a67-broll",
+  "fps": 25,
+  "voEndSec": 2,
+  "totalDurationSec": 6,
+  "ctaT": 1,
+  "brollDur": {
+    "stock": 3
+  },
+  "beats": [
+    {
+      "t": 0,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "stock",
+      "origin": "stock",
+      "headline": "หัวข้อ",
+      "sub": "คำอธิบาย"
+    }
+  ]
+}

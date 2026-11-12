@@ -9,10 +9,14 @@ first), (3) the reports of the long jobs (layout sweep, render, mux, relevance, 
 hash binding, (4) only if every one of them passes the final mp4 is copied to --deliver and a delivery receipt is
 written.  There is deliberately NO flag and NO environment variable that skips or downgrades a gate.
 
+ONE deadline covers the whole invocation (TOTAL_BUDGET_SEC, lock/git checks + gates + verification + copy); when it
+runs out the command ends with exit 4 and a FAILED file that names the phase.  The tools (node, ffmpeg, ffprobe, git,
+swift) are resolved once to absolute realpaths and the gates run with a fixed minimal PATH.
+
 Exit codes (precedence): 3 integrity > 4 tool/gate missing, crash or timeout > 2 stale/missing report or bad
 input > 1 quality failure; 0 delivered (or --check: everything would pass).
 A relative --project is resolved against the repository root (git top level of this skill), --deliver against
-the current directory.
+the current directory.  --composer must be <repo root>/remotion-composer (anything else is exit 3).
 """
 import argparse
 import atexit
@@ -43,19 +47,28 @@ COMP = 'YtNewsStyle01V4'                  # the single composition; there is no 
 RECEIPT_SCHEMA = 'yt-news-v4-delivery-receipt'
 FAILED_SCHEMA = 'yt-news-v4-finalize-failed'
 CHECK_SCHEMA = 'yt-news-v4-finalize-check'
-TOTAL_BUDGET_SEC = 420          # unattended commands are killed after ~10 min; stay well below
+# One deadline for the whole invocation; unattended commands are killed after ~10 min.  The gates may only use the
+# time up to TOTAL - POST_RESERVE; the rest is kept for verification + delivery.  A delivery copy is only started
+# with DELIVER_RESERVE_SEC left.  Worst case wall time = TOTAL_BUDGET_SEC + the 5 s kill grace of one child.
+TOTAL_BUDGET_SEC = 450
+POST_RESERVE_SEC = 90
+DELIVER_RESERVE_SEC = 20
+GIT_TIMEOUT_SEC = 20
 MAX_WORKERS = 3
 STALE_TOLERANCE_NS = 2_000_000_000
 RUN_LOCK_NAME = '.finalize.lock'
-RUN_LOCK_STALE_SEC = 15 * 60
+RUN_LOCK_STALE_SEC = 15 * 60     # only a guard against pid reuse: a lock whose pid is dead is stale at once
 FRAME_TOLERANCE_SEC = 0.04       # final duration vs totalDurationSec
+TOOL_NAMES = ('node', 'ffmpeg', 'ffprobe', 'git', 'swift')
 
 # =================================================================================================================
-# CONTRACT with the other team's scripts (CF-A66, commit 907b80a).  EVERY field / flag name of those scripts that
+# CONTRACT with the other team's scripts (CF-A66, commit 9b0c7f7).  EVERY field / flag name of those scripts that
 # finalize depends on lives in this section; if their code changes, change it here only.
-# Where code and gate-spec disagreed the CODE wins (see the notes).
+# Verified against the real files at 9b0c7f7; where code and gate-spec disagreed the CODE wins (see the notes).
 # =================================================================================================================
 # -- qc_layout / qc_report.mjs : layout report v3 (<project>/qc/layout/report.json) -----------------------------
+#    keys used: schema, version, status ("finished"), pass, complete, requestedCount, fullPlanCount, compositionId,
+#    runId, manifestHash, manifestPath (RELATIVE to the layout --out dir, as qc_layout.mjs writes it), reusedFrames.
 LAYOUT_REPORT_SCHEMA = 'yt-news-layout-report'
 LAYOUT_REPORT_VERSION = 3
 # -- qc_manifest.mjs : run manifest + manifestHash() (we call the JS function; canonical JSON is NOT re-implemented)
@@ -64,89 +77,142 @@ QC_MANIFEST_SCRIPT = 'qc_manifest.mjs'
 MANIFEST_KEY_EPISODE = 'episode.json'            # keys of manifest.sourceHashes (computeSourceHashes)
 MANIFEST_KEY_CAPTIONS = 'captions.json'
 MANIFEST_KEY_LOCK = 'scripts/gates.lock.json'
-# -- render_episode.mjs : render receipt <visual>.receipt.json (RECEIPT_FIELDS) ---------------------------------
+# -- render_episode.mjs : render receipt <visual>.receipt.json (RECEIPT_FIELDS; written next to the output file as
+#    `<out>.receipt.json`).  keys used: schema, schemaVersion, compositionId, draft (must be false), hasAudio (must be
+#    false), outputSha256 (the visual), episodeJsonSha256, captionsJsonSha256, gatesLockSha256 (null without a lock),
+#    gateManifestHash, gateRunId, renderId, width, height, fps, frameCount (checked against ffprobe of the visual).
+#    The render reads public/ from <composer>/public.
 RENDER_RECEIPT_SUFFIX = '.receipt.json'
 RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
-# -- episode.json (episode_schema.mjs): top level voEndSec, totalDurationSec, assetDir, avatarFile ---------------
+# -- episode.json (episode_schema.mjs): top level voEndSec, totalDurationSec, assetDir, avatarFile.  The media of an
+#    episode live in <composer>/public/<assetDir>/ (broll/<src>.mp4, <avatarFile>): same convention as qc_layout.mjs
+#    and render_episode.mjs (path.join(composer, 'public')).
 # -- qc_final_pixels.mjs : `node qc_final_pixels.mjs <video.mp4> <out-dir> [--vo-end s]` (positional out-dir; the
 #    gate-spec/coordinator note said --out-dir, the CODE rejects it as "unknown option"); report <out-dir>/final-pixels.json
-#    with videoSha256 + certified.  --allow-draft is NEVER passed.
-# -- episode_schema.mjs : `validate <episode> --captions <captions> --json` -> stdout {valid, errors[{path,rule,message}]}
-# -- gate_integrity.mjs : `<composer-dir> --json --skill-dir <dir>` -> stdout {ok, issues[{id,message}]}, exit 3 refused
-# -- mux_av.sh (ours) : <final>.mux.json {visual, avatar, bed, final: {path, sha256}}
+#    with videoSha256 + certified + pass; exit 0 pass / 1 dips / 2 error.  --allow-draft is NEVER passed.
+# -- episode_schema.mjs : `validate <episode> --captions <captions> --public <composer>/public --json` -> stdout
+#    {valid, errors[{path,rule,message}], warnings, schemaSha256}; exit 0 valid / 1 invalid / 2 usage-IO (also a
+#    --public directory that does not exist).  --public turns on the S07-file rule (every media file must exist).
+# -- gate_integrity.mjs : `<composer-dir> --json --skill-dir <dir> --require-lock` -> stdout {ok, issues[{id,message}],
+#    warnings, lock}, exit 0 / 3 refused / 2 usage.  Without --require-lock a missing lock is only a WARNING, so it is
+#    always passed.  Its lock check needs the skill dir to sit at <repo>/.claude|.agents/skills/<skill>.  Exit 3 is an
+#    INTEGRITY refusal (class 3 -> finalize exit 3).
+# -- gates_lock.py (ours) : REQUIRED_EXTERNAL lives there (ONE place); finalize imports it and refuses a lock that does
+#    not list every path ("external-not-locked", exit 3).  The final list comes from the engine team (CF-A66).
+# -- lint_content.py : --captions (same file as the schema gate) and --evidence / --frames-report / --source-timed (optional;
+#    lint itself reports evidence-missing, window-evidence-unavailable, cue-mismatch when a source beat lacks them, so passing
+#    what exists never hides an error)
+# -- frame_checks.py cutaways : --media-root <composer>/public/<assetDir>/broll (the files the render really uses)
+# -- timing_check.py : --audio <avatar media the words were measured on> --words <words_by_line.txt> --line-starts
+#    <line_starts.json> --srt <project>/assets/avatar.srt (required here: without --srt the `srt-copied` check would not
+#    run); exit 0/1/2/4
+# -- srt_to_script.py : `--srt S --script SRC --strict --out O`, exit 0 ok / 1 SRT text differs from the source script
+# -- words_by_line.py <pages> <script> (stdout) / line_starts.py --pages P --script S --out O / caption_join.mjs
+#    --tokens P --script S --options <caption-options.json> --out O : the commands of SKILL step 2, re-run by the
+#    `derived` gate; their outputs must be byte-identical to the artifacts
+# -- word_timing.sh : leaves <word_timing dir>/word_timing.done.json {key, output, output_sha256, model, ...}; output_sha256
+#    is the sha256 of caption_pages.json.  `key` hashes (audio sha, script sha, tool id, model, args): the audio hash alone is
+#    NOT recorded, so the audio binding is only checked statistically by the timing gate
+# -- mux_av.sh (ours) : <final>.mux.json {visual, avatar, bed, final: {path (absolute), sha256}}; the video is stream-copied
+#    (-c:v copy) so the video packets of final.mp4 must equal those of visual.mp4
+# -- fetch_broll.py --music : <bed>.source.json {schema "yt-news-v4-music-source", provider, track_id, track_title, url,
+#    query, sha256, fetched_at}; sha256 must equal the bed file's sha256
 # =================================================================================================================
 
 # -- conventions (override ONLY via the manifest, and only the keys in OVERRIDABLE) ----------------------------
+# key -> default path (relative to the project).  Required unless the key is in OPTIONAL_KEYS (missing = exit 2).
 DEFAULT_PATHS = {
     'episode': 'artifacts/episode.json',
     'script': 'artifacts/script.txt',
-    'source_script': 'artifacts/source_script.txt',      # optional
+    'source_script': 'artifacts/source_script.txt',      # required: the `script` gate rebuilds script.txt from it
+    'srt': 'assets/avatar.srt',                          # required: vendor SRT (script rebuild + srt-copied check)
     'words': 'artifacts/words_by_line.txt',
     'line_starts': 'artifacts/line_starts.json',
+    'word_pages': 'artifacts/word_timing/caption_pages.json',   # required, not overridable: raw word timing
+    'caption_options': 'artifacts/caption-options.json',        # required, not overridable: only endTime/lexicalOverrides
     'captions': 'artifacts/caption-joined.json',
     'cuts': 'artifacts/_cuts.json',
     'source_transcript': 'assets/ytsource/transcript.txt',  # optional
+    'source_timed': 'assets/ytsource/transcript_timed.json',  # optional (lint_content treats absence as "no timed transcript")
+    'evidence': 'artifacts/visual_evidence.json',            # optional (lint_content fails source beats that lack an entry)
     'chapters': 'assets/ytsource/chapters.txt',              # optional
     'relevance': 'artifacts/relevance.json',                 # optional (absent is allowed)
-    'media_roots': ['assets/broll', 'assets/ytsource/clips'],
     'layout_report': 'qc/layout/report.json',
     'visual': 'renders/visual.mp4',
     'final': 'renders/final.mp4',
     'reports': 'qc/finalize',
 }
-OPTIONAL_KEYS = {'source_script', 'source_transcript', 'chapters', 'relevance'}
-OVERRIDABLE = {'script', 'source_script', 'words', 'line_starts', 'cuts', 'source_transcript', 'chapters', 'media_roots'}
+OPTIONAL_KEYS = {'source_transcript', 'source_timed', 'evidence', 'chapters', 'relevance'}
+# overridable = inputs the agent (or the fetch step) produces; gate-owned outputs, receipts and the raw timing are never
+OVERRIDABLE = {'script', 'source_script', 'srt', 'words', 'line_starts', 'cuts', 'source_transcript', 'source_timed',
+               'evidence', 'chapters'}
 FORBIDDEN_OVERRIDES = set(DEFAULT_PATHS) - OVERRIDABLE
+# derived-from-episode inputs (not path keys): avatar = <composer>/public/<assetDir>/<avatarFile>,
+# word_done = <dir of word_pages>/word_timing.done.json, broll_root = <composer>/public/<assetDir>/broll
 
 # -- gate registry (data-driven; long gates first so they start first) -----------------------------------------
 # name, interp ('python'|'node'), script (file in this scripts dir), args (templates; {key} = project path,
-# {report}, {reports}, {vo_end}, {composer}, {skill}), optional_args [[flag,key]] (only when the file exists),
-# repeat_args [[flag,key-of-list]], inputs (required path keys, also hashed into the receipt), needs (episode values
-# that must be readable), need_any, report (template), limit (s), required, validate (extra validator name),
-# stdout_report (finalize stores the tool's stdout JSON at `report`), pass_key (report key that must be True),
-# exit_classes (extra exit code -> class).
+# {report}, {reports}, {vo_end}, {composer}, {public}, {avatar}, {broll_root}, {skill}), optional_args [[flag,key]]
+# (only when the file exists), inputs (required path keys, also hashed into the receipt; 'avatar' and 'word_done' are the
+# derived inputs above), needs (episode values that must be readable), need_dirs (ctx attributes that must be
+# directories), report (template), limit (s), required, validate (extra validator name), stdout_report (finalize stores
+# the tool's stdout JSON at `report`), pass_key (report key that must be True), exit_classes (extra exit code -> class),
+# after [gate names] (start only when those gates have FINISHED; if one did not pass this gate is 'blocked' with the
+# same exit class and does not run), dep_args [[flag, gate name]] (the report that gate wrote in THIS run),
+# runner (a gate that runs several commands / compares files and writes its own report; scripts = the files it needs).
 GATES = [
     dict(name='frames', interp='python', script='frame_checks.py',
          args=['cutaways', '--beats', '{episode}', '--cuts', '{cuts}', '--frames-dir', '{reports}/frames',
-               '--report', '{report}', '--cache-dir', '{reports}/cache'],
-         optional_args=[], repeat_args=[['--media-root', 'media_roots']], inputs=['episode', 'cuts'], needs=[],
-         need_any=['media_roots'], report='{reports}/frames.json', limit=150, required=True),
+               '--report', '{report}', '--cache-dir', '{reports}/cache', '--media-root', '{broll_root}'],
+         optional_args=[], inputs=['episode', 'cuts'], needs=['asset_dir'], need_dirs=['broll_root'],
+         report='{reports}/frames.json', limit=150, required=True),
     dict(name='final-av', interp='python', script='final_av_checks.py',
          args=['{final}', '--report', '{report}', '--ignore-from', '{vo_end}'],
-         optional_args=[], repeat_args=[], inputs=['final'], needs=['vo_end'], need_any=[],
+         optional_args=[], inputs=['final'], needs=['vo_end'],
          report='{reports}/final-av.json', limit=120, required=True),
     dict(name='final-pixels', interp='node', script='qc_final_pixels.mjs',
-         args=['{final}', '{reports}/final-pixels', '--vo-end', '{vo_end}'], optional_args=[], repeat_args=[],
-         inputs=['final'], needs=['vo_end'], need_any=[], report='{reports}/final-pixels/final-pixels.json',
+         args=['{final}', '{reports}/final-pixels', '--vo-end', '{vo_end}'], optional_args=[],
+         inputs=['final'], needs=['vo_end'], report='{reports}/final-pixels/final-pixels.json',
          limit=120, required=True, validate='final_pixels'),
     dict(name='loudness', interp='python', script='measure_loudness.py', args=['{final}', '--report', '{report}'],
-         optional_args=[], repeat_args=[], inputs=['final'], needs=[], need_any=[], report='{reports}/final-audio.json',
+         optional_args=[], inputs=['final'], needs=[], report='{reports}/final-audio.json',
          limit=60, required=True),
+    dict(name='timing', interp='python', script='timing_check.py',
+         args=['--audio', '{avatar}', '--words', '{words}', '--line-starts', '{line_starts}', '--srt', '{srt}',
+               '--report', '{report}'],
+         optional_args=[], inputs=['avatar', 'words', 'line_starts', 'srt'], needs=['asset_dir', 'avatar_file'],
+         report='{reports}/timing.json', limit=120, required=True),
     dict(name='schema', interp='node', script='episode_schema.mjs',
-         args=['validate', '{episode}', '--captions', '{captions}', '--json'], optional_args=[], repeat_args=[],
-         inputs=['episode', 'captions'], needs=[], need_any=[], report='{reports}/schema.json', limit=30,
+         args=['validate', '{episode}', '--captions', '{captions}', '--public', '{public}', '--json'],
+         optional_args=[], inputs=['episode', 'captions'], needs=[], report='{reports}/schema.json', limit=30,
          required=True, stdout_report=True, pass_key='valid'),
     dict(name='gate-integrity', interp='node', script='gate_integrity.mjs',
-         args=['{composer}', '--json', '--skill-dir', '{skill}'], optional_args=[], repeat_args=[], inputs=[],
-         needs=[], need_any=[], report='{reports}/gate-integrity.json', limit=60, required=True,
-         stdout_report=True, pass_key='ok', exit_classes={3: 1}),
+         args=['{composer}', '--json', '--skill-dir', '{skill}', '--require-lock'], optional_args=[], inputs=[],
+         needs=[], report='{reports}/gate-integrity.json', limit=60, required=True,
+         stdout_report=True, pass_key='ok', exit_classes={3: 3}),
     dict(name='beats', interp='python', script='lint_beats.py', args=['{episode}', '--report', '{report}'],
-         optional_args=[], repeat_args=[], inputs=['episode'], needs=[], need_any=[], report='{reports}/beats.json',
+         optional_args=[], inputs=['episode'], needs=[], report='{reports}/beats.json',
          limit=30, required=True),
     dict(name='content', interp='python', script='lint_content.py',
          args=['--beats', '{episode}', '--script', '{script}', '--words', '{words}', '--line-starts', '{line_starts}',
-               '--cuts', '{cuts}', '--report', '{report}'],
+               '--cuts', '{cuts}', '--captions', '{captions}', '--report', '{report}'],
          optional_args=[['--source-transcript', 'source_transcript'], ['--chapters', 'chapters'],
-                        ['--relevance', 'relevance']],
-         repeat_args=[], inputs=['episode', 'script', 'words', 'line_starts', 'cuts'], needs=[], need_any=[],
-         report='{reports}/content.json', limit=60, required=True),
+                        ['--relevance', 'relevance'], ['--evidence', 'evidence'], ['--source-timed', 'source_timed']],
+         inputs=['episode', 'script', 'words', 'line_starts', 'cuts', 'captions'], needs=[],
+         report='{reports}/content.json', limit=60, required=True,
+         after=['frames'], dep_args=[['--frames-report', 'frames']]),
     dict(name='captions', interp='python', script='lint_captions.py',
-         args=['--script', '{script}', '--pages', '{captions}', '--report', '{report}'],
-         optional_args=[['--source-script', 'source_script']], repeat_args=[], inputs=['script', 'captions'],
-         needs=[], need_any=[], report='{reports}/captions.json', limit=60, required=True),
+         args=['--script', '{script}', '--pages', '{captions}', '--source-script', '{source_script}', '--report', '{report}'],
+         optional_args=[], inputs=['script', 'captions', 'source_script'],
+         needs=[], report='{reports}/captions.json', limit=60, required=True),
+    dict(name='script', runner='script', scripts=['srt_to_script.py'], optional_args=[],
+         inputs=['srt', 'source_script', 'script'], needs=[], report='{reports}/script.json', limit=30, required=True),
+    dict(name='derived', runner='derived', scripts=['words_by_line.py', 'line_starts.py', 'caption_join.mjs'], optional_args=[],
+         inputs=['word_pages', 'word_done', 'caption_options', 'script', 'words', 'line_starts', 'captions'],
+         needs=['vo_end'], report='{reports}/derived.json', limit=90, required=True),
 ]
 
-STATUS_BY_CLASS = {1: 'fail', 2: 'bad-input', 4: 'missing'}
+STATUS_BY_CLASS = {1: 'fail', 2: 'bad-input', 3: 'integrity', 4: 'missing'}
 RESTORE_HINT = 'restore the skill files from git HEAD; never edit or regenerate gates.lock.json'
 
 
@@ -250,10 +316,17 @@ def inside(path, root):
 # ---------------------------------------------------------------- child process hygiene
 ACTIVE_PGIDS = set()
 _ACTIVE_LOCK = threading.Lock()
+STOP = threading.Event()          # set by SIGTERM/SIGINT: no child may be started afterwards
 
 
 class Terminated(Exception):
     pass
+
+
+class BudgetExceeded(Exception):
+    def __init__(self, phase, message=None):
+        super().__init__(message or 'time budget exhausted during phase "%s"' % phase)
+        self.phase = phase
 
 
 def kill_all():
@@ -270,8 +343,78 @@ atexit.register(kill_all)
 
 
 def _on_signal(signum, _frame):
+    STOP.set()
     kill_all()
     raise Terminated('terminated by signal %d' % signum)
+
+
+class Deadline:
+    """One monotonic deadline for the whole invocation."""
+
+    def __init__(self, total):
+        self.total = total
+        self.end = time.monotonic() + total
+
+    def remaining(self, reserve=0.0):
+        return self.end - time.monotonic() - reserve
+
+    def expired(self):
+        return self.remaining() <= 0
+
+
+# ---------------------------------------------------------------- tools (resolved once, absolute realpaths)
+def resolve_tools():
+    out = {}
+    for name in TOOL_NAMES:
+        found = shutil.which(name)
+        out[name] = os.path.realpath(found) if found else None
+    return out
+
+
+def tool_path_env(tools):
+    dirs = []
+    for name in TOOL_NAMES:
+        if tools.get(name):
+            d = os.path.dirname(tools[name])
+            if d not in dirs:
+                dirs.append(d)
+    return ':'.join(dirs + ['/usr/bin', '/bin'])
+
+
+def gate_env(tools):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ('PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONINSPECT', 'NODE_OPTIONS', 'NODE_PATH', 'PATH')
+           and not k.startswith('GIT_')}
+    env['PATH'] = tool_path_env(tools)
+    return env
+
+
+def git_env():
+    """No GIT_* from the caller except what is set here."""
+    return {k: v for k, v in os.environ.items() if not k.startswith('GIT_')} | {
+        'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
+
+
+def git_run(tools, repo_root, *args, deadline=None):
+    timeout = GIT_TIMEOUT_SEC
+    if deadline is not None:
+        timeout = min(timeout, deadline.remaining())
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired('git', 0)
+    return subprocess.run([tools.get('git') or 'git', '-c', 'core.fsmonitor=false', '-C', str(repo_root), *args],
+                          capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=git_env())
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- context
@@ -280,8 +423,9 @@ class BadInput(Exception):
 
 
 class Ctx:
-    def __init__(self, args, repo_root, deliver):
+    def __init__(self, args, repo_root, deliver, tools=None):
         self.repo_root = repo_root
+        self.tools = tools or {n: None for n in TOOL_NAMES}
         p = Path(args.project)
         self.project = (p if p.is_absolute() else self.repo_root / p).resolve()
         self.comp = COMP
@@ -289,7 +433,7 @@ class Ctx:
         self.hash = Hasher()
         self.composer = (self.repo_root / args.composer).resolve()
         self.manifest_sha = None
-        cfg = {k: (list(v) if isinstance(v, list) else v) for k, v in DEFAULT_PATHS.items()}
+        cfg = dict(DEFAULT_PATHS)
         explicit = set()
         mp = Path(args.manifest).resolve() if args.manifest else self.project / 'artifacts' / 'finalize.json'
         if args.manifest or mp.is_file():
@@ -303,35 +447,35 @@ class Ctx:
             if forbidden:
                 raise BadInput('manifest may not override: %s' % ', '.join(forbidden))
             for k, v in data.items():
-                values = v if k == 'media_roots' else [v]
-                if not (isinstance(values, list) and values and all(isinstance(x, str) and x for x in values)):
+                if not (isinstance(v, str) and v):
                     raise BadInput('manifest key %s has an invalid value' % k)
-                for x in values:
-                    if Path(x).is_absolute() or '..' in Path(x).parts:
-                        raise BadInput('manifest key %s: absolute paths and ".." are not allowed (%s)' % (k, x))
+                if Path(v).is_absolute() or '..' in Path(v).parts:
+                    raise BadInput('manifest key %s: absolute paths and ".." are not allowed (%s)' % (k, v))
                 cfg[k] = v
                 explicit.add(k)
             self.manifest_sha = sha256_file(mp)
         self.paths = {}
         for k, v in cfg.items():
-            if k == 'media_roots':
-                self.paths[k] = [(self.project / x).resolve() for x in v]
-                bad = [x for x in self.paths[k] if not inside(x, self.project)]
-            else:
-                self.paths[k] = (self.project / v).resolve()
-                bad = [] if inside(self.paths[k], self.project) else [self.paths[k]]
-            if bad:
-                raise BadInput('%s resolves outside the project: %s' % (k, bad[0]))
+            self.paths[k] = (self.project / v).resolve()
+            if not inside(self.paths[k], self.project):
+                raise BadInput('%s resolves outside the project: %s' % (k, self.paths[k]))
         for k in explicit & OPTIONAL_KEYS:
             if not self.paths[k].is_file():
                 raise BadInput('manifest sets optional %s but %s does not exist' % (k, self.paths[k]))
         self.reports = self.paths['reports']
         if self.deliver.suffix.lower() != '.mp4':
             raise BadInput('--deliver must be an .mp4 path')
-        if self.deliver == self.paths['final']:
-            raise BadInput('--deliver must differ from the final render path')
+        self.public = self.composer / 'public'          # same convention as qc_layout.mjs / render_episode.mjs
         self.ep = {'vo_end': None, 'total': None, 'asset_dir': None, 'avatar_file': None, 'error': None}
+        self.avatar = None
+        self.broll_root = None
         self._read_episode()
+        if self.ep['asset_dir']:
+            self.broll_root = self.public / self.ep['asset_dir'] / 'broll'
+            if self.ep['avatar_file']:
+                self.avatar = self.public / self.ep['asset_dir'] / self.ep['avatar_file']
+        self.word_done = self.paths['word_pages'].parent / 'word_timing.done.json'
+        self.extra = {'avatar': self.avatar, 'word_done': self.word_done}
 
     def _read_episode(self):
         data, err = read_json(self.paths['episode'])
@@ -357,6 +501,24 @@ class Ctx:
 
     def receipt_path(self, key, suffix):
         return Path(str(self.paths[key]) + suffix)
+
+    def input_files(self):
+        files = [p for p in self.paths.values()] + [p for p in self.extra.values() if p is not None]
+        files += [LOCK_FILE, Path(str(self.paths['visual']) + RENDER_RECEIPT_SUFFIX), Path(str(self.paths['final']) + '.mux.json')]
+        return files
+
+    def deliver_collision(self):
+        """-> message when the deliver path is (a link to / the same file as) any input of the run."""
+        target = Path(os.path.realpath(self.deliver))
+        for f in self.input_files():
+            try:
+                same = Path(os.path.realpath(f)) == target or (os.path.exists(f) and os.path.exists(self.deliver)
+                                                               and os.path.samefile(f, self.deliver))
+            except OSError:
+                same = False
+            if same:
+                return '--deliver resolves to an input file of this run: %s' % self.rel(f)
+        return None
 
 
 # ---------------------------------------------------------------- reports: issue summaries
@@ -396,35 +558,66 @@ def final_pixels_validator(report, ctx):
 
 
 VALIDATORS = {'final_pixels': final_pixels_validator}
+GATE_BY_NAME = {g['name']: g for g in GATES}
 
 
-def build_command(gate, ctx):
-    """Return (argv-without-interpreter, report path, input paths, problems)."""
+def gate_report_path(name, ctx):
+    return Path(GATE_BY_NAME[name]['report'].format(reports=ctx.reports))
+
+
+def input_path(ctx, key):
+    return ctx.extra[key] if key in ctx.extra else ctx.paths[key]
+
+
+def dependency_block(gate, deps):
+    """-> (class, message) when a gate this one waits for did not pass, else None."""
+    for name in gate.get('after', []):
+        rec = (deps or {}).get(name)
+        if rec is None:
+            return 4, 'blocked: %s did not run' % name
+        if rec['status'] != 'pass':
+            return (rec['cls'] or 4), 'blocked: the %s gate did not pass (%s); its report is needed first' % (name, rec['status'])
+    return None
+
+
+def build_command(gate, ctx, deps=None):
+    """Return (argv-without-interpreter, report path, input paths, problems).  deps: {gate name: finished record};
+    None while only the inputs are being collected (dependent reports are added by run_gate)."""
     report = Path(gate['report'].format(reports=ctx.reports))
-    ph = {k: str(v) for k, v in ctx.paths.items() if not isinstance(v, list)}
+    ph = {k: str(v) for k, v in ctx.paths.items()}
     ph.update(report=str(report), reports=str(ctx.reports), composer=str(ctx.composer), skill=str(SKILL_DIR),
+              public=str(ctx.public), avatar='' if ctx.avatar is None else str(ctx.avatar),
+              broll_root='' if ctx.broll_root is None else str(ctx.broll_root),
               vo_end='' if ctx.ep['vo_end'] is None else repr(ctx.ep['vo_end']))
     problems, inputs = [], []
     for key in gate['inputs']:
-        if not ctx.paths[key].is_file():
-            problems.append('required input %s missing: %s' % (key, ctx.rel(ctx.paths[key])))
+        path = input_path(ctx, key)
+        if path is None:
+            problems.append('required input %s missing: episode.json has no assetDir/avatarFile' % key)
+        elif not path.is_file():
+            problems.append('required input %s missing: %s' % (key, ctx.rel(path)))
         else:
-            inputs.append(ctx.paths[key])
+            inputs.append(path)
     for need in gate.get('needs', []):
         if ctx.ep.get(need) is None:
             problems.append('%s unavailable: %s' % (need, ctx.ep['error'] or 'not in episode.json'))
-    argv = [a.format(**ph) for a in gate['args']]
+    argv = [a.format(**ph) for a in gate.get('args', [])]
     for flag, key in gate.get('optional_args', []):
         if ctx.paths[key].is_file():
             argv += [flag, str(ctx.paths[key])]
             inputs.append(ctx.paths[key])
-    for flag, key in gate.get('repeat_args', []):
-        for p in ctx.paths[key]:
-            if p.is_dir():
-                argv += [flag, str(p)]
-    for key in gate.get('need_any', []):
-        if not any(p.exists() for p in ctx.paths[key]):
-            problems.append('none of the %s exist' % key)
+    for name in gate.get('need_dirs', []):
+        d = getattr(ctx, name)
+        if d is None or not d.is_dir():
+            problems.append('%s is not a directory: %s' % (name, 'unknown (no assetDir)' if d is None else ctx.rel(d)))
+    if deps is not None:
+        for flag, name in gate.get('dep_args', []):
+            dep_report = gate_report_path(name, ctx)
+            if not dep_report.is_file():
+                problems.append('blocked: the %s gate wrote no report at %s' % (name, ctx.rel(dep_report)))
+            else:
+                argv += [flag, str(dep_report)]
+                inputs.append(dep_report)
     return argv, report, inputs, problems
 
 
@@ -450,47 +643,31 @@ def class_for_exit(gate, code):
     return mapping.get(code, 4)                    # unknown exit code: infrastructure
 
 
-def _read_text(f, limit=5_000_000):
-    f.seek(0)
-    return f.read(limit).decode('utf-8', 'replace')
-
-
-def run_gate(gate, ctx, inputs, deadline, env):
-    script = SCRIPTS_DIR / gate['script']
-    argv, report, _paths, problems = build_command(gate, ctx)
-    rel_report = ctx.rel(report)
-    if gate['interp'] == 'python':
-        exe = [sys.executable, '-B', '-E', '-s']
-    else:
-        exe = [shutil.which(gate['interp']) or gate['interp']]
-    cmd = exe + [str(script)] + argv
-    command = shlex.join(cmd)
-    base = dict(report=rel_report, inputs=inputs, command=command)
-    if not script.is_file():
-        return record(gate, 'missing', 4, 'gate script missing: %s' % gate['script'], **base)
-    if gate['interp'] != 'python' and not shutil.which(gate['interp']):
-        return record(gate, 'missing', 4, '%s not found on PATH' % gate['interp'], **base)
-    if problems:
-        return record(gate, 'bad-input', 2, '; '.join(problems), **base)
-    report.parent.mkdir(parents=True, exist_ok=True)
-    if report.exists():
-        report.unlink()           # a report can only exist if THIS run wrote it
-    remaining = deadline - time.monotonic()
-    limit = min(gate['limit'], remaining)
-    if limit < 1:
-        return record(gate, 'timeout', 4, 'finalize time budget (%ds) exhausted before the gate started' % TOTAL_BUDGET_SEC, **base)
-    start_ns, t0 = time.time_ns(), time.monotonic()
-    timed_out = False
+def spawn(cmd, ctx, limit, env):
+    """Run one child in its own process group (killed with its leftovers).  Nothing is started once STOP is set.
+    -> dict(code, stdout bytes, stderr str, timed_out, cancelled, seconds, start_ns)"""
+    res = {'code': None, 'stdout': b'', 'stderr': '', 'timed_out': False, 'cancelled': False, 'seconds': 0.0,
+           'start_ns': time.time_ns()}
+    if STOP.is_set():
+        res['cancelled'] = True
+        return res
+    t0 = time.monotonic()
     with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, cwd=str(ctx.repo_root),
                                 start_new_session=True)
         with _ACTIVE_LOCK:
             ACTIVE_PGIDS.add(proc.pid)
         try:
+            if STOP.is_set():                         # terminated between the check and the registration
+                res['cancelled'] = True
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
             try:
                 proc.wait(timeout=limit)
             except subprocess.TimeoutExpired:
-                timed_out = True
+                res['timed_out'] = True
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)    # our own process group only
                 except OSError:
@@ -506,11 +683,223 @@ def run_gate(gate, ctx, inputs, deadline, env):
         finally:
             with _ACTIVE_LOCK:
                 ACTIVE_PGIDS.discard(proc.pid)
-        stdout, stderr = _read_text(fo), _read_text(fe)
-    secs, code = time.monotonic() - t0, proc.returncode
-    out = (stdout + ('\n' if stdout and stderr else '') + stderr)
+        fo.seek(0)
+        res['stdout'] = fo.read(50_000_000)
+        fe.seek(0)
+        res['stderr'] = fe.read(5_000_000).decode('utf-8', 'replace')
+    res['seconds'] = time.monotonic() - t0
+    res['code'] = proc.returncode
+    if STOP.is_set():
+        res['cancelled'] = True
+    return res
+
+
+def interps_needed(gate):
+    scripts = gate.get('scripts') or [gate['script']]
+    return {'python' if s.endswith('.py') else 'node' for s in scripts}
+
+
+def exe_for(ctx, script_name):
+    path = str(SCRIPTS_DIR / script_name)
+    if script_name.endswith('.py'):
+        return [sys.executable, '-B', '-E', '-s', path]
+    return [ctx.tools.get('node') or 'node', path]
+
+
+def step_problem(gate, base, res, label, limit):
+    """A failed child of a runner gate -> record, or None when it exited 0."""
+    out = (res['stdout'].decode('utf-8', 'replace')[-3000:] + ('\n' if res['stdout'] and res['stderr'] else '') + res['stderr'])
+    b = dict(base, seconds=res['seconds'], out=out)
+    if res['cancelled']:
+        return record(gate, 'crashed', 4, 'cancelled: finalize was terminated', **dict(b, code=None))
+    if res['timed_out']:
+        return record(gate, 'timeout', 4, 'timeout: %s exceeded the %.0fs limit of the gate' % (label, limit), **dict(b, code=None))
+    code = res['code']
+    if code < 0:
+        return record(gate, 'crashed', 4, '%s was killed by signal %d' % (label, -code), **dict(b, code=code))
+    if code == 0:
+        return None
+    if code in (1, 2):
+        return record(gate, STATUS_BY_CLASS[code], code, '%s exited with code %d' % (label, code), **dict(b, code=code))
+    return record(gate, 'crashed', 4, '%s exited with unexpected code %d' % (label, code), **dict(b, code=code))
+
+
+def finish_runner(gate, ctx, base, report, data, fail_reason, issues=None, cls=1):
+    """The runner gate writes its own report (finalize is the author; the tools only wrote their outputs)."""
+    write_json_atomic(report, data)
+    b = dict(base)
+    b['inputs'] = dict(base['inputs'])
+    b['inputs'][ctx.rel(report)] = ctx.hash(report)
+    if data.get('pass') is True:
+        return record(gate, 'pass', 0, '', **b)
+    return record(gate, STATUS_BY_CLASS[cls], cls, fail_reason, issues=issues, **b)
+
+
+def runner_script(gate, ctx, base, report, limit, env):
+    """srt_to_script.py --strict re-run; the result must be byte-identical to artifacts/script.txt."""
+    P = ctx.paths
+    out = ctx.reports / 'script.rebuilt.txt'
+    remove_quiet(out)
+    cmd = exe_for(ctx, 'srt_to_script.py') + ['--srt', str(P['srt']), '--script', str(P['source_script']), '--strict', '--out', str(out)]
+    base['command'] = shlex.join(cmd)
+    res = spawn(cmd, ctx, limit, env)
+    bad = step_problem(gate, base, res, 'srt_to_script.py', limit)
+    if bad:
+        if res['code'] == 1 and not res['timed_out'] and not res['cancelled']:
+            bad['reason'] = ('the SRT text differs from the source script (srt_to_script.py --strict exit 1): the voice-over '
+                             'is not the script; fix the source or the audio, do not edit script.txt')
+        return bad
+    if not out.is_file():
+        return record(gate, 'stale', 2, 'srt_to_script.py exited 0 but wrote no output', **base)
+    equal = out.read_bytes() == P['script'].read_bytes()
+    data = {'schema': 'yt-news-v4-script-rebuild', 'version': 1, 'pass': equal, 'equal': equal,
+            'rebuilt': ctx.rel(out), 'rebuiltSha256': ctx.hash(out), 'script': ctx.rel(P['script']),
+            'scriptSha256': ctx.hash(P['script'])}
+    msg = ('%s is not what srt_to_script.py --strict rebuilds from %s + %s (see %s): regenerate it with that command, never '
+           'edit it by hand' % (ctx.rel(P['script']), ctx.rel(P['srt']), ctx.rel(P['source_script']), ctx.rel(out)))
+    return finish_runner(gate, ctx, dict(base, seconds=res['seconds'], code=0), report, data, msg)
+
+
+def check_caption_options(ctx):
+    """caption-options.json: ONLY endTime (== voEndSec within 0.01 s) and optionally lexicalOverrides (list of strings)."""
+    data, err = read_json(ctx.paths['caption_options'])
+    if err or not isinstance(data, dict):
+        return ['caption-options.json is %s' % (err or 'not a JSON object')], {}
+    p = []
+    extra_keys = sorted(set(data) - {'endTime', 'lexicalOverrides'})
+    if extra_keys:
+        p.append('caption-options.json may only contain endTime and lexicalOverrides (found: %s)' % ', '.join(extra_keys))
+    end = data.get('endTime')
+    if not is_num(end):
+        p.append('caption-options.json endTime is missing or not a number')
+    elif ctx.ep['vo_end'] is not None and abs(end - ctx.ep['vo_end']) > 0.01 + 1e-9:
+        p.append('caption-options.json endTime %s differs from episode voEndSec %s by more than 0.01 s' % (end, ctx.ep['vo_end']))
+    lex = data.get('lexicalOverrides')
+    if 'lexicalOverrides' in data and not (isinstance(lex, list) and all(isinstance(x, str) and x for x in lex)):
+        p.append('caption-options.json lexicalOverrides must be a list of non-empty strings')
+    return p, data
+
+
+def check_word_done(ctx):
+    """word_timing.done.json must bind caption_pages.json: output_sha256 == sha256(caption_pages.json)."""
+    data, err = read_json(ctx.word_done)
+    if err or not isinstance(data, dict):
+        return ['%s is %s (word_timing.sh writes it next to caption_pages.json)' % (ctx.rel(ctx.word_done), err or 'not a JSON object')], {}
+    want = data.get('output_sha256')
+    if not valid_sha(want):
+        return ['%s has no output_sha256' % ctx.rel(ctx.word_done)], data
+    if ctx.hash(ctx.paths['word_pages']) != want.lower():
+        return ['%s does not match output_sha256 of %s: caption_pages.json was edited or replaced after word_timing.sh wrote it'
+                % (ctx.rel(ctx.paths['word_pages']), ctx.rel(ctx.word_done))], data
+    return [], data
+
+
+def runner_derived(gate, ctx, base, report, limit, env):
+    """Re-run the commands of SKILL step 2 from the raw word timing; every artifact must be byte-identical."""
+    P = ctx.paths
+    ddir = ctx.reports / 'derived'
+    shutil.rmtree(ddir, ignore_errors=True)
+    ddir.mkdir(parents=True, exist_ok=True)
+    problems, opts = check_caption_options(ctx)
+    p2, done = check_word_done(ctx)
+    problems += p2
+    outs = {'words': ddir / 'words_by_line.txt', 'line_starts': ddir / 'line_starts.json', 'captions': ddir / 'caption-joined.json'}
+    steps = [
+        ('words_by_line.py', [str(P['word_pages']), str(P['script'])], outs['words']),
+        ('line_starts.py', ['--pages', str(P['word_pages']), '--script', str(P['script']), '--out', str(outs['line_starts'])], None),
+        ('caption_join.mjs', ['--tokens', str(P['word_pages']), '--script', str(P['script']), '--options', str(P['caption_options']),
+                              '--out', str(outs['captions'])], None),
+    ]
+    base['command'] = ' && '.join(shlex.join(exe_for(ctx, n) + a) for n, a, _ in steps)
+    data = {'schema': 'yt-news-v4-derived-check', 'version': 1, 'pass': False, 'captionOptions': opts,
+            'wordTimingDone': {k: done.get(k) for k in ('key', 'model', 'output_sha256')} if isinstance(done, dict) else None,
+            'comparisons': []}
+    if problems:
+        data['problems'] = problems
+        return finish_runner(gate, ctx, base, report, data, '; '.join(problems), issues=problems)
+    t_end = time.monotonic() + limit
+    total = 0.0
+    for name, args, stdout_to in steps:
+        left = t_end - time.monotonic()
+        if left < 1:
+            return record(gate, 'timeout', 4, 'timeout: the derived gate exceeded its %.0fs limit' % limit, **dict(base, seconds=total))
+        res = spawn(exe_for(ctx, name) + args, ctx, left, env)
+        total += res['seconds']
+        bad = step_problem(gate, base, res, name, limit)
+        if bad:
+            if bad['cls'] == 1:
+                bad['reason'] += (' (the raw word timing %s does not produce the artifacts: regenerate them, never hand-edit)'
+                                  % ctx.rel(P['word_pages']))
+            return bad
+        if stdout_to is not None:
+            stdout_to.write_bytes(res['stdout'])
+    mism = []
+    for key, derived in outs.items():
+        art = P[key]
+        got = derived.read_bytes() if derived.is_file() else None
+        equal = got is not None and got == art.read_bytes()
+        data['comparisons'].append({'derived': ctx.rel(derived), 'artifact': ctx.rel(art), 'equal': equal,
+                                    'derivedSha256': ctx.hash(derived) if derived.is_file() else None, 'artifactSha256': ctx.hash(art)})
+        if not equal:
+            mism.append('%s is not byte-identical to what the step-2 command derives from %s (%s)'
+                        % (ctx.rel(art), ctx.rel(P['word_pages']), ctx.rel(derived)))
+    data['pass'] = not mism
+    if mism:
+        data['problems'] = mism
+    return finish_runner(gate, ctx, dict(base, seconds=total, code=0), report, data, '; '.join(mism), issues=mism)
+
+
+RUNNERS = {'script': runner_script, 'derived': runner_derived}
+
+
+def run_gate(gate, ctx, inputs, deadline, env, deps=None):
+    """deadline: absolute time.monotonic() value the gates must be finished by."""
+    deps = deps or {}
+    argv, report, dep_paths, problems = build_command(gate, ctx, deps)
+    inputs = dict(inputs)
+    for path in dep_paths:
+        inputs.setdefault(ctx.rel(path), ctx.hash(path))
+    rel_report = ctx.rel(report)
+    runner = gate.get('runner')
+    scripts = gate.get('scripts') or [gate['script']]
+    if runner:
+        cmd = ['<%s>' % gate['name']]
+        command = ' + '.join(scripts)
+    else:
+        cmd = exe_for(ctx, gate['script']) + argv
+        command = shlex.join(cmd)
+    base = dict(report=rel_report, inputs=inputs, command=command)
+    for name in scripts:
+        if not (SCRIPTS_DIR / name).is_file():
+            return record(gate, 'missing', 4, 'gate script missing: %s' % name, **base)
+    for interp in sorted(interps_needed(gate)):
+        if interp != 'python' and not ctx.tools.get(interp):
+            return record(gate, 'missing', 4, '%s not found on PATH' % interp, **base)
+    block = dependency_block(gate, deps)
+    if block:
+        return record(gate, 'blocked', block[0], block[1], **base)
+    if problems:
+        return record(gate, 'bad-input', 2, '; '.join(problems), **base)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    if report.exists():
+        report.unlink()           # a report can only exist if THIS run wrote it
+    remaining = deadline - time.monotonic()
+    limit = min(gate['limit'], remaining)
+    if limit < 1:
+        return record(gate, 'timeout', 4, 'finalize time budget (%ds, phase gates) exhausted before the gate started' % TOTAL_BUDGET_SEC, **base)
+    if STOP.is_set():
+        return record(gate, 'crashed', 4, 'cancelled: finalize was terminated', **base)
+    if runner:
+        return RUNNERS[runner](gate, ctx, base, report, limit, env)
+    res = spawn(cmd, ctx, limit, env)
+    start_ns = res['start_ns']
+    stdout = res['stdout'].decode('utf-8', 'replace')
+    secs, code = res['seconds'], res['code']
+    out = (stdout + ('\n' if stdout and res['stderr'] else '') + res['stderr'])
     base.update(code=code, seconds=secs, out=out)
-    if timed_out:
+    if res['cancelled']:
+        return record(gate, 'crashed', 4, 'cancelled: finalize was terminated', **{**base, 'code': None})
+    if res['timed_out']:
         return record(gate, 'timeout', 4, 'timeout: gate exceeded its %.0fs limit' % limit, **{**base, 'code': None})
     if gate.get('stdout_report'):
         try:
@@ -550,11 +939,6 @@ def run_gate(gate, ctx, inputs, deadline, env):
     return record(gate, 'pass', 0, '', **base)
 
 
-def gate_env():
-    return {k: v for k, v in os.environ.items()
-            if k not in ('PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONINSPECT', 'NODE_OPTIONS', 'NODE_PATH')}
-
-
 def purge_pycache(skill_dir):
     for dirpath, dirnames, _ in os.walk(skill_dir):
         for d in list(dirnames):
@@ -564,20 +948,32 @@ def purge_pycache(skill_dir):
 
 
 # ---------------------------------------------------------------- verified reports
-def node_manifest_hash(manifest_path, env):
+def time_left(deadline, cap):
+    """Seconds a post-verification subprocess may use: min(cap, time left), or None when less than 1 s is left."""
+    left = deadline.remaining()
+    return None if left < 1 else min(cap, left)
+
+
+BUDGET_MSG = 'time budget (%ds) exhausted during phase "post-verification"' % TOTAL_BUDGET_SEC
+
+
+def node_manifest_hash(manifest_path, env, ctx, deadline):
     """manifestHash() computed by the OTHER team's JS (never re-implemented). -> (hash|None, error, class)"""
     qm = SCRIPTS_DIR / QC_MANIFEST_SCRIPT
-    node = shutil.which('node')
+    node = ctx.tools.get('node')
     if not qm.is_file():
         return None, '%s is missing from the skill (cannot recompute manifestHash)' % QC_MANIFEST_SCRIPT, 4
     if not node:
         return None, 'node not found on PATH (cannot recompute manifestHash)', 4
+    timeout = time_left(deadline, 30)
+    if timeout is None:
+        return None, BUDGET_MSG, 4
     code = ("import {pathToFileURL} from 'node:url'; import fs from 'node:fs';"
             "const m = await import(pathToFileURL(process.argv[1]).href);"
             "console.log(m.manifestHash(JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))));")
     try:
         r = subprocess.run([node, '--input-type=module', '-e', code, str(qm), str(manifest_path)], capture_output=True,
-                           text=True, timeout=30, env=env, stdin=subprocess.DEVNULL)
+                           text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, 'manifestHash computation failed: %s' % e, 4
     h = r.stdout.strip()
@@ -586,7 +982,7 @@ def node_manifest_hash(manifest_path, env):
     return h.lower(), None, 0
 
 
-def verify_layout(report_path, ctx, env):
+def verify_layout(report_path, ctx, env, deadline):
     """-> (problems, tool_class, info, inputs).  tool_class 4 when the hash helper could not run."""
     report_path = Path(report_path)
     data, err = read_json(report_path)
@@ -640,7 +1036,6 @@ def verify_layout(report_path, ctx, env):
     if not isinstance(hashes, dict):
         p.append('run manifest has no sourceHashes')
     else:
-        lock_sha = ctx.hash(LOCK_FILE) if LOCK_FILE.is_file() else None
         for key, path in ((MANIFEST_KEY_EPISODE, ctx.paths['episode']), (MANIFEST_KEY_CAPTIONS, ctx.paths['captions']),
                           (MANIFEST_KEY_LOCK, LOCK_FILE)):
             want = hashes.get(key)
@@ -648,7 +1043,7 @@ def verify_layout(report_path, ctx, env):
                 p.append('run manifest sourceHashes[%s] missing' % key)
             elif not Path(path).is_file() or ctx.hash(path) != want.lower():
                 p.append('layout was run on a different %s (sourceHashes[%s] differs from the current file)' % (key, key))
-    h, herr, tool = node_manifest_hash(mpath, env)
+    h, herr, tool = node_manifest_hash(mpath, env, ctx, deadline)
     if herr:
         p.append(herr)
     elif valid_sha(mhash) and h != mhash.lower():
@@ -656,8 +1051,40 @@ def verify_layout(report_path, ctx, env):
     return p, tool, info, inputs
 
 
-def verify_render_receipt(receipt_path, ctx, layout_info):
-    """Real contract (render_episode.mjs RECEIPT_FIELDS). -> (problems, info)"""
+def parse_fps(text):
+    try:
+        a, _, b = str(text).partition('/')
+        return float(a) / float(b or 1)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def probe_video(ctx, path, env, deadline):
+    """ffprobe of the first video stream WITHOUT decoding (packet count). -> (info|None, error, class)"""
+    ffprobe = ctx.tools.get('ffprobe')
+    if not ffprobe:
+        return None, 'ffprobe not found', 4
+    timeout = time_left(deadline, 60)
+    if timeout is None:
+        return None, BUDGET_MSG, 4
+    try:
+        r = subprocess.run([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-count_packets', '-show_entries',
+                            'stream=width,height,r_frame_rate,nb_read_packets', '-of', 'json', str(path)],
+                           capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+        s = json.loads(r.stdout)['streams'][0]
+        info = {'width': int(s['width']), 'height': int(s['height']), 'fps': parse_fps(s['r_frame_rate']),
+                'frames': int(s['nb_read_packets'])}
+    except subprocess.TimeoutExpired:
+        return None, 'ffprobe timed out on %s' % ctx.rel(path), 4
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None, 'cannot probe the video stream of %s' % ctx.rel(path), 2
+    if info['fps'] is None:
+        return None, 'cannot read the frame rate of %s' % ctx.rel(path), 2
+    return info, None, 0
+
+
+def verify_render_receipt(receipt_path, ctx, layout_info, probe=None):
+    """Real contract (render_episode.mjs RECEIPT_FIELDS). -> (problems, info).  probe: ffprobe info of the visual file."""
     data, err = read_json(receipt_path)
     if err or not isinstance(data, dict):
         return ['render receipt %s: %s' % (ctx.rel(receipt_path), err or 'not a JSON object')], {}
@@ -690,7 +1117,18 @@ def verify_render_receipt(receipt_path, ctx, layout_info):
         p.append('render receipt gateManifestHash differs from the layout report manifestHash')
     if layout_info.get('runId') and data.get('gateRunId') != layout_info['runId']:
         p.append('render receipt gateRunId differs from the layout report runId')
+    if probe is not None:
+        for key in ('width', 'height'):
+            if data.get(key) != probe[key]:
+                p.append('render receipt %s %r does not match the visual file (%d)' % (key, data.get(key), probe[key]))
+        if not (is_num(data.get('fps')) and abs(data['fps'] - probe['fps']) < 1e-3):
+            p.append('render receipt fps %r does not match the visual file (%s)' % (data.get('fps'), round(probe['fps'], 3)))
+        if data.get('frameCount') != probe['frames']:
+            p.append('render receipt frameCount %r does not match the visual file (%d frames)' % (data.get('frameCount'), probe['frames']))
     return p, {'renderId': data.get('renderId'), 'receiptSha256': h(receipt_path)}
+
+
+MUSIC_SCHEMA = 'yt-news-v4-music-source'
 
 
 def verify_mux_receipt(receipt_path, ctx):
@@ -699,36 +1137,93 @@ def verify_mux_receipt(receipt_path, ctx):
         stem = ctx.paths['final'].with_suffix('')
         return ['mux receipt %s: %s (mux_av.sh writes it only after the loudness check passes; see %s.audio/final.json)'
                 % (ctx.rel(receipt_path), err or 'not a JSON object', ctx.rel(stem))], {}
-    p = []
+    p, info = [], {'receiptSha256': ctx.hash(receipt_path)}
     if data.get('schema') != 'yt-news-v4-mux-receipt':
         p.append('mux receipt has the wrong schema')
-    avatar = None
-    if ctx.ep['asset_dir'] and ctx.ep['avatar_file']:
-        avatar = ctx.composer / 'public' / ctx.ep['asset_dir'] / ctx.ep['avatar_file']
-    else:
+    avatar = ctx.avatar
+    if avatar is None:
         p.append('episode.json has no assetDir/avatarFile; cannot bind the avatar')
-    for key, path in (('visual', ctx.paths['visual']), ('final', ctx.paths['final']), ('avatar', avatar)):
+    bed = data.get('bed')
+    bed_path = Path(bed['path']) if isinstance(bed, dict) and isinstance(bed.get('path'), str) and bed['path'] else None
+    for key, path in (('visual', ctx.paths['visual']), ('final', ctx.paths['final']), ('avatar', avatar), ('bed', bed_path)):
         if path is None:
+            if key == 'bed':
+                p.append('mux receipt bed.path missing')
             continue
         v = data.get(key)
         if not (isinstance(v, dict) and valid_sha(v.get('sha256'))):
             p.append('mux receipt %s.sha256 missing' % key)
         elif not Path(path).is_file() or ctx.hash(path) != v['sha256'].lower():
             p.append('mux receipt %s.sha256 does not match the current %s' % (key, ctx.rel(path)))
-    return p, {'receiptSha256': ctx.hash(receipt_path)}
+    if bed_path is not None and bed_path.is_file():
+        sidecar = Path(str(bed_path) + '.source.json')
+        src, serr = read_json(sidecar)
+        bed_sha = ctx.hash(bed_path)
+        if serr or not isinstance(src, dict):
+            p.append('music bed has no fetch record: %s is %s' % (ctx.rel(sidecar), serr or 'not a JSON object'))
+        elif src.get('schema') != MUSIC_SCHEMA:
+            p.append('music bed has no fetch record: %s schema is %r' % (ctx.rel(sidecar), src.get('schema')))
+        elif not (valid_sha(src.get('sha256')) and src['sha256'].lower() == bed_sha):
+            p.append('music bed has no fetch record: %s sha256 does not match %s' % (ctx.rel(sidecar), ctx.rel(bed_path)))
+        else:
+            info['music'] = {k: src.get(k) for k in ('provider', 'track_id', 'track_title', 'url')}
+            info['music']['sidecar'] = {'path': ctx.rel(sidecar), 'sha256': ctx.hash(sidecar)}
+    return p, info
 
 
-def verify_duration(ctx):
+def stream_hash(ctx, path, env, deadline):
+    """sha256 of the video packet stream: ffmpeg -c copy -f streamhash. -> (line|None, error, class)"""
+    ffmpeg = ctx.tools.get('ffmpeg')
+    if not ffmpeg:
+        return None, 'ffmpeg not found', 4
+    timeout = time_left(deadline, 60)
+    if timeout is None:
+        return None, BUDGET_MSG, 4
+    try:
+        r = subprocess.run([ffmpeg, '-nostdin', '-v', 'error', '-i', str(path), '-map', '0:v:0', '-c', 'copy', '-f', 'streamhash',
+                            '-hash', 'sha256', '-'], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+    except subprocess.TimeoutExpired:
+        return None, 'ffmpeg streamhash timed out on %s' % ctx.rel(path), 4
+    except OSError as e:
+        return None, 'ffmpeg failed: %s' % e, 4
+    lines = [x.strip() for x in r.stdout.splitlines() if x.strip().startswith('0,v,SHA256=')]
+    if r.returncode != 0 or len(lines) != 1:
+        return None, 'cannot hash the video stream of %s: %s' % (ctx.rel(path), tail(r.stderr, 200)), 2
+    return lines[0], None, 0
+
+
+def verify_mux_video(ctx, env, deadline):
+    """mux_av.sh stream-copies the video (-c:v copy): final.mp4 must carry exactly the packets of visual.mp4."""
+    a, err, cls = stream_hash(ctx, ctx.paths['visual'], env, deadline)
+    if err:
+        return [err], cls, {}
+    b, err, cls = stream_hash(ctx, ctx.paths['final'], env, deadline)
+    if err:
+        return [err], cls, {}
+    info = {'visualStream': a, 'finalStream': b}
+    if a != b:
+        return ['the video stream of %s differs from %s (mux_av.sh must only copy it): the final was not made from this visual'
+                % (ctx.rel(ctx.paths['final']), ctx.rel(ctx.paths['visual']))], 2, info
+    return [], 0, info
+
+
+def verify_duration(ctx, env, deadline):
     final, total = ctx.paths['final'], ctx.ep['total']
     if total is None:
         return ['totalDurationSec unavailable: %s' % ctx.ep['error']], 2, {}
-    if not shutil.which('ffprobe'):
+    ffprobe = ctx.tools.get('ffprobe')
+    if not ffprobe:
         return ['ffprobe not found'], 4, {}
+    timeout = time_left(deadline, 60)
+    if timeout is None:
+        return [BUDGET_MSG], 4, {}
     try:
-        r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1',
-                            str(final)], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        r = subprocess.run([ffprobe, '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1',
+                            str(final)], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
         dur = float(r.stdout.strip())
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        return ['ffprobe timed out on %s' % ctx.rel(final)], 4, {}
+    except (OSError, ValueError):
         return ['cannot read the duration of %s' % ctx.rel(final)], 2, {}
     info = {'duration': round(dur, 3), 'totalDurationSec': total}
     if abs(dur - total) > FRAME_TOLERANCE_SEC + 1e-3:
@@ -745,31 +1240,44 @@ def verified_record(name, problems, ctx, report, inputs, cls=2, status='stale', 
     return record(g, 'pass', 0, '', rel, None, 0, inputs, kind='verified', extra=extra)
 
 
-def run_verified(ctx, env):
+def run_verified(ctx, env, deadline):
     h, P = ctx.hash, ctx.paths
     recs, summary_info = [], {}
     # layout
     lp = P['layout_report']
-    probs, tool, linfo, linputs = verify_layout(lp, ctx, env)
+    probs, tool, linfo, linputs = verify_layout(lp, ctx, env, deadline)
     extra = {'runId': linfo.get('runId'), 'manifestHash': linfo.get('manifestHash'), 'reportSha256': linfo.get('reportSha256'),
              'reusedFrames': linfo.get('reusedFrames')} if linfo else None
     recs.append(verified_record('layout', probs, ctx, lp, linputs, cls=4 if tool == 4 else 2,
                                 status='missing' if tool == 4 else 'stale', extra=extra))
     summary_info['layout'] = {k: linfo.get(k) for k in ('runId', 'manifestHash', 'reportSha256', 'reusedFrames')}
-    # render receipt
+    # render receipt (+ its width/height/fps/frameCount against ffprobe of the visual file)
     rr = ctx.receipt_path('visual', RENDER_RECEIPT_SUFFIX)
-    probs, rinfo = verify_render_receipt(rr, ctx, linfo)
+    probe, perr, pcls = (None, 'visual file missing', 2) if not P['visual'].is_file() else probe_video(ctx, P['visual'], env, deadline)
+    probs, rinfo = verify_render_receipt(rr, ctx, linfo, probe)
+    if perr:
+        probs.append(perr)
     inputs = {ctx.rel(p): h(p) for p in (P['visual'], P['episode'], P['captions'], rr, LOCK_FILE) if p.is_file()}
-    recs.append(verified_record('render', probs, ctx, rr, inputs, extra=rinfo or None))
+    recs.append(verified_record('render', probs, ctx, rr, inputs, cls=4 if (perr and pcls == 4) else 2,
+                                status='missing' if (perr and pcls == 4) else 'stale', extra=rinfo or None))
     summary_info['render'] = rinfo
-    # mux receipt
+    # mux receipt (+ the music bed's fetch record)
     mr = ctx.receipt_path('final', '.mux.json')
     probs, minfo = verify_mux_receipt(mr, ctx)
     inputs = {ctx.rel(p): h(p) for p in (P['visual'], P['final'], mr) if p.is_file()}
-    recs.append(verified_record('mux', probs, ctx, mr, inputs, extra=minfo or None))
+    music = minfo.pop('music', None)
+    recs.append(verified_record('mux', probs, ctx, mr, inputs, extra=dict(minfo, **({'music': music} if music else {})) or None))
     summary_info['mux'] = minfo
+    summary_info['music'] = music
+    # final video stream == visual video stream
+    if P['visual'].is_file() and P['final'].is_file():
+        probs, cls, vinfo = verify_mux_video(ctx, env, deadline)
+    else:
+        probs, cls, vinfo = ['visual or final video missing'], 2, {}
+    recs.append(verified_record('mux-video', probs, ctx, P['final'], {ctx.rel(p): h(p) for p in (P['visual'], P['final']) if p.is_file()},
+                                cls=cls or 2, status='missing' if cls == 4 else 'stale', extra=vinfo or None))
     # final duration
-    probs, cls, dinfo = verify_duration(ctx)
+    probs, cls, dinfo = verify_duration(ctx, env, deadline)
     recs.append(verified_record('final-duration', probs, ctx, P['final'], {ctx.rel(P['final']): h(P['final'])} if P['final'].is_file() else {},
                                 cls=cls or 2, status='missing' if cls == 4 else 'stale', extra=dinfo or None))
     # relevance: absent is allowed (the content lint fails any stock/ai media beat without a verified verdict)
@@ -802,7 +1310,7 @@ def run_verified(ctx, env):
 # ---------------------------------------------------------------- outcome
 def exit_class(records, extra_classes=()):
     classes = {r['cls'] for r in records if r['status'] != 'pass' and r.get('required', True)} | set(extra_classes)
-    for c in (4, 2, 1):
+    for c in (3, 4, 2, 1):          # 3 integrity > 4 infrastructure > 2 stale/bad input > 1 quality
         if c in classes:
             return c
     return 0
@@ -828,33 +1336,35 @@ def summary(records):
     return '\n'.join(lines)
 
 
-def tool_versions():
+def tool_versions(tools):
     def run(cmd):
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
             return (r.stdout or r.stderr).strip().splitlines()[0][:200]
         except (OSError, subprocess.TimeoutExpired, IndexError):
             return None
-    tools = {'python': {'path': sys.executable, 'version': platform.python_version()}}
-    for name, flag in (('node', '--version'), ('ffmpeg', '-version'), ('git', '--version')):
-        path = shutil.which(name)
-        tools[name] = {'path': path, 'version': run([path, flag]) if path else None}
-    return tools
+    out = {'python': {'path': os.path.realpath(sys.executable), 'version': platform.python_version()}}
+    for name, flag in (('node', '--version'), ('ffmpeg', '-version'), ('ffprobe', '-version'), ('git', '--version'),
+                       ('swift', '--version')):
+        path = tools.get(name)
+        out[name] = {'path': path, 'version': run([path, flag]) if path else None}
+    return out
 
 
-def git_out(repo_root, *args):
+def git_out(tools, repo_root, *args):
     try:
-        r = subprocess.run(['git', '-C', str(repo_root), *args], capture_output=True, text=True, timeout=30,
-                           stdin=subprocess.DEVNULL, env={k: v for k, v in os.environ.items() if not k.startswith('GIT_')})
+        r = git_run(tools, repo_root, *args)
         return r.stdout.strip() if r.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
         return None
 
 
 def acquire_run_lock(reports_dir):
+    """One finalize run per project.  A lock is stale when its pid is not alive (a killed run is retried at once); a lock
+    of a live pid is honoured (RUN_LOCK_STALE_SEC only guards against pid reuse)."""
     reports_dir.mkdir(parents=True, exist_ok=True)
     lock = reports_dir / RUN_LOCK_NAME
-    for _ in range(2):
+    for _ in range(3):
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             with os.fdopen(fd, 'w') as f:
@@ -863,18 +1373,31 @@ def acquire_run_lock(reports_dir):
         except FileExistsError:
             try:
                 age = time.time() - lock.stat().st_mtime
+                holder, _err = read_json(lock)
             except OSError:
                 continue
-            if age > RUN_LOCK_STALE_SEC:
-                remove_quiet(lock)
-                continue
-            raise BadInput('another finalize run is active (%s, %.0fs old); wait for it to finish' % (lock, age))
+            pid = holder.get('pid') if isinstance(holder, dict) else None
+            if not is_int(pid):
+                busy = age < 5                  # just created by a run that has not written its pid yet
+            elif pid == os.getpid():
+                busy = False
+            else:
+                busy = pid_alive(pid) and age <= RUN_LOCK_STALE_SEC
+            if busy:
+                raise BadInput('another finalize run is active (%s, pid %s, %.0fs old); wait for it to finish' % (lock, pid, age))
+            remove_quiet(lock)
     raise BadInput('could not acquire %s' % lock)
 
 
-def git_toplevel(path):
-    r = subprocess.run(['git', '-C', str(path), 'rev-parse', '--show-toplevel'], capture_output=True, text=True, timeout=30,
-                       stdin=subprocess.DEVNULL, env={k: v for k, v in os.environ.items() if not k.startswith('GIT_')})
+def release_run_lock(lock):
+    holder, _err = read_json(lock)
+    if isinstance(holder, dict) and holder.get('pid') not in (None, os.getpid()):
+        return                                  # not ours any more
+    remove_quiet(lock)
+
+
+def git_toplevel(path, tools, deadline):
+    r = git_run(tools, path, 'rev-parse', '--show-toplevel', deadline=deadline)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or 'not a git repository')
     return Path(r.stdout.strip()).resolve()
@@ -883,6 +1406,9 @@ def git_toplevel(path):
 # ---------------------------------------------------------------- main
 def run(args):
     t_start, started = time.monotonic(), now_iso()
+    deadline = Deadline(TOTAL_BUDGET_SEC)
+    STOP.clear()
+    tools = resolve_tools()
     # deliver path: resolve only the parent directory, then lstat BEFORE anything else runs
     lexical = Path(os.path.abspath(args.deliver))
     deliver = lexical.parent.resolve() / lexical.name
@@ -901,7 +1427,21 @@ def run(args):
     except OSError as e:
         deliver_problem = 'cannot stat %s: %s' % (deliver, e)
 
-    state = {'moved': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None}
+    state = {'moved': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False}
+
+    def remaining_msg(phase):
+        return 'time budget (%ds) exhausted during phase "%s"' % (TOTAL_BUDGET_SEC, phase)
+
+    def may_touch_deliver():
+        """The deliver path may be cleaned up / moved aside only when it is certainly not an input of the run."""
+        if state['collision']:
+            return False
+        if state['ctx'] is None and state['repo_root'] is not None:      # the context could not be built: be careful
+            proj = Path(args.project)
+            proj = proj if proj.is_absolute() else state['repo_root'] / proj
+            if any(inside(deliver, d) for d in (proj, state['repo_root'] / 'remotion-composer' / 'public')):
+                return False
+        return True
 
     def finish(code, records, reasons, integrity=(), relevance='absent', hint=None):
         ctx = state['ctx']
@@ -912,29 +1452,39 @@ def run(args):
             body.update(schema=CHECK_SCHEMA, version=1, would_deliver=(code == 0), reasons=reasons,
                         integrity_problems=list(integrity), relevance_status=relevance,
                         gates=[public(r, True) for r in records])
-            try:
-                rdir = ctx.reports if ctx is not None else (
-                    (Path(args.project) if Path(args.project).is_absolute() else (state['repo_root'] or Path(args.repo_root or '.').resolve()) / args.project)
-                    / DEFAULT_PATHS['reports'])
-                write_json_atomic(rdir / 'check.json', body)
-            except OSError as e:
-                print('cannot write check.json: %s' % e, file=sys.stderr)
-        elif code != 0:
-            for p in (receipt_p, receipt_tmp, partial):
-                remove_quiet(p)
-            if preexisting and deliver_problem is None:
-                try:   # a regular mp4 that is still there is NOT certified: move it aside, never delete it
-                    if stat.S_ISREG(os.lstat(deliver).st_mode):
-                        target, n = Path(str(deliver) + '.uncertified'), 0
-                        while os.path.lexists(target):
-                            n += 1
-                            target = Path('%s.uncertified.%d' % (deliver, n))
-                        os.rename(deliver, target)
-                        state['moved'] = str(target)
-                except FileNotFoundError:
-                    pass
+            rdir = None
+            if ctx is not None:
+                rdir = ctx.reports
+            elif state['repo_root'] is not None:        # never relative to the cwd: an unknown repo writes nothing
+                proj = Path(args.project)
+                rdir = (proj if proj.is_absolute() else state['repo_root'] / proj) / DEFAULT_PATHS['reports']
+            if rdir is not None:
+                try:
+                    write_json_atomic(rdir / 'check.json', body)
                 except OSError as e:
-                    reasons = reasons + ['could not move the pre-existing output aside: %s' % e]
+                    print('cannot write check.json: %s' % e, file=sys.stderr)
+        elif code != 0:
+            if may_touch_deliver():
+                for p in (receipt_p, receipt_tmp, partial):
+                    remove_quiet(p)
+                try:    # a symlink at the deliver path could open an uncertified mp4: remove the link itself, never its target
+                    if os.path.islink(deliver):
+                        os.unlink(deliver)
+                except OSError:
+                    pass
+                if preexisting and deliver_problem is None:
+                    try:   # a regular mp4 that is still there is NOT certified: move it aside, never delete it
+                        if stat.S_ISREG(os.lstat(deliver).st_mode):
+                            target, n = Path(str(deliver) + '.uncertified'), 0
+                            while os.path.lexists(target):
+                                n += 1
+                                target = Path('%s.uncertified.%d' % (deliver, n))
+                            os.rename(deliver, target)
+                            state['moved'] = str(target)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        reasons = reasons + ['could not move the pre-existing output aside: %s' % e]
             body.update(schema=FAILED_SCHEMA, version=1, reasons=reasons, integrity_problems=list(integrity),
                         preexisting_output_not_certified=preexisting, preexisting_output_moved_to=state['moved'],
                         deliver_path_problem=deliver_problem, gates=[public(r, True) for r in records])
@@ -956,58 +1506,91 @@ def run(args):
 
     # ---- 1. integrity (gate files); repo root is derived from the skill dir, never from the cwd
     problems = []
+    lock_mod = None
+    mirror = []
     try:
-        repo_root = git_toplevel(SKILL_DIR)
+        repo_root = git_toplevel(SKILL_DIR, tools, deadline)
         state['repo_root'] = repo_root
+        integ_end = time.monotonic() + min(60.0, max(deadline.remaining(), 0.0))
         if args.repo_root and Path(args.repo_root).resolve() != repo_root:
             problems.append('repo-root-mismatch: --repo-root %s is not the skill\'s git top level %s' % (args.repo_root, repo_root))
+        if (repo_root / args.composer).resolve() != (repo_root / 'remotion-composer').resolve():
+            problems.append('composer-mismatch: --composer %s is not %s' % (args.composer, repo_root / 'remotion-composer'))
         lock_mod = load_sibling('gates_lock')
-        mirror = []
+        lock_mod.GIT_BIN = tools.get('git') or 'git'
+        lock_mod.GIT_TIMEOUT = GIT_TIMEOUT_SEC
         parent = SKILL_DIR.parent
         if parent.name == 'skills' and parent.parent.name in ('.claude', '.agents'):
             other = '.agents' if parent.parent.name == '.claude' else '.claude'
             mirror = [parent.parent.parent / other / 'skills' / SKILL_DIR.name]
-        problems += lock_mod.verify(SKILL_DIR, repo_root, mirror)
-        state['head'] = lock_mod.git_head(repo_root)
+        problems += lock_mod.verify(SKILL_DIR, repo_root, mirror, None, integ_end)
+        state['head'] = lock_mod.git_head(repo_root, integ_end)
         state['lock_sha'] = sha256_file(LOCK_FILE) if LOCK_FILE.is_file() else None
+    except Terminated:
+        raise
     except Exception as e:  # noqa: BLE001 - fail closed on anything
-        repo_root = Path(args.repo_root or '.').resolve()
+        repo_root = state['repo_root'] or Path(args.repo_root or '.').resolve()
         problems.append('git-unavailable: %s' % e if 'git' in str(e).lower() else 'integrity-check-error: %s' % e)
     if problems:
+        if deadline.expired():
+            return finish(4, [], [remaining_msg('integrity')] + ['integrity: %s' % p for p in problems[:5]], problems)
         return finish(3, [], ['integrity: %s' % p for p in problems[:20]], problems, hint=RESTORE_HINT)
+    if deadline.expired():
+        return finish(4, [], [remaining_msg('integrity')])
 
     # ---- context, run lock, deliver path (class 2 problems; nothing has run yet)
     try:
-        ctx = Ctx(args, repo_root, deliver)
+        ctx = Ctx(args, repo_root, deliver, tools)
         state['ctx'] = ctx
     except (BadInput, OSError) as e:
         return finish(2, [], ['bad input: %s' % e])
+    collision = ctx.deliver_collision()
+    if collision is None:
+        for d in (ctx.public / (ctx.ep['asset_dir'] or '\0'), ctx.project / 'assets', ctx.project / 'artifacts'):
+            if inside(deliver, d):
+                collision = '--deliver is inside an input directory of this run: %s' % ctx.rel(d)
+                break
+    if collision:
+        state['collision'] = True
+        return finish(2, [], ['bad input: ' + collision])
     try:
         state['lock'] = acquire_run_lock(ctx.reports)
     except (BadInput, OSError) as e:
         print('FINALIZE FAIL (exit 2): %s' % e)       # do not touch anything the other run may be using
         return 2
     try:
+        if deliver_problem:
+            return finish(2, [], ['bad input: ' + deliver_problem])
         if not args.check:
             for p in (receipt_p, receipt_tmp, failed_p, partial):
                 remove_quiet(p)
-        if deliver_problem:
-            return finish(2, [], ['bad input: ' + deliver_problem])
         purge_pycache(SKILL_DIR)
-        env = gate_env()
+        env = gate_env(tools)
 
-        # ---- 2. fresh gates (parallel, bounded by one overall deadline)
-        deadline = time.monotonic() + TOTAL_BUDGET_SEC
+        # ---- 2. fresh gates (parallel, bounded by the invocation deadline minus the post-verification reserve)
+        gate_end = deadline.end - POST_RESERVE_SEC
         prepared = []
         for g in GATES:
             _argv, _report, in_paths, _p = build_command(g, ctx)
             prepared.append((g, {ctx.rel(p): ctx.hash(p) for p in in_paths}))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futs = [ex.submit(run_gate, g, ctx, inp, deadline, env) for g, inp in prepared]
-            records = [f.result() for f in futs]
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        try:
+            futs = {}
+            for g, inp in prepared:
+                if not g.get('after'):
+                    futs[g['name']] = ex.submit(run_gate, g, ctx, inp, gate_end, env)
+            for g, inp in prepared:      # dependent gates start once the gates they wait for have finished
+                if g.get('after'):
+                    deps = {name: futs[name].result() for name in g['after']}
+                    futs[g['name']] = ex.submit(run_gate, g, ctx, inp, gate_end, env, deps)
+            records = [futs[g['name']].result() for g, _ in prepared]
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)      # nothing queued may start after a cancellation
 
         # ---- 3. verified reports
-        vrecs, relevance, vinfo = run_verified(ctx, env)
+        if deadline.expired():
+            return finish(4, records, [remaining_msg('post-verification')])
+        vrecs, relevance, vinfo = run_verified(ctx, env, deadline)
         records += vrecs
 
         # ---- 4. result
@@ -1015,10 +1598,14 @@ def run(args):
         code = exit_class(records)
         changed = ctx.hash.recheck()
         if changed:
-            code = max(code, 2) if code != 4 else 4
+            code = code if code in (3, 4) else max(code, 2)
             reasons.append('input changed while finalize was running: ' + ', '.join(ctx.rel(c) for c in changed))
+        if deadline.remaining() < 1:
+            return finish(4, records, [remaining_msg('integrity re-check')] + reasons[:5], (), relevance)
         try:
-            again = lock_mod.verify(SKILL_DIR, repo_root, mirror)
+            again = lock_mod.verify(SKILL_DIR, repo_root, mirror, None, time.monotonic() + min(30.0, deadline.remaining()))
+        except Terminated:
+            raise
         except Exception as e:  # noqa: BLE001
             again = ['integrity-check-error: %s' % e]
         if again:
@@ -1026,17 +1613,23 @@ def run(args):
                           relevance, hint=RESTORE_HINT)
         if code != 0 or args.check:
             return finish(code, records, reasons, (), relevance)
+        if deadline.remaining() < DELIVER_RESERVE_SEC:
+            return finish(4, records, ['%s (only %.0fs left, %ds are needed to copy and verify the delivery)'
+                                       % (remaining_msg('deliver'), max(deadline.remaining(), 0), DELIVER_RESERVE_SEC)], (), relevance)
         return deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, receipt_p, receipt_tmp,
-                           t_start, started, finish, lexical)
+                           t_start, started, finish, lexical, tools)
     finally:
         if state['lock']:
-            remove_quiet(state['lock'])
+            release_run_lock(state['lock'])
 
 
 def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, receipt_p, receipt_tmp, t_start, started,
-                finish, lexical):
+                finish, lexical, tools):
+    """Order: copy -> partial; receipt -> its temp name; receipt renamed; the mp4 is renamed LAST, so an mp4 at the deliver
+    path always has its receipt."""
     final = ctx.paths['final']
     final_sha = ctx.hash(final)
+    replaced = False
     try:
         deliver.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(final, partial)
@@ -1047,27 +1640,27 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
                    'requested_deliver_path': str(lexical),
                    'git_head': state['head'], 'lock_sha256': state['lock_sha'],
                    'finalize_sha256': sha256_file(Path(__file__).resolve()),
-                   'skill_tree': git_out(ctx.repo_root, 'rev-parse', 'HEAD:' + SKILL_DIR.relative_to(ctx.repo_root).as_posix()),
-                   'tools': tool_versions(),
+                   'skill_tree': git_out(tools, ctx.repo_root, 'rev-parse', 'HEAD:' + SKILL_DIR.relative_to(ctx.repo_root).as_posix()),
+                   'tools': tool_versions(tools),
                    'bound_inputs': {k: {'path': ctx.rel(ctx.paths[k]), 'sha256': ctx.hash(ctx.paths[k])}
-                                    for k in ('episode', 'captions', 'visual', 'final')},
+                                    for k in ('episode', 'script', 'source_script', 'srt', 'words', 'line_starts', 'word_pages',
+                                              'caption_options', 'captions', 'visual', 'final')},
                    'layout': vinfo.get('layout'), 'render': vinfo.get('render'), 'mux': vinfo.get('mux'),
+                   'music': vinfo.get('music'),
                    'manifest_sha256': ctx.manifest_sha,
                    'gates': [public(r, False) for r in records], 'relevance_status': relevance,
                    'started_at': started, 'finished_at': now_iso(), 'seconds': round(time.monotonic() - t_start, 2)}
         receipt_tmp.write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + '\n')
-        os.replace(partial, deliver)
-        try:
-            os.replace(receipt_tmp, receipt_p)
-        except OSError:
-            remove_quiet(deliver)      # never leave an uncertified file at the output path
-            raise
+        remove_quiet(deliver)               # a previous (uncertified) mp4 is never left beside the new receipt
+        os.replace(receipt_tmp, receipt_p)
+        os.replace(partial, deliver)        # LAST
+        replaced = True
         if sha256_file(deliver) != final_sha:
             remove_quiet(deliver)
             remove_quiet(receipt_p)
             raise OSError('delivered file sha256 mismatch after replace')
     except OSError as e:
-        for p in (partial, receipt_tmp, receipt_p):
+        for p in (partial, receipt_tmp, receipt_p) + ((deliver,) if replaced else ()):
             remove_quiet(p)
         return finish(2, records, ['delivery failed: %s' % e], (), relevance)
     print(summary(records))
@@ -1077,6 +1670,7 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
 
 def crash(args, exc):
     """Any unexpected exception becomes exit 4 + FAILED.json (never a bare traceback with exit 1)."""
+    STOP.set()
     kill_all()
     text = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
     reasons = ['internal error: %s' % text]
@@ -1090,7 +1684,9 @@ def crash(args, exc):
                     'reasons': reasons, 'traceback': tail(traceback.format_exc(), 3000), 'gates': [],
                     'finished_at': now_iso(), 'preexisting_output_not_certified': deliver.is_file(),
                     'preexisting_output_moved_to': None}
-            if deliver.is_file() and not deliver.is_symlink():
+            if deliver.is_symlink():
+                os.unlink(deliver)          # the link itself; it could open an uncertified mp4
+            elif deliver.is_file():
                 target, n = Path(str(deliver) + '.uncertified'), 0
                 while os.path.lexists(target):
                     n += 1
@@ -1105,10 +1701,10 @@ def crash(args, exc):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument('--project', required=True)
     ap.add_argument('--deliver', required=True)
-    ap.add_argument('--composer', default='remotion-composer')
+    ap.add_argument('--composer', default='remotion-composer', help='must be <repo root>/remotion-composer')
     ap.add_argument('--repo-root', default=None, help='optional; must equal the skill\'s git top level')
     ap.add_argument('--manifest')
     ap.add_argument('--check', action='store_true')

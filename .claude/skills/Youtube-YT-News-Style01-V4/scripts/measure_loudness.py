@@ -35,16 +35,31 @@ def measurement_metrics(data):
     return result
 
 
+class ToolMissing(Exception):
+    """ffmpeg is not installed: infrastructure (exit 4), not a quality result."""
+
+
+class BadInput(Exception):
+    """unreadable input or no audio stream: exit 2, not a loudness failure."""
+
+
 def measure(path):
-    r=subprocess.run(['ffmpeg','-hide_banner','-nostats','-i',str(path),'-map','0:a:0','-af','loudnorm=I=-14:TP=-1.5:LRA=20:print_format=json','-f','null','-'],capture_output=True,text=True)
-    if r.returncode:raise ValueError('ffmpeg audio analysis failed: '+r.stderr[-1500:])
+    try:
+        r=subprocess.run(['ffmpeg','-hide_banner','-nostats','-i',str(path),'-map','0:a:0','-af','loudnorm=I=-14:TP=-1.5:LRA=20:print_format=json','-f','null','-'],capture_output=True,text=True)
+    except FileNotFoundError as e:raise ToolMissing('ffmpeg not found: '+str(e))
+    if r.returncode:raise BadInput('ffmpeg could not read an audio stream of the input (missing file, unreadable or no audio): '+r.stderr[-1500:])
     return parse_loudnorm(r.stderr)
 
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('mp4');ap.add_argument('--report',required=True);args=ap.parse_args()
+    code=None
     try:
         data=measurement_metrics(measure(args.mp4));report={'pass':acceptance(data),'file':str(Path(args.mp4).resolve()),'measured':data,'limits':{'I':-14,'tolerance':.5,'TP':-1}}
-    except (ValueError,OSError) as e:report={'pass':False,'error':str(e)}
-    Path(args.report).write_text(json.dumps(report,indent=2));print(json.dumps(report));return 0 if report['pass'] else 1
+    except ToolMissing as e:report={'pass':False,'error':str(e)};code=4
+    except BadInput as e:report={'pass':False,'error':str(e)};code=2
+    except (ValueError,OSError) as e:report={'pass':False,'error':str(e)}     # silent / non-finite audio: a quality failure
+    Path(args.report).parent.mkdir(parents=True,exist_ok=True)
+    Path(args.report).write_text(json.dumps(report,indent=2));print(json.dumps(report))
+    return code if code is not None else (0 if report['pass'] else 1)
 if __name__=='__main__':sys.exit(main())
