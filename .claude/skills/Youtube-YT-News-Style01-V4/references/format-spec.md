@@ -2,6 +2,8 @@
 
 Canonical executable source: `assets/YtNewsStyle01V4.reference.tsx` (identical to `remotion-composer/src/YtNewsStyle01V4.tsx`). An episode is DATA ONLY: `episode.json` + captions JSON, no per-episode TSX. Schema: `assets/episode.schema.json` + semantic rules S01-S20 in `scripts/episode_schema.mjs`. All values are design pixels at 1920×1080, 25 fps.
 
+Data contract and who checks each field (schema S01–S20, lint codes, layout/render/finalize gates): `references/v4-contract.md`; authoring procedure: `SKILL.md`.
+
 What changed from V3: no cover-full-bleed source scene (a wide source is a centred 16:9 window), scene changes cross-fade under an opaque layer, and the episode is data-only.
 
 ## Scene kinds
@@ -25,17 +27,19 @@ Machine-readable copy of every lane (and the per-scene lane maps): `assets/yt-ne
 | Header (P S T W) | `header.brand` 96,54,480,44 r12; `header.kicker` 1344,54,480,44 r12 |
 | Presenter | `avatar` (card, S T W; hidden in W) 1362,100,478,850 r26; `avatar.full` (P) 0,0,1920,1080 |
 | Split window (S T) | `stage` 80,100,1210,840 r22; `split.chrome` bar 80,100,1210,52; `split.chrome.url` 164,104,700,44 r10; `split.chrome.label` 872,104,400,44 |
-| Split picture + text (S) | `split.picture` 1138×640 at 116,172 r16; `split.lower` backing 80,812,1210,128; `split.headline` 116,820,1138,56 |
-| Text card (T) | `typo.backing` 80,152,1210,716; `typo.content` 120,172,1130,676 |
-| Description / stat rail (P S T) | `sub` 116,878,1138,56 |
-| Wide window (W) | `wide.window` 320,100,1280,844 r22; `wide.chrome` 320,100,1280,52; `wide.chrome.url` 404,104,640,44 r10; `wide.chrome.label` 1182,104,400,44; `wide.picture` 320,152,1280,720; `wide.bar` 320,872,1280,72; `wide.headline` 344,880,1232,56 |
+| Split picture + text (S) | `split.picture` 1138×640 at 116,172 r16; `split.lower` backing 80,812,1210,128; `split.headline` 112,814,1146,62 |
+| Text card (T) | `typo.backing` 80,152,1210,716; `typo.content` 116,172,1138,676 |
+| Description / stat rail (P S T) | `sub` 112,876,1146,60 |
+| Wide window (W) | `wide.window` 320,100,1280,844 r22; `wide.chrome` 320,100,1280,52; `wide.chrome.url` 404,104,640,44 r10; `wide.chrome.label` 1182,104,400,44; `wide.picture` 320,152,1280,720; `wide.bar` 320,872,1280,72; `wide.headline` 340,874,1240,62 |
 | Caption (P S T W) | `caption` 96,954,1728,72 |
-| Presenter-only overlays (P) | `full.lowerThird` 96,520,960,196; `full.cta` 260,722,1400,150 |
+| Presenter-only overlays (P) | `full.lowerThird` 96,520,960,196; `full.cta` 96,722,1728,150 (same x and width as `caption`) |
 | End card (E) | `end.eyebrow` 360,300,1200,44; `end.title` 160,360,1600,94; `end.sub` 260,470,1400,60; `end.cta` 260,560,1400,144 |
+
+Text lanes `typo.content`, `split.headline`, `sub`, `wide.headline` are 4 px wider on each side than the laid-out text box (glyph side bearings such as a leading "โ"), and the headline/sub lanes start 6 / 2 px above the line box (tall Thai stacks such as "น้ำ").
 
 ## Text sizes (CSS px)
 
-The engine clamps every field to `MIN_PX`: **read 38, label 30**. The gate floors are lower: CSS font size read 36 / label 28 (`readFontPx`, `labelFontPx`), and rubric size read 28 / label 22 (`readRubricPx`, `labelRubricPx`; rubric size = reference-glyph ink height ÷ 0.7, `rubricInkDivisor`). If text does not fit its lane, change the layout (shorter text, another variant, another beat split). Never shrink below the minimum and never demote a tier. Fields are one line unless `qc_field_rules.json` says otherwise (`typo-*` and `cta` 2 lines).
+The engine clamps every field to `MIN_PX`: **read 38, label 30**. The gate floors are lower: CSS font size read 36 / label 28 (`readFontPx`, `labelFontPx`), and rubric size read 28 / label 22 (`readRubricPx`, `labelRubricPx`; rubric size = reference-glyph ink height ÷ 0.7, `rubricInkDivisor`). If text does not fit its lane, change the layout (shorter text, another variant, another beat split). Never shrink below the minimum and never demote a tier. Fields are one line unless `qc_field_rules.json` says otherwise (`typo-*` 2 lines; the closing question `cta` is one line).
 
 As implemented: header brand/kicker label 30; S/W headline 40 (800); description 38; stat big 38 / label 30; chrome URL and credit label 30; lower third label 30, title 52, sub 38; CTA 40; caption 38 (≤ 40 graphemes per page, S19); end card eyebrow 30, title 72, sub 40, cta 40.
 - `card`: title 76, rows 60 with a numbered badge (40), row padding 26, gap 22. 1-3 rows: one column, one line each. 4 rows: two columns, a row may wrap to 2 lines.
@@ -47,7 +51,7 @@ As implemented: header brand/kicker label 30; S/W headline 40 (800); description
 
 Constants: `MODE_BLEND_SEC` 0.55; `IN_F` 14 (presenter morph / incoming window fade); `XF_F` 9 (S/T→S/T and W→W cross-fade); `OUT_F` 9 (outgoing layer fades under the incoming one, then unmounts). A beat starts at frame `ceil(t×25)`.
 
-Invariant: the outgoing layer stays fully opaque until the incoming layer is fully opaque, then fades under it, so there is never a dark frame (`coverageOk`). An outgoing T card keeps its finished text (no restart) until the incoming picture covers it (T→T and T→S: `XF_F`; T→W: `IN_F`; T→P: the presenter covers it, and any field the presenter box reaches is hidden for that frame). Outgoing S/W labels unmount at once.
+Invariant: the outgoing layer stays fully opaque until the incoming layer is fully opaque, then fades under it, so there is never a dark frame (`coverageOk`). An outgoing T card keeps its finished text (no restart) until the incoming picture covers it (T→T and T→S: `XF_F`; T→W: until the card has faded out, `IN_F`+`OUT_F` = 23 frames, because the wide window never covers the card's left strip; T→P: the presenter covers it, and any field the presenter box reaches is hidden for that frame). Outgoing S/W labels unmount at once.
 
 Label delay (frames after the new beat starts before its labels enter): T→T and T→S **9**; S→S, S→T, W→W, P→P **0**; every other pair **14** (P→S/T/W, S/T→W, W→S/T, S/T/W→P). Attribution (source URL, credit, AI label) starts 2 frames earlier than other labels. Chrome continuity: S→S and W→W with the same layout and the same origin (`source` or `ai`; stock has none) keep one browser chrome, and its entrance does not run again.
 
@@ -85,3 +89,5 @@ Navy `#0B0E17` (panels `#141A2B`, `#0E1322`), cream `#F5F1E8` (dim `#CFC9BE`), a
 ## Gates
 
 `scripts/qc_layout.mjs` is the DOM layout gate on sampled frames: resumable, each invocation stops by its time budget (default 420 s) and exits 75 until complete. `scripts/qc_final_pixels.mjs` scans the rendered file for dark dips (abrupt drops to the navy background) before `voEndSec`. `scripts/render_episode.mjs` refuses a FINAL render without a passing gate report that matches the sources, and a gates lock; drafts must be named `*.draft.*`. Flags and exit codes are in each script's header. The gate, the render (`scripts/render_episode.mjs`) and the stills tool (`scripts/stills.mjs`) bundle from `remotion-composer/src/ytNewsStyle01V4.entry.tsx` (the V4 entry, copy in `assets/ytNewsStyle01V4.entry.reference.tsx`), never from `Root.tsx` / `index.tsx`; source hashes and the bundle key cover the entry's import closure only. Studio for V4: `cd remotion-composer && npx remotion studio src/ytNewsStyle01V4.entry.tsx`.
+
+The empty-backing sweep (a backing painted above the presenter during a transition window) counts an empty region only if its short side is ≥ 12 px (`avatarEmptyMinShortSide`), and it fails when the counted regions have total area ≥ 1500 px² and long side ≥ 24 px for longer than 0.3 s inside a transition window. An empty strip thinner than 12 px over the presenter is therefore NOT caught by the gate.

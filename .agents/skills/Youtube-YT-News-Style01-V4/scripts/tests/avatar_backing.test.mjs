@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {emptyBackingRegions,evaluateAvatarBackingSweep} from '../qc_layout_eval.mjs';
-const t={visibleOpacity:.05,avatarEmptyMinArea:1500,avatarEmptyMinDimension:24,avatarEmptyMaxSeconds:.3};
+const t={visibleOpacity:.05,avatarEmptyMinArea:1500,avatarEmptyMinDimension:24,avatarEmptyMinShortSide:12,avatarEmptyMaxSeconds:.3};
 const box={x:0,y:0,width:200,height:100};
 const window={id:'beat-0',beatT:0,startFrame:0,endFrame:9};
 const candidate=(extra={})=>({id:'div:1/div:2',box,opacity:1,background:{alpha:0,image:'linear-gradient(red,blue)'},protectedRects:[],emptyRegions:[{...box,paintOrderEvidence:{above:true,x:100,y:50,candidateIndex:0,avatarIndex:1}}],...extra});
@@ -75,4 +75,43 @@ test('disjoint empty fragment area sums per candidate/frame; 7pass8fail and clea
  const eight=sweep(Array.from({length:10},(_,i)=>frame(i,i<8)));const issue=eight.issues.find(i=>i.code==='avatar-empty-backing');assert.ok(issue);assert.equal(issue.maxEmptyPx,3384);assert.equal(issue.nframes,8);
  assert.equal(sweep(Array.from({length:10},(_,i)=>frame(i,i<8,true))).issues.length,0);
  assert.equal(sweep(Array.from({length:10},(_,i)=>frame(i,i!==4&&i!==9))).issues.length,0);
+});
+
+// ---- Round 10: thin padding strips are not empty boxes (avatarEmptyMinShortSide) ------------------------------------------
+const stripSamples = (regions, frames = 25, opts = {}) => Array.from({ length: frames + 1 }, (_, i) => ({
+  frame: i, fontsOk: true,
+  avatarBacking: { avatar: { box, opacity: 1 }, candidates: i === frames ? [] : [candidate({ emptyRegions: regions.map((r, k) => ({ ...r, paintOrderEvidence: { above: true, x: r.x + 1, y: r.y + 1, candidateIndex: 0, avatarIndex: 1, ...opts } })) })] },
+}));
+const oneSecond = { id: 'beat-0', beatT: 0, startFrame: 0, endFrame: 25 };
+const strip = (w, h, y = 0) => ({ x: 0, y, width: w, height: h });
+const codes = (regions, tt = t) => evaluateAvatarBackingSweep([oneSecond], stripSamples(regions), 25, tt).issues.map(i => i.code);
+test('round 10: a 778x6 strip over the presenter for 1 s is not an empty box; 778x12 is; 778x11.9 is not; a 100x100 box is', () => {
+  assert.deepEqual(codes([strip(778, 6)]), []);
+  assert.deepEqual(codes([strip(778, 12)]), ['avatar-empty-backing']);
+  assert.deepEqual(codes([strip(778, 11.9)]), []);
+  assert.deepEqual(codes([strip(100, 100)]), ['avatar-empty-backing']);
+});
+test('round 10: two 6 px strips (top and bottom) whose total area is > 1500 px2 are not counted', () => {
+  const two = [strip(778, 6, 0), strip(778, 6, 94)];
+  assert.ok(two.reduce((n, r) => n + r.width * r.height, 0) > 1500);
+  assert.deepEqual(codes(two), []);
+});
+test('round 10: counted regions only decide area and extent (a thin strip does not help a small box reach 1500 px2)', () => {
+  // 30x30 box (900 px2) + 778x6 strip: counted area 900 < 1500 -> no issue
+  assert.deepEqual(codes([strip(30, 30, 40), strip(778, 6, 0)]), []);
+  // 40x40 box (1600 px2) counts by itself
+  assert.deepEqual(codes([strip(40, 40, 40), strip(778, 6, 0)]), ['avatar-empty-backing']);
+});
+test('round 10: a missing or non-finite avatarEmptyMinShortSide fails closed (sweep-incomplete), never defaults', () => {
+  const { avatarEmptyMinShortSide, ...without } = { ...t };
+  for (const tt of [without, { ...t, avatarEmptyMinShortSide: NaN }, { ...t, avatarEmptyMinShortSide: undefined }, { ...t, avatarEmptyMinShortSide: '12' }]) {
+    const r = evaluateAvatarBackingSweep([oneSecond], stripSamples([strip(778, 12)]), 25, tt);
+    assert.equal(r.complete, false);
+    assert.deepEqual(r.issues.map(i => i.code), ['sweep-incomplete']);
+  }
+});
+test('round 10: qc_thresholds.json carries avatarEmptyMinShortSide 12 and the old area / extent / duration are unchanged', async () => {
+  const fs = await import('node:fs/promises');
+  const th = JSON.parse(await fs.readFile(new URL('../qc_thresholds.json', import.meta.url), 'utf8'));
+  assert.equal(th.avatarEmptyMinShortSide, 12); assert.equal(th.avatarEmptyMinArea, 1500); assert.equal(th.avatarEmptyMinDimension, 24); assert.equal(th.avatarEmptyMaxSeconds, 0.3);
 });

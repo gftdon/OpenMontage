@@ -21,7 +21,7 @@ const beatOf = (kind, t, extra = {}) => ({ ...KIND_BEATS[kind](t), ...extra });
 
 // ---- E1 ---------------------------------------------------------------------------------------------------------------
 test('E1: an outgoing T layer is `finished` (keeps its text) exactly while the incoming picture has not covered it; other outgoing layers never are', () => {
-  const expectedFinishedFrames = { 'T>T': XF_F, 'T>S': XF_F, 'T>W': IN_F, 'T>P': IN_F };
+  const expectedFinishedFrames = { 'T>T': XF_F, 'T>S': XF_F, 'T>W': IN_F + OUT_F, 'T>P': IN_F };
   for (const prev of ['P', 'S', 'T', 'W']) for (const next of ['P', 'S', 'T', 'W']) {
     const bs = [beatOf(prev, 0), beatOf(next, 4), beatOf('P', 8)];
     const start = 100;
@@ -48,11 +48,28 @@ test('E1: in the sample, every outgoing T card starts its transition finished (t
     n++;
     const p0 = layerPlan(startOf(i), beats, fps), out0 = p0.layers.find((l) => l.role === 'outgoing');
     assert.ok(out0 && out0.kind === 'T' && out0.finished, `beat ${i}: outgoing T card at f=0`);
-    const cover = { T: XF_F, S: XF_F, W: IN_F, P: IN_F }[sceneKind(beats[i])];
+    const cover = { T: XF_F, S: XF_F, W: IN_F + OUT_F, P: IN_F }[sceneKind(beats[i])];
     const pc = layerPlan(startOf(i) + cover, beats, fps), outC = pc.layers.find((l) => l.role === 'outgoing');
     assert.ok(!outC || !outC.finished, `beat ${i}: covered at f=${cover}`);
   }
   assert.ok(n >= 14, `sample has ${n} T beats followed by a beat`);
+});
+
+test('R1 (round 11): at a T->W boundary the outgoing T layer keeps its text (finished === true) for every f in 0..22, in the sample and in a synthetic pair', () => {
+  const check = (bs, i, label) => {
+    const start = Math.ceil(bs[i].t * fps);
+    for (let f = 0; f < IN_F + OUT_F; f++) {
+      const p = layerPlan(start + f, bs, fps), out = p.layers.find((l) => l.role === 'outgoing' && l.kind === 'T');
+      assert.ok(out, `${label} f=${f}: outgoing T layer present`);
+      assert.equal(out.finished, true, `${label} f=${f}: outgoing T layer keeps its text`);
+    }
+    const gone = layerPlan(start + IN_F + OUT_F, bs, fps);
+    assert.ok(!gone.layers.some((l) => l.role === 'outgoing'), `${label}: outgoing layer unmounted at f=23`);
+  };
+  let n = 0;
+  for (let i = 1; i < beats.length; i++) if (sceneKind(beats[i - 1]) === 'T' && sceneKind(beats[i]) === 'W') { n++; check(beats, i, `sample beat ${i}`); }
+  assert.ok(n >= 1, 'the sample has a T->W boundary');
+  check([beatOf('P', 0), beatOf('T', 4), beatOf('W', 9), beatOf('P', 14)], 2, 'synthetic T>W');
 });
 
 test('E1: T->T and T->S wait XF_F (>= the cross-fade) before the incoming text enters, so old text is never visible through new text', () => {
@@ -120,4 +137,14 @@ test('E5: checkEpisodeMinimal runs once per props (useMemo), not once per frame'
   assert.match(comp, /const errs = useMemo\(\(\) => checkEpisodeMinimal\(props\.episode, props\.captions\), \[props\.episode, props\.captions\]\);/);
   assert.equal((comp.match(/checkEpisodeMinimal\(/g) ?? []).length, 1);
   assert.ok(source.indexOf('useMemo(') < source.indexOf('useThaiFonts();', source.indexOf('export const YtNewsStyle01V4: React.FC')), 'hook order is fixed: useMemo is the first hook');
+});
+
+// ---- Round 10: CoverGuard font race tripwire --------------------------------------------------------------------------
+test('CoverGuard holds the frame until the font is loaded (delayRender + a single continueRender after measuring)', () => {
+  const start = source.indexOf('const CoverGuard');
+  const guard = source.slice(start, source.indexOf('const TypoScene'));
+  assert.match(guard, /delayRender\(/, 'CoverGuard must hold the frame while the font loads');
+  assert.match(guard, /continueRender\(/, 'CoverGuard must release the frame after measuring with the real font');
+  assert.match(guard, /fontsLoaded/, 'a guard mounted after the font loaded must not hold the frame');
+  assert.match(source, /\.then\(\(\) => \{ fontsLoaded = true; \}\)/, 'ensureFonts() sets the module flag when it resolves');
 });

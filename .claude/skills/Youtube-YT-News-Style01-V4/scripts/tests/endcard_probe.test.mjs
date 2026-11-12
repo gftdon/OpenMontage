@@ -13,6 +13,6 @@ test('missing avatar is expected only after exact endcard boundary, with explici
  assert.equal(missingActive({},8412,25,336.5),false);
 });
 test('not-applicable endcard cannot bypass required avatar measurements within sweep window',()=>{
- const result=evaluateAvatarBackingSweep([{id:'unexpected-endcard',beatT:336.52,startFrame:8413,endFrame:8413}],[{frame:8413,fontsOk:true,avatarBacking:{applicable:false,reason:'endcard',avatar:null,candidates:[]}}],25,{visibleOpacity:.05,avatarEmptyMinArea:1500,avatarEmptyMinDimension:24,avatarEmptyMaxSeconds:.3});
+ const result=evaluateAvatarBackingSweep([{id:'unexpected-endcard',beatT:336.52,startFrame:8413,endFrame:8413}],[{frame:8413,fontsOk:true,avatarBacking:{applicable:false,reason:'endcard',avatar:null,candidates:[]}}],25,{visibleOpacity:.05,avatarEmptyMinArea:1500,avatarEmptyMinDimension:24,avatarEmptyMinShortSide:12,avatarEmptyMaxSeconds:.3});
  assert.equal(result.complete,false);assert.ok(result.issues.some(i=>i.code==='sweep-incomplete'));
 });

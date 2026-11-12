@@ -14,7 +14,7 @@ const CARD_TITLE_H = num('CARD_TITLE_H'), CARD_RULE_H = num('CARD_RULE_H'), CARD
 const margin = src.match(/CARD_RULE_MARGIN = "(\d+)px 0 (\d+)px"/);
 const MARGIN = Number(margin[1]) + Number(margin[2]);
 const LH = Object.fromEntries([...src.match(/const LH: Record<number, number> = \{([^}]*)\}/)[1].matchAll(/(\d+): (\d+)/g)].map(m => [m[1], Number(m[2])]));
-const lane = LANES['typo.content'];
+const lane = { ...LANES['typo.content'], w: LANES['typo.content'].w - 8 }; // the laid-out content box (the lane minus 4 px bearing room each side)
 
 const ROW_LH = LH[CARD_ROW_PX];
 const ROW_H = ROW_LH + 2 * CARD_PAD;                       // one line of row text + padding
@@ -28,7 +28,10 @@ test('the final card sizes are in the source', () => {
   assert.match(src, /id=\{`typo-badge-\$\{i\}`\}[^>]*backgroundColor: AMBER/, 'numbered amber badge');
   assert.match(src, /id=\{`typo-num-\$\{i\}`\}[^>]*>\{i \+ 1\}</, 'badge shows the row number');
   assert.equal(LH[76], 98); assert.equal(ROW_LH, 82);
-  assert.deepEqual([lane.w, lane.h], [1130, 676]);
+  // the lane is 4 px wider on each side than the laid-out content box (glyph side bearings); the content box stays 1130 x 676
+  assert.deepEqual([LANES['typo.content'].w, lane.h], [1138, 676]);
+  assert.equal(lane.w, 1130);
+  assert.match(src, /laneBox\("typo\.content", "typo\.backing"\), paddingLeft: 4, paddingRight: 4/);
 });
 
 test('a 2-row card fills >= 60 % of the content lane height (measured on the gate frames: 444 px = 65.7 %)', () => {

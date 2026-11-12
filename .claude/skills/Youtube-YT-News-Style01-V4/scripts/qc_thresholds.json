@@ -9,6 +9,7 @@
   "visibleOpacity": 0.05,
   "avatarEmptyMinArea": 1500,
   "avatarEmptyMinDimension": 24,
+  "avatarEmptyMinShortSide": 12,
   "avatarEmptyMaxSeconds": 0.3,
   "targetI": -14,
   "toleranceI": 0.5,

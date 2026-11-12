@@ -247,19 +247,19 @@ export const LANES = {
   "split.chrome.label": lane(872, 104, 400, 44, "text", ["S"]),
   "split.picture": lane(116, 172, 1138, 640, "layer", ["S"], 16),
   "split.lower": lane(80, 812, 1210, 128, "backing", ["S"]),
-  "split.headline": lane(116, 820, 1138, 56, "text", ["S"]),
+  "split.headline": lane(112, 814, 1146, 62, "text", ["S"]), // 4 px side-bearing room each side, 6 px above the line box (tall Thai stacks)
   "typo.backing": lane(80, 152, 1210, 716, "backing", ["T"]),
-  "typo.content": lane(120, 172, 1130, 676, "text", ["T"]),
-  "sub": lane(116, 878, 1138, 56, "text", ["P", "S", "T"]), // description, or the stat rail
+  "typo.content": lane(116, 172, 1138, 676, "text", ["T"]), // 4 px side-bearing room each side of the 1130 px content box
+  "sub": lane(112, 876, 1146, 60, "text", ["P", "S", "T"]), // description, or the stat rail (4 px side room, 2 px above the line box)
   "full.lowerThird": lane(96, 520, 960, 196, "text", ["P"]),
-  "full.cta": lane(260, 722, 1400, 150, "text", ["P"]),
+  "full.cta": lane(96, 722, 1728, 150, "text", ["P"]),
   "wide.window": lane(320, 100, 1280, 844, "layer", ["W"], 22),
   "wide.chrome": lane(320, 100, 1280, 52, "backing", ["W"]),
   "wide.chrome.url": lane(404, 104, 640, 44, "text", ["W"], 10),
   "wide.chrome.label": lane(1182, 104, 400, 44, "text", ["W"]),
   "wide.picture": lane(320, 152, 1280, 720, "layer", ["W"]),
   "wide.bar": lane(320, 872, 1280, 72, "backing", ["W"]),
-  "wide.headline": lane(344, 880, 1232, 56, "text", ["W"]),
+  "wide.headline": lane(340, 874, 1240, 62, "text", ["W"]), // 4 px side room, 6 px above the line box
   "caption": lane(96, 954, 1728, 72, "text", ALL),
   "end.eyebrow": lane(360, 300, 1200, 44, "text", ["E"]),
   "end.title": lane(160, 360, 1600, 94, "text", ["E"]),
@@ -276,12 +276,16 @@ export function sceneKind(b: Beat): SceneKind {
 
 // ===========================================================================
 // Transitions (spec D9) — ONE pure function decides everything a frame shows.
-// z-order: backdrop 0 · outgoing frame 10 · incoming frame 11 · presenter 20 (a wide window arriving over a
-// leaving presenter takes 21) · header 30 · stat rail 40 · lower third 45 · CTA 46 · caption 60 · end card 90.
+// z-order: backdrop 0 · outgoing frame 10 · incoming frame 11 · presenter 20 · header 30 · stat rail 40 · lower third 45 ·
+// CTA 46 · caption 60 · end card 90. A wide window that arrives over a leaving presenter (S/T->W) is the incoming frame
+// (z 11) and the presenter card (z 20) fades out with 1 - eIn while the window fades in with eIn. Known property: where the
+// presenter card and the wide window overlap (x 1362..1600, y 100..944) both are semi-transparent during frames 1..13, so up to
+// 25 % of the backdrop shows through (a plain cross-fade, no opaque layer underneath there); `coverageOk` does not model the presenter.
 // Rules: the outgoing layer HOLDS at opacity 1 until the incoming layer reaches 1, then fades under it
 // over OUT_F frames and unmounts; incoming labels start at labelDelayFrames. Outgoing S / W labels unmount at f = 0;
 // an outgoing T card keeps its text in the FINISHED state (`finished`) for as long as the incoming picture does not cover it
-// (T->T / T->S: XF_F, T->W: IN_F; T->P: the presenter covers it, see CoverGuard) so a card never goes blank under a fade.
+// (T->T / T->S: XF_F; T->W: until the card has faded out, IN_F + OUT_F = 23 frames, because the wide window (x 320..1600) never covers
+// the card's left strip (x 80..320); T->P: the presenter covers it, see CoverGuard) so a card never goes blank under a fade.
 // ===========================================================================
 export type FrameRect = { x: number; y: number; w: number; h: number; r: number };
 export interface SceneLayerPlan { key: string; index: number; kind: "S" | "T" | "W"; frame: "stage" | "wide"; role: "current" | "outgoing"; opacity: number; startFrame: number; labels: boolean /* labels render only on the current layer */; finished: boolean /* an outgoing T card keeps its text, in the finished state */ }
@@ -334,6 +338,12 @@ export function labelDelayFor(prev: SceneKind | null, cur: SceneKind): number {
 // A typo row / chip / label never starts before the labels of its scene are allowed to enter.
 export const entranceStartSec = (at: number, plan: Pick<LayerPlan, "labelStartFrame">, fps = 25): number => Math.max(at, plan.labelStartFrame / fps);
 
+// Frames until every transition object of the boundary prev -> cur has settled (the one definition; layerPlan and buildQcPlan use it).
+export function transitionSettleFrames(pk: SceneKind | null, kind: SceneKind): number {
+  const zp = isZ(pk), zc = isZ(kind);
+  return pk === null ? 0 : (zp && zc) || (pk === "W" && kind === "W") ? XF_F + OUT_F : (zp && kind === "W") || (pk === "W" && zc) ? IN_F + OUT_F : pk === "P" && kind === "P" ? 0 : IN_F;
+}
+
 export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
   let index = 0;
   for (let i = 0; i < beats.length; i++) { if (frame >= Math.ceil(beats[i].t * fps)) index = i; else break; }
@@ -342,7 +352,7 @@ export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
   const labelDelayFrames = labelDelayFor(pk, kind);
   const zp = isZ(pk), zc = isZ(kind);
   // Frames until every transition object of this boundary has settled.
-  const settle = pk === null ? 0 : (zp && zc) || (pk === "W" && kind === "W") ? XF_F + OUT_F : (zp && kind === "W") || (pk === "W" && zc) ? IN_F + OUT_F : pk === "P" && kind === "P" ? 0 : IN_F;
+  const settle = transitionSettleFrames(pk, kind);
   const active = pk !== null && f < settle;
   const hold = (hf: number) => (f < hf ? 1 : 1 - easeIO((f - hf) / OUT_F)); // outgoing: hold, then fade
   const eIn = easeIO(f / IN_F), eXf = easeIO(f / XF_F);
@@ -363,7 +373,7 @@ export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
     if (pk === "P" && zc) { av = { rect: lerpRect(FULL, CARD, eIn), opacity: 1, cropProgress: eIn, interpolated: true }; }
     else if (zp && kind === "P") { stage.mounted = true; stage.opacity = 1; stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1, true)); av = { rect: lerpRect(CARD, FULL, eIn), opacity: 1, cropProgress: 1 - eIn, interpolated: true }; }
     else if (zp && zc) { curOpacity = eXf; layers.push(mk(prevIndex as number, prevK, "outgoing", hold(XF_F), f < XF_F)); av = { rect: CARD, opacity: 1, cropProgress: 1, interpolated: false }; }
-    else if (zp && kind === "W") { wide.opacity = eIn; stage.mounted = true; stage.opacity = hold(IN_F); stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1, f < IN_F)); av = { rect: CARD, opacity: 1 - eIn, cropProgress: 1, interpolated: false }; }
+    else if (zp && kind === "W") { wide.opacity = eIn; stage.mounted = true; stage.opacity = hold(IN_F); stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1, true)); av = { rect: CARD, opacity: 1 - eIn, cropProgress: 1, interpolated: false }; }
     else if (pk === "W" && zc) { stage.opacity = eIn; wide.mounted = true; wide.opacity = hold(IN_F); wide.z = 10; layers.push(mk(prevIndex as number, "W", "outgoing", 1)); av = { rect: CARD, opacity: eIn, cropProgress: 1, interpolated: false }; }
     else if (pk === "W" && kind === "W") { curOpacity = eXf; layers.push(mk(prevIndex as number, "W", "outgoing", hold(XF_F))); }
     else if (pk === "P" && kind === "W") { av = { rect: FULL, opacity: 1 - eIn, cropProgress: 0, interpolated: false }; }
@@ -404,6 +414,7 @@ export function srcCropStyle(crop: SrcCrop | undefined, box: Rect): React.CSSPro
 
 // ---- Fonts ----------------------------------------------------------------
 let fontReady: Promise<void> | null = null;
+let fontsLoaded = false; // true once ensureFonts() has resolved (module level: a fresh page starts false)
 function ensureFonts(): Promise<void> {
   if (!fontReady) {
     const defs: [string, number][] = [
@@ -416,7 +427,7 @@ function ensureFonts(): Promise<void> {
         await ff.load();
         (document as any).fonts.add(ff);
       })
-    ).then(() => undefined);
+    ).then(() => { fontsLoaded = true; });
   }
   return fontReady;
 }
@@ -580,10 +591,10 @@ const MuseumScene: React.FC<{ beat: Beat; episode: EpisodeData; statVisible: boo
         <Footage beat={beat} episode={episode} box={{ w: pic.w, h: pic.h }} />
       </div>
       <Backing id="stage.lower" style={{ ...laneBox("split.lower", "stage"), backgroundColor: NAVY_2 }}>
-        {current && <div style={{ ...laneBox("split.headline", "split.lower"), ...enter(labels) }}>
+        {current && <div style={{ ...laneBox("split.headline", "split.lower"), paddingTop: 6, paddingLeft: 4, paddingRight: 4, ...enter(labels) }}>
           <TextField id="headline" lane="split.headline" size={40} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
         </div>}
-        {current && beat.sub && !statVisible && <div style={{ ...laneBox("sub", "split.lower"), ...enter(descLabels) }}>
+        {current && beat.sub && !statVisible && <div style={{ ...laneBox("sub", "split.lower"), paddingTop: 2, paddingLeft: 4, paddingRight: 4, ...enter(descLabels) }}>
           <TextField id="description" lane="sub" style={{ color: CREAM_DIM, whiteSpace: "nowrap" }}>{beat.sub}</TextField>
         </div>}
       </Backing>
@@ -600,7 +611,7 @@ const WideScene: React.FC<{ beat: Beat; episode: EpisodeData; labels: Labels; cu
         <Footage beat={beat} episode={episode} box={{ w: pic.w, h: pic.h }} />
       </div>
       <Backing id="wide.bar" style={{ ...laneBox("wide.bar", "wide.window"), backgroundColor: NAVY_2 }}>
-        {current && <div style={{ ...laneBox("wide.headline", "wide.bar"), ...enter(labels) }}>
+        {current && <div style={{ ...laneBox("wide.headline", "wide.bar"), paddingTop: 6, paddingLeft: 4, paddingRight: 4, ...enter(labels) }}>
           <TextField id="headline" lane="wide.headline" size={40} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
         </div>}
       </Backing>
@@ -640,8 +651,18 @@ const CARD_ROW_H = 82 + 2 * CARD_PAD; // 60 px text (line-height 82) + 26 px pad
 // T -> P: the presenter grows over the outgoing card. A text field that the presenter box has reached is hidden for the frame
 // (the card, its backing and every field the presenter has not reached stay), because text under the presenter is a layout defect.
 // Pure function of the frame: the layout effect re-runs on every render and sets or clears `visibility` on each field.
+// The decision is only valid with the real font metrics: a guard mounted before the font is loaded (the first frame of a fresh
+// page) holds the frame (delayRender) until ensureFonts() resolves, re-measures, and only then releases it.
 const CoverGuard: React.FC<{ cover: FrameRect | null; children: React.ReactNode }> = ({ cover, children }) => {
   const ref = useRef<HTMLDivElement>(null);
+  const [fontsOk, setFontsOk] = useState(fontsLoaded);
+  const [handle] = useState<number | null>(() => (fontsLoaded ? null : delayRender("cover-guard-fonts")));
+  const released = useRef(false);
+  const release = () => { if (handle !== null && !released.current) { released.current = true; continueRender(handle); } };
+  useEffect(() => {
+    if (handle !== null) ensureFonts().then(() => setFontsOk(true)).catch(cancelRender);
+  }, [handle]);
+  useEffect(() => () => release(), []); // an unmounted guard can never hang a render
   useLayoutEffect(() => {
     const root = ref.current;
     if (!root) return;
@@ -659,6 +680,7 @@ const CoverGuard: React.FC<{ cover: FrameRect | null; children: React.ReactNode 
       }
       el.style.visibility = hide ? "hidden" : "";
     });
+    if (fontsOk) release();
   });
   return <div ref={ref} style={{ display: "contents" }}>{children}</div>;
 };
@@ -678,7 +700,7 @@ const TypoScene: React.FC<{ beat: Beat; labels: Labels; content: boolean; cover:
   return (
     <Backing id="typo.backing" style={{ ...laneBox("typo.backing", "stage"), backgroundColor: NAVY_2, backgroundImage: "radial-gradient(ellipse at 50% 28%, rgba(242,179,76,0.20), transparent 60%), radial-gradient(rgba(245,241,232,0.13) 1.5px, transparent 1.5px), linear-gradient(160deg, #1B2440, #0E1220)", backgroundSize: "auto, 28px 28px, auto" }}>
       <div style={{ position: "absolute", inset: 20, borderRadius: 18, border: "1.5px solid rgba(242,179,76,0.35)", pointerEvents: "none" }} />
-      {content && <CoverGuard cover={cover}><div style={{ ...laneBox("typo.content", "typo.backing"), display: "flex", flexDirection: "column", justifyContent: "center" }}>
+      {content && <CoverGuard cover={cover}><div style={{ ...laneBox("typo.content", "typo.backing"), paddingLeft: 4, paddingRight: 4, display: "flex", flexDirection: "column", justifyContent: "center" }}>
         {variant === "card" && <div style={{ display: "flex", flexDirection: "column" }}>
           <TextField id="typo-title" lane="typo.content" size={76} style={{ fontWeight: 800, whiteSpace: "nowrap", ...enter(labels) }}>{beat.headline}</TextField>
           <div style={{ width: 140, height: CARD_RULE_H, borderRadius: 3, background: AMBER, margin: CARD_RULE_MARGIN }} />
@@ -734,7 +756,7 @@ const liveStats = (beats: Beat[], t: number): LiveStat[] =>
 export const lastStatEnd = (beats: Beat[], t: number): number => { let last = 0; for (const b of beats) for (const st of b.stats ?? []) { const e = st.at + st.dur; if (e <= t && e > last) last = e; } return last; };
 
 const StatRail: React.FC<{ live: LiveStat[]; t: number; fps: number }> = ({ live, t, fps }) => (
-  <div style={{ ...laneBox("sub"), zIndex: 40, display: "flex", alignItems: "center", gap: 14 }}>
+  <div style={{ ...laneBox("sub"), paddingLeft: 4, paddingRight: 4, zIndex: 40, display: "flex", alignItems: "center", gap: 14 }}>
     {live.map(({ stat, b, i }) => {
       const exit = clamp01((stat.at + stat.dur - t) * fps / 6), enter = boundedEntrance(t, stat.at, fps), c = tone(stat.tone);
       const fade = { opacity: Number(enter.opacity) * exit, transform: enter.transform, lineHeight: "30px" }; // the box stays opaque; the text fades in and out inside it
@@ -768,8 +790,8 @@ const LowerThird: React.FC<{ episode: EpisodeData; lower: Lower; t: number; fps:
 
 const CtaChip: React.FC<{ text: string; t: number; ctaT: number; fps: number }> = ({ text, t, ctaT, fps }) => (
   <div style={{ ...laneBox("full.cta"), zIndex: 46, display: "flex", alignItems: "center", justifyContent: "center" }}>
-    <Backing id="cta" occluder="cta" style={{ backgroundColor: NAVY, boxShadow: `inset 0 0 0 2px ${AMBER}`, borderRadius: 24, padding: "16px 36px", maxWidth: 1400, boxSizing: "border-box" }}>
-      <TextField id="cta" lane="full.cta" size={40} style={{ fontWeight: 800, textAlign: "center", lineHeight: "48px", ...boundedEntrance(t, ctaT, fps) }}>{text}</TextField>
+    <Backing id="cta" occluder="cta" style={{ backgroundColor: NAVY, boxShadow: `inset 0 0 0 2px ${AMBER}`, borderRadius: 24, padding: "23px 36px", maxWidth: LANES["full.cta"].w, boxSizing: "border-box" }}>
+      <TextField id="cta" lane="full.cta" size={40} style={{ fontWeight: 800, textAlign: "center", lineHeight: "34px", whiteSpace: "nowrap", ...boundedEntrance(t, ctaT, fps) }}>{text}</TextField>
     </Backing>
   </div>
 );
@@ -847,6 +869,12 @@ export function buildQcPlan(episode: EpisodeData, captions: CaptionData, fps: nu
   const sweepWindows = BEATS.flatMap((b, i) => (i && (sceneKind(BEATS[i - 1]) !== sceneKind(b) || JSON.stringify(rectFor(BEATS[i - 1])) !== JSON.stringify(rectFor(b))) ? [{ id: `avatar-${i}`, beatT: b.t, startFrame: Math.ceil(b.t * fps), endFrame: Math.min(durationInFrames - 1, Math.ceil(b.t * fps) + IN_F + OUT_F + 3) }] : []));
   const frames = new Set([...times].filter(t => t >= 0 && t < TOTAL_DURATION_SEC).map(t => Math.round(t * fps)));
   sweepWindows.forEach(w => { for (let f = w.startFrame; f <= w.endFrame; f++) frames.add(f); });
+  // The first frames of EVERY beat boundary (sample times are Math.round(t * fps) but a beat starts at Math.ceil(t * fps); same-kind boundaries have no sweep window).
+  BEATS.forEach((b, i) => {
+    if (!i) return;
+    const s = Math.ceil(b.t * fps), settle = transitionSettleFrames(sceneKind(BEATS[i - 1]), sceneKind(b));
+    [s, s + 1, s + XF_F - 1, s + XF_F, s + settle - 1].forEach(f => { if (f >= 0 && f < durationInFrames) frames.add(f); });
+  });
   // Text lanes only (what a field may sit in). Layers and backings are measured per frame; the header is two lanes
   // (header.brand / header.kicker), whose backings are reserved and checked by the reserved-intersect rule.
   const lanes: Record<string, { x: number; y: number; width: number; height: number }> = {};

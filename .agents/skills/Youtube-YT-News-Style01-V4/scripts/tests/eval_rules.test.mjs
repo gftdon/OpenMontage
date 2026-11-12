@@ -246,13 +246,14 @@ test('qc_field_rules.json carries the engine table (ids, tiers, engine lane ids)
   assert.deepEqual(fieldRules.kicker.lanes, ['header.kicker']);
 });
 
-test('line-count: more lines than maxLines fails (headline 1, caption 1, typo-* 2, cta 2)', () => {
+test('line-count: more lines than maxLines fails (headline 1, caption 1, typo-* 2, cta 1, end-cta 2)', () => {
   const run = (id, n) => ruleLineCount(v3Snap([v3Field(id, { lineCount: n })]), t, CTX);
   assert.deepEqual(run('headline', 1), []);
   const bad = run('headline', 2);
   assert.deepEqual(ids(bad), ['line-count']); assert.equal(bad[0].maxLines, 1); assert.equal(bad[0].lineCount, 2);
   assert.deepEqual(run('caption', 1), []); assert.deepEqual(ids(run('caption', 2)), ['line-count']);
-  assert.deepEqual(run('cta', 2), []); assert.deepEqual(ids(run('cta', 3)), ['line-count']);
+  assert.deepEqual(run('cta', 1), []); assert.deepEqual(ids(run('cta', 2)), ['line-count']);
+  assert.deepEqual(run('end-cta', 2), []); assert.deepEqual(ids(run('end-cta', 3)), ['line-count']);
   assert.deepEqual(run('typo-line-1', 2), []);
   assert.deepEqual(ids(run('typo-big', 3)), ['line-count']);
   assert.deepEqual(ids(run('headline', undefined)), ['line-count'], 'missing lineCount fails closed');

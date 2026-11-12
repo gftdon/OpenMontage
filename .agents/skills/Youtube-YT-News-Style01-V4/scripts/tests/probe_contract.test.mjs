@@ -63,6 +63,18 @@ test('plan.lanes = exactly the text lanes of LANES, as {x,y,width,height}, and p
   assert.deepEqual(evaluatePlanRules(plan, t), [], 'every text lane inside the safe area');
 });
 
+test('round 11: the plan samples the first frames of EVERY beat boundary (s, s+1, s+XF_F-1, s+XF_F, s+settle-1) from the one settle definition', () => {
+  const plan = engine.buildQcPlan(sample, captions, 25);
+  const have = new Set(plan.frames), B = sample.beats;
+  const SETTLE = { P: { P: 0, S: 14, T: 14, W: 14 }, S: { P: 14, S: 18, T: 18, W: 23 }, T: { P: 14, S: 18, T: 18, W: 23 }, W: { P: 14, S: 23, T: 23, W: 18 } };
+  for (let i = 1; i < B.length; i++) {
+    const s = Math.ceil(B[i].t * 25), settle = engine.transitionSettleFrames(engine.sceneKind(B[i - 1]), engine.sceneKind(B[i]));
+    assert.equal(settle, SETTLE[engine.sceneKind(B[i - 1])][engine.sceneKind(B[i])], `beat ${i} settle`);
+    for (const f of [s, s + 1, s + engine.XF_F - 1, s + engine.XF_F, s + settle - 1]) if (f >= 0 && f < plan.durationInFrames) assert.ok(have.has(f), `beat ${i}: frame ${f}`);
+  }
+  assert.ok(plan.frames.every(f => Number.isInteger(f) && f >= 0 && f < plan.durationInFrames));
+});
+
 test('the plan feeds buildFramePlan (grid + beat windows + voice-over end) without throwing', () => {
   const plan = engine.buildQcPlan(sample, captions, 25);
   const frames = buildFramePlan(plan, t);

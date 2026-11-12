@@ -17,7 +17,7 @@
   "lower-label": { "tier": "label", "lanes": ["full.lowerThird"], "maxLines": 1 },
   "lower-title": { "tier": "read", "lanes": ["full.lowerThird"], "maxLines": 1 },
   "lower-sub": { "tier": "read", "lanes": ["full.lowerThird"], "maxLines": 1 },
-  "cta": { "tier": "read", "lanes": ["full.cta"], "maxLines": 2 },
+  "cta": { "tier": "read", "lanes": ["full.cta"], "maxLines": 1 },
   "caption": { "tier": "read", "lanes": ["caption"], "maxLines": 1 },
   "end-label": { "tier": "label", "lanes": ["end.eyebrow"], "maxLines": 1 },
   "end-title": { "tier": "read", "lanes": ["end.title"], "maxLines": 1 },

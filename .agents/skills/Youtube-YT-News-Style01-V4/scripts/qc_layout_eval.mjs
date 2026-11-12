@@ -744,7 +744,10 @@ export function buildFramePlan(enginePlan, t) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Legacy helpers kept byte-for-byte from V2/V3 (unchanged behaviour, still covered by avatar_backing.test.mjs)
+// Legacy helpers from V2/V3 (still covered by avatar_backing.test.mjs). emptyBackingRegions is unchanged. evaluateAvatarBackingSweep
+// differs from V3 in one rule (CF-A66 round 10): an empty region above the presenter is counted only when its SHORT side is
+// >= avatarEmptyMinShortSide (12 px), because a padding strip thinner than that is not an empty box. The total-area (1500 px2) and
+// long-extent (24 px) conditions are applied to the counted regions only; the 0.3 s duration is unchanged.
 // ---------------------------------------------------------------------------------------------
 
 export function validateSamples(expected,samples){
@@ -766,7 +769,7 @@ export function emptyBackingRegions(box,protectedRects){
 }
 export function evaluateAvatarBackingSweep(windows,samples,fps,t,{requireComplete=true}={}){
  const issues=[],runs=[],coverage=[];const add=(code,detail)=>issues.push({code,detail});
- if(!Array.isArray(windows)||!Number.isFinite(fps)||fps<=0||![t.avatarEmptyMinArea,t.avatarEmptyMinDimension,t.avatarEmptyMaxSeconds,t.visibleOpacity].every(Number.isFinite)){add('sweep-incomplete','missing sweep plan/fps/thresholds');return {complete:false,issues,runs,coverage};}
+ if(!Array.isArray(windows)||!Number.isFinite(fps)||fps<=0||![t.avatarEmptyMinArea,t.avatarEmptyMinDimension,t.avatarEmptyMinShortSide,t.avatarEmptyMaxSeconds,t.visibleOpacity].every(Number.isFinite)){add('sweep-incomplete','missing sweep plan/fps/thresholds');return {complete:false,issues,runs,coverage};}
  const expected=new Set();for(const w of windows){if(!w.id||!Number.isInteger(w.startFrame)||!Number.isInteger(w.endFrame)||w.endFrame<w.startFrame){add('sweep-incomplete','invalid window');continue;}for(let f=w.startFrame;f<=w.endFrame;f++)expected.add(f);}
  const counts=new Map();for(const s of samples){if(!s||!expected.has(s.frame)){add('sweep-incomplete','frame outside sweep');continue;}counts.set(s.frame,(counts.get(s.frame)||0)+1);}
  let complete=true;
@@ -789,7 +792,8 @@ export function evaluateAvatarBackingSweep(windows,samples,fps,t,{requireComplet
     for(const r of c.emptyRegions){
      const e=r.paintOrderEvidence;
      if(!finiteRect(r)||!e||typeof e.above!=='boolean'||![e.x,e.y,e.candidateIndex,e.avatarIndex].every(Number.isFinite)){add('sweep-incomplete','missing paint order at '+frame);complete=false;continue;}
-     if(e.above&&e.candidateIndex>=0&&e.avatarIndex>=0&&e.candidateIndex<e.avatarIndex)aboveRegions.push(r);
+     // CF-A66 round 10: a padding strip thinner than avatarEmptyMinShortSide is not an empty box and is not counted
+     if(e.above&&e.candidateIndex>=0&&e.avatarIndex>=0&&e.candidateIndex<e.avatarIndex&&Math.min(r.width,r.height)>=t.avatarEmptyMinShortSide)aboveRegions.push(r);
     }
     if(aboveRegions.length){
      const area=aboveRegions.reduce((sum,r)=>sum+r.width*r.height,0);

@@ -33,7 +33,10 @@ test('geometry fixed by the minimum-font decision (header lanes 44 px, card and 
   assert.equal(LANES.avatar.r, 26);
   assert.deepEqual(r('stage'), [80, 100, 1210, 840]);
   assert.deepEqual(r('split.chrome'), [80, 100, 1210, 52]);
-  assert.deepEqual(r('sub'), [116, 878, 1138, 56]);
+  assert.deepEqual(r('sub'), [112, 876, 1146, 60]);
+  assert.deepEqual(r('split.headline'), [112, 814, 1146, 62]);
+  assert.deepEqual(r('wide.headline'), [340, 874, 1240, 62]);
+  assert.deepEqual(r('typo.content'), [116, 172, 1138, 676]);
   assert.deepEqual(r('wide.window'), [320, 100, 1280, 844]);
   assert.deepEqual(r('wide.picture'), [320, 152, 1280, 720]);
   assert.deepEqual(r('caption'), [96, 954, 1728, 72]);
