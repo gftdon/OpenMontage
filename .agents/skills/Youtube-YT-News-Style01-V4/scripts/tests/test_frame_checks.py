@@ -601,6 +601,107 @@ class BlankFrameSourceTests(unittest.TestCase):
         self.assertEqual([], fc.dense_blank_issues(mk([False] * 10 + [True] * 6 + [False] * 10), 0.0, 1.0, "clipx", 7.0))    # 0.24 s flash
 
 
+def _pale_frame(vlines, noise=0.0, seed=0):
+    """640x360 RGB frame imitating a floor plan / white 3D model: pale background (216) with `vlines` thin (4 px) darker (150) vertical
+    lines inside the top-left 480x270 that VISIBLE_CROP shows, plus optional gaussian noise (std `noise`)."""
+    import numpy as np
+    from PIL import Image
+    a = np.full((360, 640), 216.0)
+    for k in range(vlines):
+        x = 20 + k * 58
+        a[0:270, x:x + 4] = 150.0
+    if noise:
+        a += np.random.default_rng(seed).normal(0, noise, a.shape)
+    return Image.fromarray(a.clip(0, 255).astype("uint8"), mode="L").convert("RGB")
+
+
+def _write_pale_clips():
+    d = Media.dir
+    if (d / "pale_flicker.mp4").exists():
+        return
+    detail = d / "pale_detail.png"
+    _pale_frame(8).save(detail)                                                   # ~5 % of the visible region is line detail
+    ff("-loop", "1", "-framerate", "25", "-t", "4", "-i", str(detail), "-pix_fmt", "yuv420p", "-crf", "10", str(d / "pale_detail.mp4"))
+    flat = d / "pale_flat.png"
+    _pale_frame(0, noise=10).save(flat)                                           # no detail at all: pale + noise std 10
+    ff("-loop", "1", "-framerate", "25", "-t", "4", "-i", str(flat), "-pix_fmt", "yuv420p", "-crf", "10", str(d / "pale_flat.mp4"))
+    # detail flickering around the 2 % line: poor (1 line, ~0.6 %) for 6 frames (0.24 s) and 4 frames (0.16 s), rich (8 lines) otherwise
+    seq = d / "pale_seq"
+    seq.mkdir(exist_ok=True)
+    rich, poor = _pale_frame(8), _pale_frame(1)
+    plan = [rich] * 10 + [poor] * 6 + [rich] * 20 + [poor] * 4 + [rich] * 60       # 4 s; the beat shows the first 3 s
+    for k, im in enumerate(plan):
+        im.save(seq / f"f{k:03d}.png")
+    ff("-framerate", "25", "-i", str(seq / "f%03d.png"), "-pix_fmt", "yuv420p", "-crf", "10", str(d / "pale_flicker.mp4"))
+
+
+class PaleLowContrastTests(unittest.TestCase):
+    """Pale, low-contrast pictures that still have detail are NOT blank (lead decision 2026-11-12). The old white spot of
+    yt_house_walkthrough (floor plan / white 3D house model, mean luma ~210-215) was such a picture; the time bounds stay
+    (>= 0.5 s warning, >= 1.0 s error, < 0.5 s not reported)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _write_pale_clips()
+
+    def run_beats(self, src, shown):
+        p = Media.dir / "pale_beats.json"
+        p.write_text(json.dumps([clip_beat(0, src), {"t": shown, "mode": "full"}]))
+        return fc.cmd_cutaways(p, None, [Media.dir], Media.dir / "pfr", lambda paths: {x: ok_lines() for x in paths}, episode_end=60)
+
+    def region_stats(self, src):
+        """(mean, std, info fraction) of the first frame of the visible region, as the gate sees it."""
+        path = Media.dir / f"{src}.mp4"
+        _, fw, fh = fc.probe(path)
+        px = fc.region_px(fc._episode_data().visible_region("stage", fw, fh, VISIBLE_CROP), fw, fh)
+        arr = fc.decode_region(path, 0.0, 1.0, px)
+        f = arr[5].astype("float32")
+        return float(f.mean()), float(f.std()), fc.luma_stats(arr, 0.0, 25)[5]["info"]
+
+    def blanks(self, rep):
+        return [i for i in rep["issues"] if i["code"] == "blank-frame"]
+
+    def test_pale_low_contrast_picture_with_detail_is_not_blank(self):
+        # lead decision 2026-11-12: pale + thin line detail over clearly more than 2 % of the visible region is a picture, not a blank
+        mean, std, info = self.region_stats("pale_detail")
+        self.assertTrue(205 <= mean <= 220 and 8 <= std <= 22, (mean, std))              # the imitated look: pale, low contrast
+        self.assertGreater(info, 0.035, info)                                             # detail well above the 2 % line
+        rep = self.run_beats("pale_detail", 3.0)
+        self.assertEqual([], self.blanks(rep), rep["issues"])
+        self.assertTrue(rep["pass"], rep["issues"])
+
+    def test_pale_picture_without_any_detail_is_still_blank_for_1_2s(self):
+        # lead decision 2026-11-12: the metric still catches a really empty pale frame
+        mean, std, info = self.region_stats("pale_flat")
+        self.assertTrue(mean > 200 and std < 20 and info < fc.THRESHOLDS["infoMinFraction"], (mean, std, info))
+        rep = self.run_beats("pale_flat", 1.2)
+        self.assertEqual([("blank-frame", "error")], [(i["code"], i["severity"]) for i in self.blanks(rep)], rep["issues"])
+        self.assertFalse(rep["pass"])
+
+    def test_pale_detail_flickering_around_the_two_percent_line_with_short_runs_reports_nothing(self):
+        # lead decision 2026-11-12: the measured pattern at the old white spot was runs of 0.24 s and 0.16 s (< 0.5 s floor): not reported
+        path = Media.dir / "pale_flicker.mp4"
+        _, fw, fh = fc.probe(path)
+        px = fc.region_px(fc._episode_data().visible_region("stage", fw, fh, VISIBLE_CROP), fw, fh)
+        stats = fc.luma_stats(fc.decode_region(path, 0.0, 3.0, px), 0.0, 25)
+        flags = [s["info"] < fc.THRESHOLDS["infoMinFraction"] for s in stats]
+        runs, k = [], 0
+        while k < len(flags):                                                              # guard: the clip really has the measured pattern
+            if flags[k]:
+                j = k
+                while j + 1 < len(flags) and flags[j + 1]:
+                    j += 1
+                runs.append((j - k + 1) / 25)
+                k = j + 1
+            else:
+                k += 1
+        self.assertEqual(2, len(runs), runs)
+        self.assertTrue(all(0.12 <= r <= 0.32 for r in runs) and abs(sum(runs) - 0.40) <= 0.12, runs)
+        rep = self.run_beats("pale_flicker", 3.0)
+        self.assertEqual([], self.blanks(rep), rep["issues"])
+        self.assertTrue(rep["pass"], rep["issues"])
+
+
 class NearlyBlankMetricTests(unittest.TestCase):
     """What the gate calls "nearly blank": a frame (area-downscaled to 160x90, full-range luma) is blank when FEWER THAN 2 % of its pixels differ
     from the frame's MEDIAN luma by MORE THAN 40 (infoDelta, infoMinFraction). Mean and std are not used, so the engine team's "pale"
