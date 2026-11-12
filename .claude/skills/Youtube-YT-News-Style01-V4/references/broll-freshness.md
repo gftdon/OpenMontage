@@ -1,13 +1,24 @@
 # Production B-roll freshness (inherited V2 gate)
 
-Every broll/clip/typo src appears in at most one beat. Source clips use yt_ prefix and must be cut from this episode source. Stock is fresh only when downloaded for this episode by fetch_broll, present in its manifest with matching raw hash and not present in another episode by content. At most two deliberately approved old stock files are allowed. Renaming does not make content fresh.
+ทุก `src` ของ beat `broll`/`clip` ปรากฏได้ไม่เกินหนึ่ง beat (ยกเว้น source clip เดียวกันที่ช่วง `[from, from+shown)` ไม่ซ้อนกัน — กฎ S10 ของ engine) Source clips ใช้ prefix `yt_` และต้องตัดจากวิดีโอต้นฉบับของตอนนี้ (`cut_clips.sh` เขียน `_cuts.json`) Stock ถือว่า fresh เมื่อดาวน์โหลดสำหรับตอนนี้ด้วย `fetch_broll`, อยู่ใน manifest พร้อม raw hash ที่ตรง และไม่ซ้ำเนื้อหากับตอนอื่น อนุญาต stock เก่าที่อนุมัติแล้วไม่เกินสองไฟล์ การเปลี่ยนชื่อไฟล์ไม่ทำให้ของเก่าเป็นของใหม่
 
-Use a NEW slug and mediaDir per episode; never copy another episode's B-roll library for production. Select queries from this episode's spoken lines; source UI first. Semantic/vision relevance validation is a separate B-roll selection workflow, not proven by uniqueness.
+ใช้ slug และ `assetDir` ใหม่ทุกตอน ห้าม copy คลัง B-roll ของตอนอื่นมาใช้จริง เลือก query จากบรรทัดที่พูดในตอนนี้ และ source UI มาก่อน ความตรงของภาพกับคำพูด (semantic/vision) เป็นขั้นแยก ความไม่ซ้ำไม่ได้พิสูจน์ความตรง
 
-Production command (run only with explicit authority to update its ledger):
+**โหมดไม่มีคนดู (V4):** stock/AI footage ใช้ได้เฉพาะ clip ที่มี relevance verdict ผ่านเท่านั้น (ดู `v4-contract.md` ส่วน "Unattended policy") โดยปกติไม่มี → ตอนนั้นไม่มี stock และ `check_broll.py` มีหน้าที่แค่ยืนยันว่า source clip ไม่ซ้ำ/ไม่ปลอมชื่อ ห้ามรัน `fetch_broll.py` เพื่อ "หาของมาเติม" ถ้าไม่มี verdict
+
+ใน V4 beats อยู่ใน `artifacts/episode.json` (field `beats`; ตาราง `brollDur` อยู่ในไฟล์เดียวกัน) ไม่ใช่ `BEATS` ใน TSX
+
+<!-- TODO(lead): verify after rebase: check_broll.py ยังอ่าน TSX composition (positional `composition`); การแปลงให้อ่าน episode.json กำลังทำโดยทีมอื่น คำสั่งด้านล่างเขียนตามรูปแบบใหม่ที่คาดไว้ ตรวจ `--help` อีกครั้งหลัง rebase -->
+
+Production command (รันเมื่อได้รับอนุญาตให้เขียน ledger เท่านั้น; `--media-dir` และ `--cuts` บังคับ):
 
 ```bash
-python3 .claude/skills/Youtube-YT-News-Style01-V4/scripts/check_broll.py remotion-composer/src/<CompId>.tsx --media-dir <mediaDir> --manifest projects/<slug>/assets/broll/_manifest.json --public-root remotion-composer/public --projects-root projects --ledger projects/_broll_ledger.json
+python3 .claude/skills/Youtube-YT-News-Style01-V4/scripts/check_broll.py projects/<slug>/artifacts/episode.json \
+  --media-dir <assetDir> --manifest projects/<slug>/assets/broll/_manifest.json \
+  --cuts projects/<slug>/artifacts/_cuts.json --public-root remotion-composer/public \
+  --projects-root projects --ledger projects/_broll_ledger.json
 ```
 
-The checker auto-seeds its selected ledger. For regression tests, supply an isolated test ledger and project/public roots; never point a test at main's ledger. Reused stock from the historical regression is explicitly old: a passing engine gate does not mean production freshness passed. Do not relax the cap or forge a fetch manifest to claim freshness. Record production ledger only after authorized delivery.
+`--manifest` คือ `_manifest.json` ที่ writer (`fetch_broll.py` / `transcode_broll.sh`) เขียน ห้ามเขียนมือ ถ้าตอนนี้ไม่มี stock เลยและไม่มีไฟล์นี้ ให้ข้าม `check_broll.py` แล้วจดในรายงานขั้นตอนว่า "ไม่มี stock" (source clip ถูกคุมซ้ำโดย `lint_content.py` `source-reuse` และ `frame_checks.py` `shot-reuse` อยู่แล้ว) `--usage-report <file>` เป็นตัวเลือก (รายงาน identity ใต้ผิว) `--max-old 0..2` จำกัดจำนวน stock เก่า (ค่าเริ่ม 2)
+
+Checker seed ledger ที่เลือกเองอัตโนมัติ สำหรับ regression test ให้ใช้ ledger/project/public root แยก ห้ามชี้ test ไปที่ ledger หลัก stock เก่าจาก regression ถือว่า "เก่า" เสมอ: gate ของ engine ผ่านไม่ได้แปลว่า freshness ผ่าน ห้ามลดเพดานหรือปลอม fetch manifest เพื่ออ้างว่า fresh ห้ามเขียน ledger จริงจากโปรเจกต์ทดสอบ และห้ามเขียน ledger หลักก่อนส่งมอบได้รับอนุญาต

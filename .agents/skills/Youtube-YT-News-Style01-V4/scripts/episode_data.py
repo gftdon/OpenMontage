@@ -6,7 +6,7 @@ The V4 episode schema is owned by the engine workstream and is not final; when
 field names change only that section (and its tests) should need edits.
 
 Formats accepted by load_episode():
-  * object JSON  {"beats":[...], "endCardSeconds":..., "cta":..., "voEnd":..., "brollDur":{...}}  (V4, primary)
+  * object JSON  yt-news-v4-episode/1: {"voEndSec","totalDurationSec","ctaT","cta","endcard","beats":[...],...}  (V4, primary)
   * list JSON    [beat, beat, ...]                                                                  (legacy replay)
   * .tsx composition with `const BEATS = [...]`, VO_END_SEC, TOTAL_DURATION_SEC                     (legacy, via broll_ledger.parse_beats, same as lint_beats.py)
 
@@ -49,44 +49,30 @@ def num(v):
 
 
 # ============================ FORMAT ADAPTER =================================
-# Every V4 field-name assumption is in this section. Keep it self-contained.
+# Every episode field-name assumption is in this section. Primary format: V4
+# `episode.json` ("yt-news-v4-episode/1", engine-spec.md 1a). Legacy V3 list JSON /
+# TSX (stats[].t, cards[].t, lower.t, cardKind, ...) stays readable for replay.
+#
+# V4 beat: t, mode full|pip, media broll|clip|typo, layout stage|wide, src, from, origin,
+#   srcCrop, kicker, headline, sub, stats[{at,dur,big?,label}], punch[{at,..}],
+#   typo card|summary3|final4|vs, cards[{at,lines[]}], items[{at,text}],
+#   vs{left{title,badge,lines[]},right{..},conclusion}, lower{at,dur,title,sub}
+# V4 top level: voEndSec, totalDurationSec, ctaT, cta, endcard{eyebrow,titleA,titleB,cta},
+#   brand, dateLabel, breakingLabel, officialTag, page{domain,path}, brollDur, beats[]
 BEAT_TEXT_KEYS = ('kicker', 'headline', 'sub')          # visible for the whole beat
 START_KEYS = ('at', 't')                                 # item start: V4 `at`, legacy `t`
-DURATION_KEY = 'dur'                                     # item duration (V4; legacy lower.dur)
-LOWER_DEFAULT_DUR = 6.0                                  # legacy lower-third default
-META_VO_END_KEYS = ('voEnd', 'vo_end', 'voEndSec', 'VO_END_SEC')
-META_END_CARD_KEYS = ('endCardSeconds', 'end_card_seconds', 'endCard')
+DURATION_KEY = 'dur'                                     # item duration -> [start, start+dur)
+LOWER_DEFAULT_DUR = 6.0                                  # legacy (V3) lower-third default
+META_VO_END_KEYS = ('voEndSec', 'voEnd', 'vo_end', 'VO_END_SEC')
+META_TOTAL_KEYS = ('totalDurationSec', 'TOTAL_DURATION_SEC')
+META_END_CARD_KEYS = ('endCardSeconds', 'end_card_seconds', 'endCard')   # legacy: seconds
 META_CTA_KEYS = ('cta', 'CTA')
-CARD_KIND_PATHS = (('cardKind',), ('card', 'kind'), ('typo', 'kind'))       # typo card kind
-CARD_ITEMS_PATHS = (('items',), ('card', 'items'), ('typo', 'items'))       # typo card items
-CARD_TITLE_PATHS = (('card', 'title'), ('typo', 'title'))
-ITEM_TEXT_KEYS = ('text', 'label', 'title')                                  # when an item is a dict
-
-
-def _dig(obj, path):
-    for key in path:
-        if not isinstance(obj, dict) or key not in obj:
-            return None
-        obj = obj[key]
-    return obj
-
-
-def typo_card(beat):
-    """Return {'kind': str|None, 'items': [item,...]} for a typography card beat.
-
-    kind from cardKind / card.kind / typo.kind (falling back to the first cards[].kind);
-    items from items / card.items / typo.items, each a string or {text,...} dict.
-    """
-    kind = next((v for v in (_dig(beat, p) for p in CARD_KIND_PATHS) if isinstance(v, str) and v), None)
-    if kind is None and isinstance(beat.get('cards'), list):
-        kind = next((c.get('kind') for c in beat['cards'] if isinstance(c, dict) and isinstance(c.get('kind'), str) and c['kind']), None)
-    items = []
-    for p in CARD_ITEMS_PATHS:
-        v = _dig(beat, p)
-        if isinstance(v, list):
-            items = [x for x in v if _item_text(x)]
-            break
-    return {'kind': kind, 'items': items}
+META_CTA_T_KEYS = ('ctaT', 'CTA_T')
+DEFAULT_END_CARD_SECONDS = 4.0
+CHROME_KEYS = ('brand', 'dateLabel', 'breakingLabel', 'officialTag')      # constant page chrome
+ENDCARD_KEYS = ('eyebrow', 'titleA', 'titleB', 'cta')
+VS_SIDE_KEYS = ('title', 'badge')
+ITEM_TEXT_KEYS = ('text', 'label', 'title')                                # when an item is a dict
 
 
 def _item_text(item):
@@ -109,7 +95,7 @@ def _item_start(item, default):
 
 
 def _item_window(item, default_start, default_end=None, default_dur=None):
-    """Visible window of a timed item. `dur` present -> [start, start+dur]."""
+    """Visible window of a timed item. `dur` present -> [start, start+dur) (not cut at the beat end)."""
     start = _item_start(item, default_start)
     dur = num(item.get(DURATION_KEY)) if isinstance(item, dict) else None
     if dur is not None and dur > 0:
@@ -119,11 +105,19 @@ def _item_window(item, default_start, default_end=None, default_dur=None):
     return start, default_end
 
 
+def beat_items(beat):
+    """Typography items of a beat as a list of str / {at?, text} (summary3 / final4)."""
+    v = beat.get('items')
+    return [x for x in v if _item_text(x)] if isinstance(v, list) else []
+
+
 def text_fields(beat):
     """List of (field_name, text, start, end, kind) for every on-screen string of a beat.
 
-    kind 'beat'  : kicker/headline/sub and typo items without their own timing (whole beat)
-    kind 'timed' : stats, cards, lower, timed typo items
+    kind 'beat'  : kicker/headline/sub, vs.* and items without their own `at` (whole beat)
+    kind 'timed' : stats, cards, items with `at`, lower
+    Windows: stats / lower with `dur` -> [at, at+dur); cards -> [at, next card's at or beat end);
+    items -> [at, beat end); legacy stats with only `t` -> until beat end.
     The beat must carry numeric `t` and `end`.
     """
     t, end = beat['t'], beat['end']
@@ -166,18 +160,29 @@ def text_fields(beat):
                 if isinstance(c.get(key), str):
                     strings.append(('cards[%d].%s' % (i, key), c[key].strip()))
             out += [(f, s, ws, we, 'timed') for f, s in strings if s]
-    for p in CARD_TITLE_PATHS:
-        v = _dig(beat, p)
-        if isinstance(v, str) and v.strip():
-            out.append(('.'.join(p), v.strip(), t, end, 'beat'))
-    for j, item in enumerate(typo_card(beat)['items']):
+    for j, item in enumerate(beat_items(beat)):
         txt = _item_text(item)
-        if isinstance(item, dict) and any(isinstance(item.get(k), (int, float)) for k in START_KEYS + (DURATION_KEY,)):
+        if isinstance(item, dict) and _item_start(item, None) is not None:
             ws, we = _item_window(item, t, end)
             out.append(('items[%d]' % j, txt, ws, we, 'timed'))
         else:
             out.append(('items[%d]' % j, txt, t, end, 'beat'))
-    cta = beat.get('cta')
+    vs = beat.get('vs')
+    if isinstance(vs, dict):
+        for side in ('left', 'right'):
+            sd = vs.get(side)
+            if not isinstance(sd, dict):
+                continue
+            for k in VS_SIDE_KEYS:
+                if isinstance(sd.get(k), str) and sd[k].strip():
+                    out.append(('vs.%s.%s' % (side, k), sd[k].strip(), t, end, 'beat'))
+            if isinstance(sd.get('lines'), list):
+                for j, line in enumerate(sd['lines']):
+                    if _item_text(line):
+                        out.append(('vs.%s.lines[%d]' % (side, j), _item_text(line), t, end, 'beat'))
+        if isinstance(vs.get('conclusion'), str) and vs['conclusion'].strip():
+            out.append(('vs.conclusion', vs['conclusion'].strip(), t, end, 'beat'))
+    cta = beat.get('cta')       # legacy only: a beat-level cta
     if isinstance(cta, dict):
         cta = _item_text(cta)
     if isinstance(cta, str) and cta.strip():
@@ -185,8 +190,38 @@ def text_fields(beat):
     return out
 
 
+def episode_text_fields(ep):
+    """Top-level text of the episode as (field_name, text, start, end, kind).
+
+    kind 'chrome' (brand, dateLabel, breakingLabel, officialTag, page.*): constant page chrome, whole video.
+    cta: kind 'timed', window [ctaT, voEndSec].   endcard.*: kind 'beat', window [voEndSec, voEndSec+end card].
+    """
+    top = ep.get('top') or {}
+    vo = ep['vo_end']
+    out = []
+    for k in CHROME_KEYS:
+        if isinstance(top.get(k), str) and top[k].strip():
+            out.append((k, top[k].strip(), 0.0, vo, 'chrome'))
+    page = top.get('page')
+    if isinstance(page, dict):
+        for k in ('domain', 'path'):
+            if isinstance(page.get(k), str) and page[k].strip():
+                out.append(('page.' + k, page[k].strip(), 0.0, vo, 'chrome'))
+    cta = episode_cta(ep)
+    if cta and ep.get('cta'):
+        cta_t = ep.get('cta_t')
+        out.append(('cta', cta, cta_t if cta_t is not None else vo, vo, 'timed'))
+    endcard = top.get('endcard')
+    if isinstance(endcard, dict):
+        total = ep.get('end_card_seconds') or DEFAULT_END_CARD_SECONDS
+        for k in ENDCARD_KEYS:
+            if isinstance(endcard.get(k), str) and endcard[k].strip():
+                out.append(('endcard.' + k, endcard[k].strip(), vo, vo + total, 'beat'))
+    return out
+
+
 def episode_cta(ep):
-    """CTA text (end card), from episode-level `cta` or a beat-level `cta`; '' when absent."""
+    """CTA text (closing question), from episode-level `cta` or a legacy beat-level `cta`; '' when absent."""
     cta = ep.get('cta')
     if isinstance(cta, dict):
         cta = _item_text(cta)
@@ -205,11 +240,18 @@ def _meta_from_object(data):
             if k in data:
                 return data[k]
         return None
+    vo = num(first(META_VO_END_KEYS))
+    total = num(first(META_TOTAL_KEYS))
+    end_card = num(first(META_END_CARD_KEYS))
+    if end_card is None and vo is not None and total is not None:
+        end_card = total - vo
     return {
-        'vo_end': num(first(META_VO_END_KEYS)),
-        'end_card_seconds': num(first(META_END_CARD_KEYS)),
+        'vo_end': vo,
+        'end_card_seconds': end_card,
         'cta': first(META_CTA_KEYS),
+        'cta_t': num(first(META_CTA_T_KEYS)),
         'broll_dur': data.get('brollDur'),
+        'top': data,
     }
 # ========================== END FORMAT ADAPTER ===============================
 
@@ -256,7 +298,8 @@ def _finish(beats, meta, fmt, vo_end_override, fallback_vo_end):
         b['end'] = nxt
     return {
         'beats': clean, 'vo_end': vo_end, 'end_card_seconds': meta.get('end_card_seconds'),
-        'cta': meta.get('cta'), 'broll_dur': meta.get('broll_dur'), 'format': fmt,
+        'cta': meta.get('cta'), 'cta_t': meta.get('cta_t'), 'broll_dur': meta.get('broll_dur'),
+        'top': meta.get('top') or {}, 'format': fmt,
     }
 
 
@@ -295,7 +338,8 @@ def _from_tsx(text, vo_end, fallback_vo_end):
         m = re.search(r'const\s+' + name + r'\s*=\s*([\d.]+)\s*;', text)
         return float(m[1]) if m else None
     vo, total = constant('VO_END_SEC'), constant('TOTAL_DURATION_SEC')
-    meta = {'vo_end': vo, 'end_card_seconds': (total - vo) if vo is not None and total is not None else None}
+    meta = {'vo_end': vo, 'end_card_seconds': (total - vo) if vo is not None and total is not None else None,
+            'cta_t': constant('CTA_T')}
     return _finish(beats, meta, 'tsx', vo_end, fallback_vo_end)
 
 
@@ -395,11 +439,13 @@ def _read_optional(path):
 
 
 def load_source_text(transcript=None, meta=None, chapters=None):
-    """Source material as {'numbers': transcript+title+description, 'all': +chapters}.
+    """Source material as {'numbers': transcript+title+description, 'all': +chapters, 'title': title, 'meta': title+description}.
 
     Chapters are excluded from number provenance (their timestamps would match any number).
     """
     parts = [_read_optional(transcript)]
+    title = ''
+    meta_parts = []
     if meta:
         try:
             m = json.loads(_read_optional(meta))
@@ -408,8 +454,90 @@ def load_source_text(transcript=None, meta=None, chapters=None):
         for k in ('title', 'description', 'description_full'):
             if isinstance(m.get(k), str):
                 parts.append(m[k])
+                meta_parts.append(m[k])
+        if isinstance(m.get('title'), str):
+            title = m['title']
     numbers = norm_digits('\n'.join(parts))
-    return {'numbers': numbers, 'all': numbers + '\n' + _read_optional(chapters)}
+    return {'numbers': numbers, 'all': numbers + '\n' + _read_optional(chapters), 'title': title,
+            'meta': norm_digits('\n'.join(meta_parts))}
+
+
+_CHAPTER = re.compile(r'^\s*((?:\d+:)?\d+:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)\s+(\S.*?)\s*$')
+
+
+def _clock_seconds(text):
+    if ':' in text:
+        secs = 0.0
+        for part in text.split(':'):
+            secs = secs * 60 + float(part)
+        return secs
+    return float(text)
+
+
+def load_chapters(path):
+    """chapters.txt (`  130.0  Title` or `2:10 Title` per line) -> sorted [{'start','end','title'}] (last end = inf)."""
+    rows = []
+    for line in _read_optional(path).split('\n'):
+        m = _CHAPTER.match(line)
+        if m:
+            rows.append({'start': _clock_seconds(m[1]), 'title': m[2]})
+    rows.sort(key=lambda r: r['start'])
+    for i, r in enumerate(rows):
+        r['end'] = rows[i + 1]['start'] if i + 1 < len(rows) else float('inf')
+    return rows
+
+
+def _read_json(path, what):
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError) as e:
+        raise EpisodeFormatError('cannot read %s %s: %s' % (what, path, e))
+
+
+def load_timed_transcript(path):
+    """Timed transcript of the ORIGINAL video: [{start,end,text}] (also {segments|transcript:[..]}, s/e keys)."""
+    data = _read_json(path, 'timed transcript')
+    if isinstance(data, dict):
+        data = data.get('segments') or data.get('transcript') or data.get('chunks') or []
+    rows = []
+    for r in data if isinstance(data, list) else []:
+        if not isinstance(r, dict) or not isinstance(r.get('text'), str):
+            continue
+        s = num(r.get('start', r.get('s')))
+        e = num(r.get('end', r.get('e')))
+        if s is not None:
+            rows.append({'start': s, 'end': e if e is not None else s, 'text': r['text']})
+    return rows
+
+
+def load_evidence(path):
+    """visual_evidence.json: [{t, src, cue_line, subject_terms[], seen}] (also {entries|evidence:[..]})."""
+    data = _read_json(path, 'evidence')
+    if isinstance(data, dict):
+        data = data.get('entries') or data.get('evidence') or []
+    if not isinstance(data, list):
+        raise EpisodeFormatError('evidence must be a list of entries')
+    return [r for r in data if isinstance(r, dict)]
+
+
+def load_frames_report(path):
+    """frame_checks.py `cutaways` report -> {(round(t,2), src): [ocr line, ...]}. Read defensively."""
+    data = _read_json(path, 'frames report')
+    beats = data.get('beats') if isinstance(data, dict) else None
+    out = {}
+    for b in beats if isinstance(beats, list) else []:
+        if not isinstance(b, dict):
+            continue
+        t = num(b.get('t'))
+        if t is None:
+            continue
+        lines = []
+        for f in b.get('frames') or []:
+            ocr = f.get('ocr') if isinstance(f, dict) else None
+            if isinstance(ocr, list):
+                lines += [x for x in ocr if isinstance(x, str)]
+        out[(round(t, 2), b.get('src'))] = lines
+    return out
 
 
 # ----------------------------- text-search helpers ---------------------------
@@ -430,6 +558,95 @@ def text_regex(text):
     return re.compile(r'\s*'.join(chars), re.IGNORECASE)
 
 
+# ------------------------- Thai number words ---------------------------------
+NUM_WORDS = ('ศูนย์', 'หนึ่ง', 'เอ็ด', 'สอง', 'ยี่', 'สาม', 'สี่', 'ห้า', 'หก', 'เจ็ด', 'แปด', 'เก้า', 'สิบ', 'ร้อย', 'พัน', 'หมื่น', 'แสน', 'ล้าน')
+DIGIT_WORDS = {'ศูนย์': '0', 'หนึ่ง': '1', 'สอง': '2', 'สาม': '3', 'สี่': '4', 'ห้า': '5', 'หก': '6', 'เจ็ด': '7', 'แปด': '8', 'เก้า': '9'}
+_NUM_BODY = re.compile('(?:' + '|'.join(sorted(NUM_WORDS, key=len, reverse=True)) + ')+')
+_DIGIT_RUN = re.compile('(?:' + '|'.join(sorted(DIGIT_WORDS, key=len, reverse=True)) + ')+')
+_DIGIT_ONE = re.compile('|'.join(sorted(DIGIT_WORDS, key=len, reverse=True)))
+_THAI_TOKENIZER = []
+
+
+def thai_tokenizer():
+    """pythainlp newmm word_tokenize, or None when pythainlp is not importable (cached)."""
+    if not _THAI_TOKENIZER:
+        try:
+            from pythainlp.tokenize import word_tokenize
+            _THAI_TOKENIZER.append(word_tokenize)
+        except ImportError:
+            _THAI_TOKENIZER.append(None)
+    return _THAI_TOKENIZER[0]
+
+
+def _fmt_number(v):
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v)
+
+
+def _words_to_number(words):
+    """Run of Thai number words -> normalised value string ('13000', '3.5') or None (never raises)."""
+    try:
+        from pythainlp.util import thaiword_to_num
+    except ImportError:
+        return None
+    try:
+        if words.count('จุด') > 1:
+            return None
+        if 'จุด' in words:
+            head, tail = words.split('จุด')
+            if not head or not _DIGIT_RUN.fullmatch(tail):
+                return None
+            whole = _fmt_number(thaiword_to_num(head))
+            return whole + '.' + ''.join(DIGIT_WORDS[w] for w in _DIGIT_ONE.findall(tail))
+        return _fmt_number(thaiword_to_num(words))
+    except Exception:   # thaiword_to_num raises ValueError on ill-formed runs ("สองสาม")
+        return None
+
+
+def thai_number_runs(line):
+    """Maximal runs of Thai number words in one script line -> [(start, end, value_str)].
+
+    Works on newmm tokens, so "สามารถ" (can) or "สี่เหลี่ยม" (square) are never read as numbers.
+    A token counts if it is made only of number words (a leading ordinal marker "ที่" is allowed:
+    "ที่สี่" -> สี่). Adjacent tokens form a run; จุด + digit words give decimals; a run that
+    thaiword_to_num rejects ("สองสาม" = a couple) is skipped.
+    """
+    tok = thai_tokenizer()
+    if tok is None or not THAI_RUN_HINT.search(line):
+        return []
+    items, pos = [], 0
+    for t in tok(line, engine='newmm'):
+        s, pos = pos, pos + len(t)
+        if t == 'จุด':
+            items.append((s, pos, 'จุด'))
+        elif _NUM_BODY.fullmatch(t):
+            items.append((s, pos, t))
+        elif t.startswith('ที่') and _NUM_BODY.fullmatch(t[len('ที่'):]):
+            items.append((s + len('ที่'), pos, t[len('ที่'):]))
+        else:
+            items.append(None)
+    runs, cur = [], []
+    for it in items + [None]:
+        if it is not None and (not cur or cur[-1][1] == it[0]):
+            cur.append(it)
+            continue
+        if cur:
+            while cur and cur[0][2] == 'จุด':
+                cur = cur[1:]
+            while cur and cur[-1][2] == 'จุด':
+                cur = cur[:-1]
+            if cur:
+                v = _words_to_number(''.join(c[2] for c in cur))
+                if v is not None:
+                    runs.append((cur[0][0], cur[-1][1], v))
+        cur = [it] if it is not None else []
+    return runs
+
+
+THAI_RUN_HINT = re.compile('|'.join(NUM_WORDS))
+
+
 class ScriptClock:
     """Maps every script character to the start time of the word-timing token that carries it."""
 
@@ -442,6 +659,7 @@ class ScriptClock:
             self.offsets.append(pos)
             pos += len(l) + 1
         self.times = [None] * len(self.stream)
+        self._build_numeric_view()
         self.misaligned_lines = []
         self.unmatched_chars = 0
         if any(t['line'] is not None for t in tokens):
@@ -458,6 +676,31 @@ class ScriptClock:
         else:
             positions = [i for i, c in enumerate(self.stream) if not c.isspace()]
             self._align(positions, tokens)
+
+    def _build_numeric_view(self):
+        """nstream: the script with every Thai number-word run replaced by its digits.
+
+        nlines/nstream mirror lines/stream; nmap[i] is the index in `stream` of nstream[i] (a replaced run
+        maps all its digits to the run's first character, so it keeps the time of its first token).
+        """
+        self.nlines, self.nmap = [], []
+        self.number_runs = []          # (line_no, start_char, end_char, value) in `stream` coordinates
+        for n, line in enumerate(self.lines, 1):
+            base = self.offsets[n - 1]
+            out, cursor = [], 0
+            for rs, re_, val in thai_number_runs(line):
+                out.append(line[cursor:rs])
+                self.nmap += range(base + cursor, base + rs)
+                out.append(val)
+                self.nmap += [base + rs] * len(val)
+                self.number_runs.append((n, base + rs, base + re_, val))
+                cursor = re_
+            out.append(line[cursor:])
+            self.nmap += range(base + cursor, base + len(line))
+            self.nlines.append(''.join(out))
+            if n < len(self.lines):
+                self.nmap.append(base + len(line))     # the joining newline
+        self.nstream = '\n'.join(self.nlines)
 
     def _align(self, positions, tokens):
         s = ''.join(self.stream[i] for i in positions).lower()
@@ -491,6 +734,14 @@ class ScriptClock:
 
     def line_of(self, idx):
         return bisect.bisect_right(self.offsets, idx)  # 1-based script line number
+
+    def occurrences_numeric(self, pattern):
+        """Like occurrences() on the numeric view: [(orig_start_char, matched, time|None, line, nstream_end)]."""
+        out = []
+        for m in pattern.finditer(self.nstream):
+            orig = self.nmap[m.start()]
+            out.append((orig, m.group(0), self.time_at(orig), self.line_of(orig), m.end()))
+        return out
 
     def occurrences(self, pattern):
         """[(start_char, matched_text, spoken_time|None, line)] for every match of a compiled regex."""

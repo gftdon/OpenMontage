@@ -4,7 +4,8 @@
   cue_times.py --words words_by_line.txt --script script.txt --find "13,000" [--near 195]
 
 Prints JSON {"query", "kind", "occurrences":[{"line","start","matched"}], "nearest"?}. A purely numeric
-query matches the whole number (commas / Thai digits tolerated); anything else is a case-insensitive,
+query matches the whole number (commas / Thai digits tolerated; a number the script spells in Thai
+words, e.g. สิบ for 10, matches too); anything else is a case-insensitive,
 whitespace-tolerant substring of the script. `start` is the start time of the word-timing token carrying
 the first matched character (null if the word timing does not cover it). Exit 0 if found, 1 if not,
 2 on bad input. Offline.
@@ -23,8 +24,13 @@ def find(clock, query):
     q = ed.norm_digits(query.strip())
     if re.fullmatch(r'\d+(?:,\d{3})*(?:\.\d+)?%?', q):
         rx, kind = ed.number_regex(q.rstrip('%').replace(',', '')), 'number'
-    else:
-        rx, kind = ed.text_regex(q), 'text'
+        # numeric view: a script that spells the number in Thai words ("สิบ") matches too
+        occ = []
+        for orig, matched, start, line, nend in clock.occurrences_numeric(rx):
+            end = next((e for (_, rs, e, _v) in clock.number_runs if rs == orig), orig + len(matched))
+            occ.append({'line': line, 'start': start, 'matched': clock.stream[orig:end]})
+        return kind, occ
+    rx, kind = ed.text_regex(q), 'text'
     occ = [{'line': o[3], 'start': o[2], 'matched': o[1]} for o in clock.occurrences(rx)]
     return kind, occ
 

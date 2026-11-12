@@ -10,7 +10,7 @@ const BEATS: Beat[] = [
     "t": 5.0,
     "mode": "pip",
     "media": "clip",
-    "src": "yt_a",
+    "src": "yt_gemini_demo",
     "origin": "source",
     "layout": "stage",
     "chrome": true,

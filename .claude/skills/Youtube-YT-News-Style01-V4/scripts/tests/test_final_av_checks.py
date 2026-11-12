@@ -33,6 +33,9 @@ class FinalAvTests(unittest.TestCase):
         # 1 s black at the very end (outro fade-out allowance)
         ffmpeg('-f', 'lavfi', '-i', src % 3, '-f', 'lavfi', '-i', 'color=c=black:s=320x240:r=25:d=1',
                '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0', '-pix_fmt', 'yuv420p', str(t / 'black_tail.mp4'))
+        # 2 s of motion + 1 s solid dark static end card (what the V4 end card looks like)
+        ffmpeg('-f', 'lavfi', '-i', src % 2, '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
+               '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0', '-pix_fmt', 'yuv420p', str(t / 'endcard.mp4'))
         # frozen until the end of the file
         ffmpeg('-f', 'lavfi', '-i', src % 1, '-vf', 'tpad=stop_mode=clone:stop_duration=3', '-pix_fmt', 'yuv420p',
                str(t / 'freeze_tail.mp4'))
@@ -87,6 +90,26 @@ class FinalAvTests(unittest.TestCase):
         # tail allowance must not hide a span that starts before the tail
         code, rep = self.run_check('black', '--allow-tail', '1.0')
         self.assertEqual(1, code)
+
+    def test_end_card_needs_ignore_from(self):
+        code, rep = self.run_check('endcard')
+        self.assertEqual(1, code)
+        self.assertEqual(['black'], self.codes(rep))
+        code, rep = self.run_check('endcard', '--ignore-from', '2.0')
+        self.assertEqual(0, code, rep)
+        self.assertEqual(2.0, rep['params']['ignore_from'])
+
+    def test_ignore_from_does_not_hide_spans_that_start_earlier(self):
+        code, rep = self.run_check('black', '--ignore-from', '4.0')      # the black span starts at 3.0
+        self.assertEqual(1, code)
+        code, rep = self.run_check('black', '--ignore-from', '3.0')      # starts exactly at the boundary -> ignored
+        self.assertEqual(0, code, rep)
+        code, rep = self.run_check('freeze', '--ignore-from', '1.5')     # freeze starts at ~0.96: still reported
+        self.assertEqual(1, code)
+
+    def test_negative_ignore_from_is_bad_input(self):
+        code, rep = self.run_check('normal', '--ignore-from', '-1')
+        self.assertEqual(2, code)
 
     def test_freeze_running_to_end_of_file(self):
         code, rep = self.run_check('freeze_tail')

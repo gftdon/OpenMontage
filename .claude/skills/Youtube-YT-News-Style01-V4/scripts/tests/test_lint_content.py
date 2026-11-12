@@ -12,16 +12,16 @@ import episode_data as ed  # noqa: E402
 import lint_content as lc  # noqa: E402
 
 
-def make_inputs(lines, source='', source_all=None, cuts=None, relevance=None, relevance_given=None):
+def make_inputs(lines, source='', source_all=None, cuts=None, relevance=None, relevance_given=None, legacy=True, join=' ', **extra):
     """lines: [[(word, start_time), ...], ...]; each script line is its words joined by spaces."""
     script, tokens, starts = [], [], []
     for n, words in enumerate(lines, 1):
-        script.append(' '.join(w for w, _ in words))
+        script.append(join.join(w for w, _ in words))
         for w, t in words:
             tokens.append({'text': w, 'start': t, 'end': None, 'line': n})
         starts.append({'line': n, 'start': words[0][1], 'end': words[-1][1] + 1.0, 'text': script[-1]})
-    return lc.Inputs(script, tokens, starts, cuts or {}, {'numbers': source, 'all': source_all if source_all is not None else source},
-                     relevance, relevance_given if relevance_given is not None else relevance is not None)
+    return lc.Inputs(script, tokens, starts, cuts or {}, {'numbers': source, 'all': source_all if source_all is not None else source, 'title': extra.pop('title', ''), 'meta': extra.pop('meta', '')},
+                     relevance, relevance_given if relevance_given is not None else relevance is not None, legacy=legacy, **extra)
 
 
 def episode(beats, vo_end=100.0):
@@ -89,11 +89,32 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('provenance-number', codes(self.lint('217 คะแนน')))
         self.assertNotIn('provenance-number', codes(self.lint('217 คะแนน', source='scores 217 per game')))
 
-    def test_number_outside_beat_window_not_accepted(self):
+    def test_number_is_searched_in_the_whole_script_not_a_line_window(self):
         far = make_inputs([at_time(0, ['a', '1']), at_time(10, ['b']), at_time(20, ['c']), at_time(30, ['d', '77'])])
-        beat = pip(0, headline='77')
+        beat = pip(0, headline='77 รอบ')
         issues, _ = lc.lint_content(episode([beat, dict(t=8, mode='full')], 100), far, {})
-        self.assertIn('provenance-number', codes(issues))
+        self.assertNotIn('provenance-number', codes(issues))
+        beat = pip(0, headline='78 รอบ')
+        issues, _ = lc.lint_content(episode([beat, dict(t=8, mode='full')], 100), far, {})
+        self.assertIn('provenance-number', codes(issues, 'error'))
+
+    def test_single_digit_with_unit_is_error_only_when_the_unit_noun_is_in_the_script(self):
+        def sev(text):
+            return [i['severity'] for i in self.lint(text, source='nothing') if i['code'] == 'provenance-number']
+        self.assertEqual(['warn'], sev('RULE 7'))                  # bare single digit
+        self.assertEqual(['warn'], sev('7 จุดเปลี่ยน'))            # unit noun not in the script: editorial count of items
+        self.assertEqual(['error'], sev('7 บรรทัด'))               # "บรรทัด" is said in the script: the count is unsupported
+        self.assertEqual(['error'], sev('คะแนน 25'))               # >= 2 significant digits
+        self.assertEqual(['error'], sev('3.5'))                    # contains .
+        self.assertEqual(['error'], sev('9%'))                     # contains %
+
+    def test_leading_zero_enumeration_label_is_warn(self):
+        def sev(text):
+            return [i['severity'] for i in self.lint(text, source='nothing') if i['code'] == 'provenance-number']
+        self.assertEqual(['warn'], sev('DEMO 01'))
+        self.assertEqual(['warn'], sev('02 บรรทัด'))              # even with a unit that is in the script
+        self.assertEqual(['error'], sev('0.5 บรรทัด'))            # a decimal is not an enumeration label
+        self.assertEqual(['error'], sev('99 DEMO'))               # two significant digits
 
     def test_latin_unspoken_flagged_source_word_and_allowlist_pass(self):
         src = 'the SCORE keeps going'
@@ -184,8 +205,8 @@ class TimingTests(unittest.TestCase):
 
 class TimingFarTests(unittest.TestCase):
     def test_lone_number_spoken_far_away_is_left_to_provenance_unless_cap_is_lifted(self):
-        inp = make_inputs([at_time(0, ['a']), at_time(300, ['ใช้', '3', 'ครั้ง'])], source='3D demo')
-        beats = [dict(t=0, mode='full'), pip(50.0, headline='3 มิติ'), dict(t=60.0, mode='full')]
+        inp = make_inputs([at_time(0, ['a']), at_time(300, ['ใช้', '777', 'ครั้ง'])], source='777')
+        beats = [dict(t=0, mode='full'), pip(50.0, headline='777 มิติ'), dict(t=60.0, mode='full')]
         issues, m = lc.lint_content(episode(beats, 400), inp, {})
         self.assertFalse([c for c in codes(issues) if c.startswith('card-timing')])
         self.assertEqual(1, m['timing']['anchorsOnlySpokenFar'])
@@ -199,6 +220,65 @@ class TimingFarTests(unittest.TestCase):
         self.assertEqual(1, codes(issues).count('card-timing-gone-before-spoken'))
 
 
+class AnchorTests(unittest.TestCase):
+    """Specific anchors only: (a) >=3 digits or , . %, (b) number + unit word, (c) non-numeric big >= 4 chars."""
+    TH = lc.THRESHOLDS
+
+    def anchors(self, text, field='headline'):
+        return lc.anchors(field, text, self.TH)
+
+    def test_long_or_punctuated_numbers_are_anchors(self):
+        for text in ('217 คะแนน', '13,000 บรรทัด', '3.5 เท่า', '20% ของงาน'):
+            with self.subTest(text=text):
+                anc, amb = self.anchors(text)
+                self.assertEqual(1, len(anc), anc)
+                self.assertEqual(0, amb)
+
+    def test_short_number_without_unit_is_ambiguous(self):
+        anc, amb = self.anchors('RULES 3 & 4')
+        self.assertEqual(([], 2), (anc, amb))
+        anc, amb = self.anchors('คะแนน 5/10')
+        self.assertEqual(([], 0), (anc, amb))      # fractions are provenance-only
+
+    def test_short_number_with_unit_word_is_an_anchor_with_unit(self):
+        anc, amb = self.anchors('ใช้เวลา 20 ชั่วโมง')
+        self.assertEqual(0, amb)
+        self.assertEqual([('20 ชั่วโมง', 'ชั่วโมง')], [(a[0], a[2]) for a in anc])
+        anc, amb = self.anchors('15 PASSES')
+        self.assertEqual([('15 PASSES', 'PASSES')], [(a[0], a[2]) for a in anc])
+
+    def test_non_numeric_big_of_four_chars_is_anchor_three_is_not(self):
+        self.assertEqual(1, len(self.anchors('THREE.JS', 'stats[0].big')[0]))
+        self.assertEqual(([], 0), self.anchors('SDF', 'stats[0].big'))
+        self.assertEqual(([], 0), self.anchors('THREE.JS', 'headline'))    # only stat `big`
+
+    def test_ordinal_phrase_is_an_anchor(self):
+        anc, amb = self.anchors('รอบที่ 65')
+        self.assertEqual(([('รอบที่ 65', None)], 0), ([(a[0], a[2]) for a in anc], amb))
+
+    def inputs(self):
+        return make_inputs([at_time(190, ['ใช้', 'โค้ด']), at_time(200, ['ทำงาน', '20', 'ชั่วโมง', 'แล้ว', '4', 'คน'])])
+
+    def lint(self, **fields):
+        beat = pip(190.0, **fields)
+        issues, m = lc.lint_content(episode([dict(t=0, mode='full'), beat, dict(t=199.0, mode='full')], 210), self.inputs(), {})
+        return [i for i in issues if i['code'].startswith('card-timing')], m['timing']
+
+    def test_unit_must_also_follow_the_number_in_the_script(self):
+        issues, t = self.lint(headline='ใช้ 20 ชั่วโมง')           # "20 ชั่วโมง" spoken at 200.5 > beat end 199 -> gone
+        self.assertEqual(['card-timing-gone-before-spoken'], codes(issues))
+        issues, t = self.lint(headline='ใช้ 20 วัน')              # script has 20 followed by ชั่วโมง, not วัน -> never spoken as that unit
+        self.assertEqual([], codes(issues))
+        self.assertEqual(1, t['anchorsNeverSpoken'])
+
+    def test_ambiguous_numbers_are_counted_not_timed(self):
+        issues, t = self.lint(headline='มี 4 คน และ 3')
+        self.assertEqual(1, t['ambiguousAnchors'])                  # bare 3 is ambiguous; "4 คน" anchors (and is spoken after the beat)
+        self.assertEqual(['card-timing-gone-before-spoken'], codes(issues))
+        issues, t = self.lint(kicker='RULES 3 & 4')
+        self.assertEqual(([], 2), (codes(issues), t['ambiguousAnchors']))
+
+
 class PresenterTests(unittest.TestCase):
     def pr(self, spans, vo=100.0, **th):
         """spans: list of (t, has_media). Returns (issues, metrics['presenter'])."""
@@ -206,6 +286,16 @@ class PresenterTests(unittest.TestCase):
         inp = make_inputs([at_time(0, ['x'])])
         issues, m = run(beats, inp, vo, **th)
         return [i for i in issues if i['code'].startswith('presenter')], m['presenter']
+
+    def test_locked_defaults(self):
+        # locked by lead 2026-11-12
+        th = lc.THRESHOLDS
+        self.assertEqual((0.25, 12.0, 10.0), (th['maxPresenterShare'], th['maxPresenterRun'], th['coldOpenSeconds']))
+
+    def test_punch_does_not_reset_a_presenter_run(self):
+        beats = [dict(t=0, mode='full'), pip(10), dict(t=20, mode='full', punch=[{'at': 22, 'z': 1.2}]), dict(t=30, mode='full', punch=[{'at': 33, 'z': 1.3}]), pip(40), dict(t=90, mode='full')]
+        issues, m = lc.lint_content(episode(beats, 100), make_inputs([at_time(0, ['x'])]), {})
+        self.assertEqual([20.0], [i['t'] for i in issues if i['code'] == 'presenter-run'])   # 20-40 = 20 s despite two punches
 
     def test_cold_open_and_final_beat_excluded(self):
         # presenter 0-9 (cold open), media 9-90, presenter 90-100 (final)
@@ -224,7 +314,7 @@ class PresenterTests(unittest.TestCase):
         issues, p = self.pr([(0, False), (10, True), (20, False), (35, True), (50, False), (55, True), (95, False)])
         self.assertEqual(['presenter-run'], [i['code'] for i in issues])
         self.assertEqual(20.0, issues[0]['t'])
-        self.assertEqual([15.0], [r['seconds'] for r in p['runsAtLeastReportMin']])
+        self.assertEqual([15.0], [r['seconds'] for r in p['runsOver7']])
 
     def test_adjacent_presenter_beats_merge(self):
         issues, p = self.pr([(0, False), (10, True), (20, False), (27, False), (34, True), (95, False)])
@@ -241,7 +331,7 @@ class PresenterTests(unittest.TestCase):
     def test_threshold_override_and_runs_report_lists_seven_seconds(self):
         issues, p = self.pr([(0, False), (10, True), (20, False), (28, True), (95, False)], maxPresenterRun=5.0, maxPresenterShare=1.0)
         self.assertEqual(['presenter-run'], [i['code'] for i in issues])
-        self.assertEqual(1, len(p['runsAtLeastReportMin']))
+        self.assertEqual(1, len(p['runsOver7']))
 
     def test_presenter_only_final_beat_with_media_is_not_excluded(self):
         issues, p = self.pr([(0, False), (10, True), (50, True)])
@@ -270,22 +360,28 @@ class SimpleCheckTests(unittest.TestCase):
         self.assertIn('punch-forbidden', codes(self.lint([dict(t=0, mode='full'), pip(10), dict(t=50, mode='full', punch=[{'t': 60, 'z': 1.2}])])))
         self.assertNotIn('punch-forbidden', codes(self.lint([dict(t=0, mode='full', punch=[{'t': 3, 'z': 1.2}]), pip(10), dict(t=50, mode='full')])))
 
-    def typo(self, **kw):
-        return [dict(t=0, mode='full'), dict(t=5, mode='pip', media='typo', src='typo_a', origin='stock', layout='stage', chrome=False, **kw), dict(t=50, mode='full')]
+    def test_there_is_no_typo_kind_check_any_more(self):
+        beats = [dict(t=0, mode='full'), dict(t=5, mode='pip', media='typo', headline='x'), dict(t=50, mode='full')]
+        self.assertNotIn('typo-kind', codes(self.lint(beats)))
 
-    def test_typo_without_kind_fails_with_kind_and_items_passes(self):
-        self.assertIn('typo-kind', codes(self.lint(self.typo(items=['a']))))
-        self.assertIn('typo-kind', codes(self.lint(self.typo(cardKind='summary3'))))   # no items
-        self.assertIn('typo-kind', codes(self.lint(self.typo(cardKind='weird', items=['a']))))
-        self.assertNotIn('typo-kind', codes(self.lint(self.typo(cardKind='summary3', items=['a']))))
-
-    def test_typo_kind_adapter_accepts_card_and_typo_paths_and_dict_items(self):
-        self.assertNotIn('typo-kind', codes(self.lint(self.typo(card={'kind': 'vs', 'items': [{'text': 'a'}]}))))
-        self.assertNotIn('typo-kind', codes(self.lint(self.typo(typo={'kind': 'final4', 'items': ['a', 'b']}))))
-
-    def test_typo_kind_can_be_disabled_for_legacy_data(self):
-        self.assertNotIn('typo-kind', codes(self.lint(self.typo(items=['a']), requireTypoKind=False)))
-        self.assertNotIn('typo-kind', codes(self.lint(self.typo(), requireTypoKind=False)))
+    def test_punch_only_on_presenter_full_beats_and_never_after_ctaT(self):
+        def lint(beats, cta_t=None):
+            ep = ed._finish(beats, {'cta_t': cta_t}, 'test', 100.0, None)
+            return lc.lint_content(ep, self.inp, {})[0]
+        punch = [{'at': 12, 'z': 1.2}]
+        # pip beats: source, stock, stage, wide -> all forbidden
+        for extra in (dict(origin='source'), dict(origin='stock', media='broll'), dict(layout='wide')):
+            with self.subTest(extra=extra):
+                self.assertIn('punch-forbidden', codes(lint([dict(t=0, mode='full'), pip(10, punch=punch, **extra), dict(t=50, mode='full')], 90.0)))
+        # full beat before ctaT passes, at/after ctaT fails
+        beats = [dict(t=0, mode='full', punch=[{'at': 5, 'z': 1.2}]), pip(10), dict(t=50, mode='full', punch=[{'at': 60, 'z': 1.2}])]
+        self.assertNotIn('punch-forbidden', codes(lint(beats, 90.0)))
+        self.assertIn('punch-forbidden', codes(lint(beats, 60.0)))                 # at == ctaT
+        self.assertIn('punch-forbidden', codes(lint(beats, 55.0)))                 # after
+        self.assertIn('punch-forbidden', codes(lint(beats, None)))                 # legacy: final beat
+        # legacy `t` key is honoured
+        legacy = [dict(t=0, mode='full'), pip(10), dict(t=50, mode='full', punch=[{'t': 70, 'z': 1.2}])]
+        self.assertIn('punch-forbidden', codes(lint(legacy, 65.0)))
 
     def stock(self, origin='stock', src='desk', t=10):
         return [dict(t=0, mode='full'), dict(t=t, mode='pip', media='broll', src=src, origin=origin, layout='stage', chrome=False), dict(t=50, mode='full')]
@@ -362,23 +458,44 @@ class SimpleCheckTests(unittest.TestCase):
 
 
 class LoaderTests(unittest.TestCase):
-    def test_object_json_with_at_dur_is_primary(self):
+    def test_v4_object_json_is_primary(self):
         ep = ed.load_episode(FIX / 'episode_object.json')
         self.assertEqual('json-object', ep['format'])
         self.assertEqual(30.0, ep['vo_end'])
+        self.assertEqual(26.0, ep['cta_t'])
         self.assertEqual(4.5, ep['end_card_seconds'])
-        self.assertEqual(['ติดตามช่องไว้นะ'], [ed.episode_cta(ep)])
+        self.assertEqual('ติดตามช่องไว้นะ', ed.episode_cta(ep))
         self.assertEqual([0, 5, 12, 20, 28], [b['t'] for b in ep['beats']])
         self.assertEqual([5, 12, 20, 28, 30], [b['end'] for b in ep['beats']])
         self.assertEqual({'x': 0, 'y': 0, 'w': 1280, 'h': 720}, ep['beats'][1]['srcCrop'])  # passed through
         self.assertEqual(4, ep['beats'][3]['from'])
         fields = {f[0]: f for f in ed.text_fields(ep['beats'][3])}
-        self.assertEqual((21.0, 25.0, 'timed'), fields['stats[0].big'][2:])      # at/dur window, not cut at beat end
+        self.assertEqual((21.0, 25.0, 'timed'), fields['stats[0].big'][2:])      # [at, at+dur), not cut at beat end
         self.assertEqual((20, 28, 'beat'), fields['headline'][2:])
-        typo = {f[0]: f for f in ed.text_fields(ep['beats'][2])}
-        self.assertEqual((12, 20, 'beat'), typo['items[0]'][2:])
-        self.assertEqual((17.5, 20.5, 'timed'), typo['items[1]'][2:])
-        self.assertEqual({'kind': 'summary3', 'items': ep['beats'][2]['items']}, ed.typo_card(ep['beats'][2]))
+        full = {f[0]: f for f in ed.text_fields(ep['beats'][0])}
+        self.assertEqual((1, 4, 'timed'), full['lower.title'][2:])
+        items = {f[0]: f for f in ed.text_fields(ep['beats'][2])}
+        self.assertEqual((13, 20, 'timed'), items['items[0]'][2:])               # visible from `at` to beat end
+        self.assertEqual((19, 20, 'timed'), items['items[2]'][2:])
+
+    def test_episode_level_fields_cta_endcard_chrome(self):
+        ep = ed.load_episode(FIX / 'episode_object.json')
+        top = {f[0]: f for f in ed.episode_text_fields(ep)}
+        self.assertEqual((26.0, 30.0, 'timed'), top['cta'][2:])                    # [ctaT, voEndSec]
+        self.assertEqual((30.0, 34.5, 'beat'), top['endcard.titleB'][2:])
+        self.assertEqual({'endcard.eyebrow', 'endcard.titleA', 'endcard.titleB', 'endcard.cta'}, {k for k in top if k.startswith('endcard.')})
+        for k in ('brand', 'dateLabel', 'breakingLabel', 'officialTag', 'page.domain', 'page.path'):
+            self.assertEqual('chrome', top[k][4])
+
+    def test_vs_cards_and_items_text_fields(self):
+        beat = {'t': 10.0, 'end': 30.0, 'mode': 'pip', 'media': 'typo', 'typo': 'vs', 'headline': 'H',
+                'vs': {'left': {'title': 'A', 'badge': 'OLD', 'lines': ['l1', 'l2']}, 'right': {'title': 'B', 'badge': 'NEW', 'lines': ['r1']}, 'conclusion': 'C'},
+                'cards': [{'at': 10, 'lines': ['c1', 'c2']}, {'at': 18, 'lines': ['c3']}]}
+        f = {x[0]: x for x in ed.text_fields(beat)}
+        for k in ('vs.left.title', 'vs.left.badge', 'vs.left.lines[1]', 'vs.right.title', 'vs.right.badge', 'vs.right.lines[0]', 'vs.conclusion'):
+            self.assertEqual((10.0, 30.0, 'beat'), f[k][2:], k)               # whole beat
+        self.assertEqual((10, 18, 'timed'), f['cards[0].lines[1]'][2:])        # until the next card
+        self.assertEqual((18, 30.0, 'timed'), f['cards[1].lines[0]'][2:])      # until beat end
 
     def test_legacy_list_json(self):
         ep = ed.load_episode(FIX / 'episode_list.json', vo_end=30.0)
@@ -436,21 +553,332 @@ class LoaderTests(unittest.TestCase):
             self.assertEqual(2.0, flat.time_at(flat.stream.index('Gemini')))
 
 
-class CliTests(unittest.TestCase):
-    def run_cli(self, *extra, beats='episode_object.json', drop=()):
+class EvidenceTests(unittest.TestCase):
+    """Shown-vs-said checks on source clip beats."""
+    CUTS = {'yt_jet_engine': {'source_in': 590.0, 'source_out': 610.0}}
+
+    def inputs(self, evidence=None, frames=None, timed=None, chapters=None, legacy=False, title=''):
+        return make_inputs([at_time(390, ['x', 'y']), at_time(400, ['z'])], cuts=self.CUTS, legacy=legacy, evidence=evidence,
+                           frames=frames, timed=timed, chapters=chapters, title=title)
+
+    def beats(self, **kw):
+        return [dict(t=0, mode='full'), pip(399.0, src='yt_jet_engine', **{'headline': 'สร้างภาพตัดขวางเครื่องยนต์', **kw}), dict(t=408.0, mode='full')]
+
+    def run_(self, inp, **kw):
+        return lc.lint_content(episode(self.beats(**kw), 420), inp, {})[0]
+
+    ENTRY = {'t': 399.0, 'src': 'yt_jet_engine', 'cue_line': 2, 'subject_terms': ['jet engine'], 'seen': 'engine cutaway'}
+    TIMED = [{'start': 592.0, 'end': 598.0, 'text': 'now the jet engines are rebuilt'}]
+
+    def test_evidence_missing_fails_closed_and_is_skipped_under_legacy(self):
+        self.assertIn('evidence-missing', codes(self.run_(self.inputs())))
+        self.assertNotIn('evidence-missing', codes(self.run_(self.inputs(legacy=True, timed=self.TIMED))))
+
+    def test_clean_beat_with_evidence_passes(self):
+        issues = self.run_(self.inputs(evidence=[self.ENTRY], timed=self.TIMED))
+        self.assertEqual([], [c for c in codes(issues) if c in ('evidence-missing', 'cue-mismatch', 'window-evidence-unavailable', 'subject-not-in-window', 'label-latin-not-in-window')])
+
+    def test_cue_line_must_overlap_the_beat(self):
+        # line 1 spans 390-?, line 2 400-401; beat is 399-408; line 1 ends at 392 -> no overlap
+        bad = {**self.ENTRY, 'cue_line': 1}
+        self.assertIn('cue-mismatch', codes(self.run_(self.inputs(evidence=[bad], timed=self.TIMED))))
+        self.assertIn('cue-mismatch', codes(self.run_(self.inputs(evidence=[{**self.ENTRY, 'cue_line': 99}], timed=self.TIMED))))
+
+    def test_window_unavailable_when_no_transcript_ocr_or_chapter(self):
+        self.assertIn('window-evidence-unavailable', codes(self.run_(self.inputs(evidence=[self.ENTRY]))))
+
+    def test_subject_must_occur_in_window_from_transcript_ocr_or_chapter(self):
+        wrong = [{'start': 592.0, 'end': 598.0, 'text': 'the fort is shown from above'}]
+        self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong))))
+        # each of the three sources can carry it
+        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong, frames={(399.0, 'yt_jet_engine'): ['Jet Engine cutaway']}))))
+        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=wrong, chapters=[{'start': 580.0, 'end': 612.0, 'title': 'Jet engines'}]))))
+
+    def test_window_is_the_original_video_range_padded_three_seconds(self):
+        shown = 590.0   # beat 399-408 -> original 590-599 (capped at source_out 610)
+        other = {'start': 591.0, 'end': 592.0, 'text': 'something else'}
+        late = [other, {'start': 603.0, 'end': 606.0, 'text': 'jet engine'}]      # starts 4 s after the shown end (599)
+        near = [other, {'start': 601.5, 'end': 606.0, 'text': 'jet engine'}]      # starts 2.5 s after -> inside the +3 s pad
+        self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=late))))
+        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[self.ENTRY], timed=near))))
+
+    def test_chapter_must_contain_the_whole_shown_range(self):
+        straddle = [{'start': 500.0, 'end': 595.0, 'title': 'Jet engine'}, {'start': 595.0, 'end': 700.0, 'title': 'Other'}]
+        self.assertIn('window-evidence-unavailable', codes(self.run_(self.inputs(evidence=[self.ENTRY], chapters=straddle))))
+
+    def test_stem_rule_plural_and_suffix_insensitive(self):
+        self.assertEqual(lc.stem('engines'), lc.stem('engine'))
+        self.assertEqual(lc.stem('rendering'), lc.stem('rendered'))
+        self.assertEqual(lc.stem('Satellites'), lc.stem('satellite'))
+        self.assertNotEqual(lc.stem('fort'), lc.stem('forest'))
+
+    def test_legacy_derives_subject_terms_from_slug(self):
+        both = [{'start': 592.0, 'end': 598.0, 'text': 'a jet engine appears'}]
+        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(legacy=True, timed=both))))
+        only_one = [{'start': 592.0, 'end': 598.0, 'text': 'a jet appears'}]       # the slug is ONE term: all its words must occur
+        self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(legacy=True, timed=only_one))))
+        self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(legacy=True, timed=[{'start': 592.0, 'end': 598.0, 'text': 'something else'}]))))
+        self.assertEqual(['jet engine'], lc.slug_terms('yt_jet_engine'))
+        self.assertEqual(['fort mid pass'], lc.slug_terms('yt_fort_mid_pass'))
+        self.assertEqual(['gemini'], lc.slug_terms('yt_ab_gemini'))          # < 3 letters dropped
+        self.assertEqual([], lc.slug_terms('yt_ab'))
+
+    def test_subject_term_needs_all_tokens_but_any_one_term_passes(self):
+        entry = {**self.ENTRY, 'subject_terms': ['jet engine', 'fort']}
+        timed = [{'start': 592.0, 'end': 598.0, 'text': 'the fort and a jet'}]
+        self.assertNotIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[entry], timed=timed))))   # 'fort' alone matches
+        entry = {**self.ENTRY, 'subject_terms': ['jet engine']}
+        self.assertIn('subject-not-in-window', codes(self.run_(self.inputs(evidence=[entry], timed=timed))))
+
+    def test_label_latin_not_in_window(self):
+        inp = self.inputs(evidence=[self.ENTRY], timed=self.TIMED, title='Gemini Is Here')
+        self.assertIn('label-latin-not-in-window', codes(self.run_(inp, headline='เครื่องยนต์ Carbon')))
+        # in the window (stem-insensitive), in the source title, allowlisted or < 4 letters -> fine
+        for headline in ('เครื่อง Engines', 'เครื่อง Gemini', 'เครื่อง NEWS', 'เครื่อง GPU'):
+            with self.subTest(headline=headline):
+                self.assertNotIn('label-latin-not-in-window', codes(self.run_(inp, headline=headline)))
+
+    def test_only_source_clip_beats_are_checked(self):
+        beats = [dict(t=0, mode='full'), dict(t=5, mode='pip', media='broll', src='desk', origin='stock', layout='stage', headline='Carbon'), dict(t=50, mode='full')]
+        issues = lc.lint_content(episode(beats, 60), self.inputs(), {})[0]
+        self.assertFalse([c for c in codes(issues) if c in ('evidence-missing', 'subject-not-in-window', 'label-latin-not-in-window')])
+
+
+class LatinSeverityTests(unittest.TestCase):
+    def lint(self, **fields):
+        inp = make_inputs([at_time(0, ['คำ', 'พูด'])])
+        beat = {**pip(5.0, media='typo', src=None, origin=None), **fields}
+        return lc.lint_content(episode([dict(t=0, mode='full'), beat, dict(t=50, mode='full')], 60), inp, {})
+
+    def test_provenance_latin_is_always_a_warn(self):
+        for fields in (dict(kicker='ZEBRA'), dict(headline='ZEBRA'), dict(sub='ZEBRA'),
+                       dict(stats=[{'at': 6, 'dur': 3, 'big': 'ZEBRA', 'label': 'x'}]), dict(stats=[{'at': 6, 'dur': 3, 'label': 'ZEBRA'}]),
+                       dict(cards=[{'at': 5, 'lines': ['ZEBRA']}]), dict(items=[{'at': 5, 'text': 'ZEBRA'}]),
+                       dict(vs={'left': {'title': 'ZEBRA', 'badge': 'b', 'lines': ['l']}, 'right': {'title': 't', 'badge': 'b', 'lines': ['l']}, 'conclusion': 'c'}),
+                       dict(lower={'at': 5, 'dur': 3, 'title': 'ZEBRA', 'sub': 's'})):
+            with self.subTest(fields=list(fields)):
+                issues, m = self.lint(**fields)
+                self.assertEqual(['warn'], [i['severity'] for i in issues if i['code'] == 'provenance-latin'])
+
+    def test_metric_splits_editorial_from_data_bearing(self):
+        issues, m = self.lint(kicker='UNSPOKEN', items=[{'at': 5, 'text': 'ZEBRA'}])
+        self.assertEqual({'editorial': 1, 'dataBearing': 1, 'warn': 2, 'error': 0}, m['latin'])
+
+    def test_cta_and_endcard_latin_are_warns_in_the_data_bearing_count(self):
+        inp = make_inputs([at_time(0, ['คำ', 'พูด'])])
+        ep = ed._finish([dict(t=0, mode='full'), pip(5.0)], {'cta': 'ZEBRA', 'cta_t': 20.0, 'top': {'cta': 'ZEBRA', 'endcard': {'eyebrow': 'GIRAFFE', 'titleA': 'ok', 'titleB': 'ok', 'cta': 'x'}}}, 'test', 30.0, None)
+        issues, m = lc.lint_content(ep, inp, {})
+        hits = {(i['field'], i['severity']) for i in issues if i['code'] == 'provenance-latin'}
+        self.assertEqual({('cta', 'warn'), ('endcard.eyebrow', 'warn')}, hits)
+        self.assertEqual(2, m['latin']['dataBearing'])
+
+
+class ThaiNumberTests(unittest.TestCase):
+    """Scripts that spell numbers as Thai words must satisfy digit numbers on screen."""
+
+    def test_runs(self):
+        runs = lambda line: [(line[s:e], v) for s, e, v in ed.thai_number_runs(line)]
+        self.assertEqual([('สิบ', '10'), ('หนึ่ง', '1')], runs('ใช้เวลาสิบวินาที ไม่ถึงหนึ่งนาที'))
+        self.assertEqual([('หนึ่งหมื่นสามพัน', '13000')], runs('มีหนึ่งหมื่นสามพันบรรทัด'))
+        self.assertEqual([('ยี่สิบเอ็ด', '21'), ('ห้าสิบ', '50'), ('หนึ่งร้อยยี่สิบ', '120')], runs('ยี่สิบเอ็ดคน ห้าสิบ หนึ่งร้อยยี่สิบ'))
+        self.assertEqual([('สามจุดห้า', '3.5')], runs('สามจุดห้าเท่า'))
+        self.assertEqual([('สี่', '4')], runs('ขั้นตอนที่สี่'))                              # ordinal marker "ที่" stripped
+        # words that merely contain number syllables are not numbers; ill-formed runs are skipped
+        self.assertEqual([], runs('เขาสามารถวาดสี่เหลี่ยมได้ จุดเปลี่ยน ห้างสรรพสินค้า'))
+        self.assertEqual([], runs('สองสามครั้ง'))
+
+    def inputs(self, words):
+        return make_inputs([words], join='')      # real Thai scripts have no spaces inside a number
+
+    def lint(self, inp, **fields):
+        beat = pip(0.0, **fields)
+        return lc.lint_content(episode([beat, dict(t=20.0, mode='full')], 30.0), inp, {})
+
+    def test_sip_winati_matches_digit_ten_and_keeps_the_run_start_time(self):
+        inp = self.inputs([('ใช้เวลา', 1.0), ('สิบ', 2.0), ('วินาที', 3.0)])
+        issues, m = self.lint(inp, kicker='10 SEC', headline='ใช้เวลา 10 วินาที', stats=[{'at': 0.0, 'dur': 20.0, 'big': '10', 'label': 'x'}])
+        self.assertNotIn('provenance-number', codes(issues))
+        self.assertEqual(1, m['timing']['thaiNumberRunsInScript'])
+        # "10 วินาที" is an anchor (unit word also follows in the script): spoken at the run's first token, 2.0
+        hit = lc.lint_content(episode([pip(10.0, headline='ใช้เวลา 10 วินาที'), dict(t=20.0, mode='full')], 30.0), inp, {})[0]
+        gone = [i for i in hit if i['code'] == 'card-timing-gone-before-spoken']
+        self.assertEqual([], gone)       # visible 10-20, spoken at 2: whole-beat label, late is not an error
+        gone = lc.lint_content(episode([pip(0.0, headline='ใช้เวลา 10 วินาที'), dict(t=1.5, mode='full'), pip(5.0)], 30.0), inp, {})[0]
+        self.assertEqual([2.0], [i['spoken'] for i in gone if i['code'] == 'card-timing-gone-before-spoken'])
+
+    def test_thirteen_thousand_in_words_matches_and_is_timed(self):
+        inp = self.inputs([('เกือบ', 1.0), ('หนึ่ง', 2.0), ('หมื่น', 2.4), ('สาม', 2.8), ('พัน', 3.2), ('บรรทัด', 3.6)])
+        issues, m = self.lint(inp, headline='13,000 บรรทัด')
+        self.assertNotIn('provenance-number', codes(issues))
+        beats = [dict(t=0, mode='full'), pip(0.5, stats=[{'at': 0.5, 'dur': 1.0, 'big': '13,000', 'label': 'x'}]), dict(t=5.0, mode='full')]
+        issues, _ = lc.lint_content(episode(beats, 30.0), inp, {})
+        hit = [i for i in issues if i['code'] == 'card-timing-gone-before-spoken'][0]
+        self.assertEqual(2.0, hit['spoken'])                                         # time of the run's first token
+
+    def test_thai_ordinal_in_words_satisfies_digit_ordinal(self):
+        inp = self.inputs([('ขั้นตอน', 1.0), ('ที่', 2.0), ('สี่', 3.0)])
+        issues, _ = self.lint(inp, kicker='ขั้นตอนที่ 4', sub='ขั้นตอนที่ 5')
+        ords = [(i['field'], i['severity']) for i in issues if i['code'] == 'provenance-ordinal']
+        self.assertEqual([('sub', 'error')], ords)
+
+    def test_english_ordinal_translation_of_thai_ordinal_is_a_warn(self):
+        inp = self.inputs([('ขั้นตอน', 1.0), ('ที่', 2.0), ('สี่', 3.0)])
+        issues, _ = self.lint(inp, kicker='STEP 4')
+        self.assertEqual([('provenance-ordinal', 'warn')], [(i['code'], i['severity']) for i in issues if i['code'] == 'provenance-ordinal'])
+        issues, _ = self.lint(inp, kicker='STEP 9')
+        self.assertEqual(['error'], [i['severity'] for i in issues if i['code'] == 'provenance-ordinal'])
+        issues, _ = lc.lint_content(episode([pip(0.0, kicker='STEP 4'), dict(t=20.0, mode='full')], 30.0),
+                                    make_inputs([at_time(0, ['say', 'Step', '4'])]), {})
+        self.assertNotIn('provenance-ordinal', codes(issues))                     # said in English -> nothing
+
+    def test_decimal_in_words(self):
+        inp = self.inputs([('สาม', 1.0), ('จุด', 1.5), ('ห้า', 2.0), ('เท่า', 2.5)])
+        issues, _ = self.lint(inp, headline='3.5 เท่า')
+        self.assertNotIn('provenance-number', codes(issues))
+
+    def test_cue_times_finds_a_number_spelled_in_words(self):
+        clock = ed.ScriptClock(['ใช้เวลาสิบวินาที'], [{'text': t, 'start': s, 'end': None, 'line': 1} for t, s in (('ใช้เวลา', 0.0), ('สิบ', 1.0), ('วินาที', 2.0))])
+        import cue_times
+        kind, occ = cue_times.find(clock, '10')
+        self.assertEqual([{'line': 1, 'start': 1.0, 'matched': 'สิบ'}], occ)
+
+
+class ProductNameAnchorTests(unittest.TestCase):
+    """A number that is part of a product/version name is not a timing anchor."""
+    TH = lc.THRESHOLDS
+
+    def anchors(self, text, inp, field='stats[0].big'):
+        counts = {}
+        anc, amb = lc.anchors(field, text, self.TH, inp, counts)
+        return [a[0] for a in anc], amb, counts.get('product', 0)
+
+    def inp(self, **kw):
+        return make_inputs([at_time(0, ['พูด', 'ถึง', 'Opus', '5.5', 'และ', 'Opus', '5.5', 'กับ', 'Opus', '5.5'])], **kw)
+
+    def test_name_in_source_title_or_description(self):
+        inp = self.inp(meta='Gemini 4 Carbon Is Finally Here')
+        self.assertEqual(([], 0, 1), self.anchors('GEMINI 4 CARBON', inp))        # left word "Gemini" + 4 -> "gemini4" in the title
+        self.assertEqual(([], 0, 1), self.anchors('4 Carbon', inp))              # number + right word
+        self.assertEqual((['217'], 0, 0), self.anchors('217 Carbon', inp))      # "217carbon" is not a name
+
+    def test_name_said_three_times_in_the_script(self):
+        self.assertEqual(([], 0, 1), self.anchors('OPUS 5.5', self.inp()))       # "opus5.5" x3 in the script
+        inp = make_inputs([at_time(0, ['Opus', '5.5', 'และ', 'Opus', '5.5'])])  # only twice
+        self.assertEqual((['5.5'], 0, 0), self.anchors('OPUS 5.5', inp))
+
+    def test_hyphens_and_case_are_ignored(self):
+        inp = self.inp(meta='GPT-Image-2.6: Faster image generation')
+        self.assertEqual(([], 0, 1), self.anchors('gpt image 2.6', inp))
+        self.assertEqual(([], 0, 1), self.anchors('GPT-Image-2.6', inp))
+
+    def test_counted_in_metrics_and_no_timing_issue(self):
+        inp = make_inputs([at_time(100, ['Gemini', '4', 'Carbon', 'ออก'])], meta='Gemini 4 Carbon Is Here')
+        beat = pip(0.0, headline='x', **{'lower': None})
+        beats = [{'t': 0, 'mode': 'full', 'lower': {'at': 1.0, 'dur': 3.0, 'title': 'GEMINI 4 CARBON', 'sub': 'รุ่นใหม่'}}, pip(10.0), dict(t=20.0, mode='full')]
+        issues, m = lc.lint_content(episode(beats, 200.0), inp, {})
+        self.assertEqual([], [c for c in codes(issues) if c.startswith('card-timing')])
+        self.assertEqual(1, m['timing']['productNameAnchors'])
+
+
+class LabelTimingTests(unittest.TestCase):
+    """Whole-beat labels can only be gone-before-spoken; timed items keep early/late."""
+
+    def inputs(self):
+        return make_inputs([at_time(100, ['เกือบ', '13000', 'บรรทัด']), at_time(10, ['x'])])
+
+    def issues(self, beats, vo=200.0):
+        return [c for c in codes(lc.lint_content(episode(beats, vo), self.inputs(), {})[0]) if c.startswith('card-timing')]
+
+    def test_label_never_late_or_early(self):
+        beats = [dict(t=0, mode='full'), pip(150.0, headline='เกือบ 13,000 บรรทัด', kicker='13,000'), dict(t=190.0, mode='full')]   # spoken at ~100.5
+        self.assertEqual([], self.issues(beats))
+        beats = [dict(t=0, mode='full'), pip(95.0, headline='13,000 บรรทัด'), dict(t=100.0, mode='full')]
+        self.assertEqual(['card-timing-gone-before-spoken'], self.issues(beats))
+
+    def test_timed_item_still_late_and_early(self):
+        late = [dict(t=0, mode='full'), pip(125.0, stats=[{'at': 125.0, 'dur': 5.0, 'big': '13,000', 'label': 'x'}]), dict(t=190.0, mode='full')]
+        self.assertEqual(['card-timing-late'], self.issues(late))
+        early = [dict(t=0, mode='full'), pip(90.0, stats=[{'at': 90.0, 'dur': 15.0, 'big': '13,000', 'label': 'x'}]), dict(t=190.0, mode='full')]
+        self.assertEqual(['card-timing-early'], self.issues(early))
+
+    def test_vs_and_items_without_at_are_labels(self):
+        beats = [dict(t=0, mode='full'), pip(150.0, media='typo', src=None, origin=None, vs={'left': {'title': 'a', 'badge': 'b', 'lines': ['13,000 บรรทัด']},
+                                                                                         'right': {'title': 'a', 'badge': 'b', 'lines': ['l']}, 'conclusion': 'c'}), dict(t=190.0, mode='full')]
+        self.assertEqual([], self.issues(beats))
+
+    def test_final_beat_texts_are_label_like(self):
+        beats = [dict(t=0, mode='full'), pip(150.0, stats=[{'at': 150.0, 'dur': 5.0, 'big': '13,000', 'label': 'x'}])]
+        self.assertEqual([], self.issues(beats))          # last beat: no late
+
+
+class SchemaStepTests(unittest.TestCase):
+    def run_cli(self, *extra, beats='episode_object.json', evidence=True, validator='schema_stub_valid.mjs', legacy=False, drop=()):
         with tempfile.TemporaryDirectory() as d:
             report = Path(d) / 'r.json'
             args = {'--beats': FIX / beats, '--script': FIX / 'script.txt', '--words': FIX / 'words_by_line.txt',
                     '--line-starts': FIX / 'line_starts.json', '--cuts': FIX / 'cuts.json',
-                    '--source-transcript': FIX / 'source_transcript.txt', '--source-meta': FIX / 'source_meta.json'}
+                    '--source-transcript': FIX / 'source_transcript.txt', '--source-meta': FIX / 'source_meta.json',
+                    '--source-timed': FIX / 'source_timed.json'}
+            if evidence:
+                args['--evidence'] = FIX / 'visual_evidence.json'
+            if validator:
+                args['--schema-validator'] = FIX / validator
             argv = [sys.executable, str(SCRIPTS / 'lint_content.py')]
             for k, v in args.items():
                 if k not in drop:
                     argv += [k, str(v)]
+            if legacy:
+                argv.append('--legacy')
             proc = subprocess.run(argv + list(extra) + ['--report', str(report)], capture_output=True, text=True)
             return proc, json.loads(report.read_text()) if report.exists() else None
 
-    def test_clean_episode_passes_and_report_shape(self):
+    def test_valid_stub_passes_and_forwards_captions(self):
+        proc, rep = self.run_cli('--captions', str(FIX / 'script.txt'))
+        self.assertEqual(0, proc.returncode, proc.stdout)
+        self.assertTrue(rep['metrics']['schema']['ran'])
+        self.assertTrue(rep['metrics']['schema']['valid'])
+        self.assertEqual('stub', rep['metrics']['schema']['schemaSha256'])
+
+    def test_validator_args_are_validate_episode_captions_json(self):
+        issues, summary = lc.run_schema(FIX / 'episode_object.json', FIX / 'script.txt', FIX / 'schema_stub_valid.mjs')
+        self.assertEqual([], issues)
+        # the stub echoes its argv
+        out = subprocess.run(['node', str(FIX / 'schema_stub_valid.mjs'), 'validate', 'e.json', '--captions', 'c.json', '--json'], capture_output=True, text=True)
+        self.assertEqual(['validate', 'e.json', '--captions', 'c.json', '--json'], json.loads(out.stdout)['args'])
+
+    def test_errors_become_schema_issues_with_path_rule_message(self):
+        proc, rep = self.run_cli(validator='schema_stub_invalid.mjs')
+        self.assertEqual(1, proc.returncode)
+        schema = [i for i in rep['issues'] if i['code'] == 'schema']
+        err = [i for i in schema if i['severity'] == 'error'][0]
+        self.assertEqual(('/beats/1/from', 'S09', 'shown frames exceed loop length'), (err['path'], err['rule'], err['detail']))
+        self.assertEqual(['warn'], [i['severity'] for i in schema if i['rule'] == 'S11'])
+        self.assertFalse(rep['metrics']['schema']['valid'])
+
+    def test_validator_exit_2_makes_lint_exit_2(self):
+        proc, rep = self.run_cli(validator='schema_stub_exit2.mjs')
+        self.assertEqual(2, proc.returncode)
+        self.assertEqual('input', rep['issues'][0]['code'])
+
+    def test_missing_validator_is_an_error_unless_legacy(self):
+        proc, rep = self.run_cli(validator='does_not_exist.mjs')
+        self.assertEqual(1, proc.returncode)
+        self.assertIn('schema-validator-missing', [i['code'] for i in rep['issues']])
+        proc, rep = self.run_cli(validator='does_not_exist.mjs', legacy=True)
+        self.assertNotIn('schema-validator-missing', [i['code'] for i in rep['issues']])
+
+    def test_evidence_missing_via_cli_unless_legacy(self):
+        proc, rep = self.run_cli(evidence=False)
+        self.assertEqual(1, proc.returncode)
+        self.assertEqual(2, [i['code'] for i in rep['issues']].count('evidence-missing'))
+        proc, rep = self.run_cli(evidence=False, legacy=True)
+        self.assertNotIn('evidence-missing', [i['code'] for i in rep['issues']])
+
+
+class CliTests(unittest.TestCase):
+    run_cli = SchemaStepTests.run_cli
+
+    def test_clean_v4_episode_passes_and_report_shape(self):
         proc, rep = self.run_cli()
         self.assertEqual(0, proc.returncode, proc.stdout)
         self.assertEqual(rep, json.loads(proc.stdout))
@@ -460,6 +888,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual({'issues', 'metrics', 'thresholds', 'inputs', 'schema', 'version', 'pass'}, set(rep))
         self.assertEqual(64, len(rep['inputs'][str(FIX / 'script.txt')]))
         self.assertIn('presenter', rep['metrics'])
+        self.assertEqual({'editorial': 0, 'dataBearing': 0, 'warn': 0, 'error': 0}, rep['metrics']['latin'])
+        self.assertEqual(0, rep['metrics']['evidence']['windowUnavailable'])
 
     def test_errors_exit_1_and_warn_alone_passes(self):
         proc, rep = self.run_cli('--set', 'maxCtaChars=3')
@@ -475,14 +905,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(2, proc.returncode)
 
     def test_legacy_list_with_vo_end(self):
-        proc, rep = self.run_cli('--vo-end', '30', '--legacy', beats='episode_list.json')
+        proc, rep = self.run_cli('--vo-end', '30', evidence=False, legacy=True, beats='episode_list.json')
         self.assertEqual(0, proc.returncode, proc.stdout)
-        proc, rep = self.run_cli('--vo-end', '30', beats='episode_list.json')
+        self.assertEqual('json-list', rep['metrics']['episodeFormat'])
+        proc, rep = self.run_cli('--vo-end', '30', evidence=False, beats='episode_list.json')     # without --legacy: not a V4 episode
         self.assertEqual(1, proc.returncode)
-        self.assertIn('typo-kind', [i['code'] for i in rep['issues']])
+        self.assertIn('schema', [i['code'] for i in rep['issues']])
 
-    def test_tsx_via_cli(self):
-        proc, rep = self.run_cli(beats='episode_mini.tsx')
+    def test_legacy_tsx_via_cli(self):
+        proc, rep = self.run_cli(beats='episode_mini.tsx', evidence=False, legacy=True)
         self.assertEqual(0, proc.returncode, proc.stdout)
         self.assertEqual('tsx', rep['metrics']['episodeFormat'])
 

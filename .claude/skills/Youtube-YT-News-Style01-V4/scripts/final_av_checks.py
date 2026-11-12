@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Final-video freeze / black-frame gate (fail-closed).
 
-final_av_checks.py <final.mp4> --report R [--freeze-min 2.0] [--black-min 0.5] [--allow-tail SEC]
+final_av_checks.py <final.mp4> --report R [--freeze-min 2.0] [--black-min 0.5] [--allow-tail SEC] [--ignore-from SEC]
+
+--ignore-from: issues that START at or after this time are ignored (the V4 end card, a static dark frame on
+[voEndSec, totalDurationSec)); a span that starts before it is still reported.
 
 Exit codes: 0 pass, 1 quality issues, 2 bad input / decode failure, 4 ffmpeg missing.
 The report is always written (also on failure) so a caller can tell a fresh report from a stale one.
@@ -61,11 +64,13 @@ def parse_spans(stderr, duration):
     return freezes, blacks
 
 
-def evaluate(freezes, blacks, duration, freeze_min, black_min, allow_tail):
+def evaluate(freezes, blacks, duration, freeze_min, black_min, allow_tail, ignore_from=None):
     issues = []
     tail_start = duration - allow_tail if allow_tail > 0 else duration
     for kind, spans, minimum in (('freeze', freezes, freeze_min), ('black', blacks, black_min)):
         for start, end in spans:
+            if ignore_from is not None and start >= ignore_from - 1e-3:
+                continue
             effective_end = min(end, tail_start)
             if effective_end - start + 1e-6 >= minimum:
                 issues.append({'code': kind, 'start': round(start, 3), 'end': round(end, 3),
@@ -90,9 +95,10 @@ def main(argv=None):
     ap.add_argument('--freeze-min', type=float, default=2.0)
     ap.add_argument('--black-min', type=float, default=0.5)
     ap.add_argument('--allow-tail', type=float, default=0.0)
+    ap.add_argument('--ignore-from', type=float, default=None)
     args = ap.parse_args(argv)
     report = {'schema': SCHEMA, 'version': 1, 'pass': False, 'issues': [], 'duration': None, 'inputs': {},
-              'params': {'freeze_min': args.freeze_min, 'black_min': args.black_min, 'allow_tail': args.allow_tail,
+              'params': {'freeze_min': args.freeze_min, 'black_min': args.black_min, 'allow_tail': args.allow_tail, 'ignore_from': args.ignore_from,
                          'freeze_noise': FREEZE_NOISE}}
     code = 2
     try:
@@ -104,7 +110,8 @@ def main(argv=None):
         if not src.is_file():
             report['error'] = 'input not found: ' + str(src)
             raise SystemExit
-        if min(args.freeze_min, args.black_min) <= 0 or args.allow_tail < 0:
+        if min(args.freeze_min, args.black_min) <= 0 or args.allow_tail < 0 \
+                or (args.ignore_from is not None and args.ignore_from < 0):
             report['error'] = 'thresholds must be positive'
             raise SystemExit
         report['inputs'] = {str(src.resolve()): sha256_file(src)}
@@ -117,7 +124,7 @@ def main(argv=None):
             report['error'] = 'ffmpeg analysis failed: ' + r.stderr[-1000:]
             raise SystemExit
         freezes, blacks = parse_spans(r.stderr, duration)
-        report['issues'] = evaluate(freezes, blacks, duration, args.freeze_min, args.black_min, args.allow_tail)
+        report['issues'] = evaluate(freezes, blacks, duration, args.freeze_min, args.black_min, args.allow_tail, args.ignore_from)
         report['pass'] = not report['issues']
         code = 0 if report['pass'] else 1
     except SystemExit:

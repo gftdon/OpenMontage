@@ -20,7 +20,7 @@ SCHEMA = 'yt-news-v4-gates-lock'
 VERSION = 1
 LOCK_REL = 'scripts/gates.lock.json'
 EXCLUDED_DIR_NAMES = {'__pycache__'}
-EXCLUDED_REL_DIRS = {'scripts/tests'}   # tests are not gates
+EXCLUDED_REL_DIRS = set()   # tests and fixtures are locked too (they cannot be weakened)
 EXCLUDED_FILE_NAMES = {'.DS_Store'}
 
 
@@ -136,7 +136,7 @@ def _git_problems(repo_root, entries):
         present = [p for p in paths if (Path(repo_root) / p).is_file()]
         hashes = {}
         if present:
-            ho = _git(repo_root, 'hash-object', '--no-filters', '--stdin-paths', input_bytes=('\n'.join(present) + '\n').encode())
+            ho = _git(repo_root, 'hash-object', '--stdin-paths', input_bytes=('\n'.join(present) + '\n').encode())
             if ho.returncode:
                 return ['git-unavailable: git hash-object failed: %s' % ho.stderr.decode().strip()]
             out = ho.stdout.decode().split()

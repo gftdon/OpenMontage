@@ -73,17 +73,29 @@ class LockTests(unittest.TestCase):
     def test_roundtrip_clean_and_excluded_paths(self):
         self.assertEqual([], self.verify())
         lock = json.loads((self.skill / 'scripts' / 'gates.lock.json').read_text())
-        self.assertEqual(['SKILL.md', 'references/a.md', 'scripts/gate.py'], list(lock['files']))
+        # tests and fixtures are locked too; only __pycache__, .DS_Store and the lock itself are excluded
+        self.assertEqual(['SKILL.md', 'references/a.md', 'scripts/gate.py', 'scripts/tests/test_x.py'], list(lock['files']))
         self.assertEqual(['engine/core.ts'], list(lock['external']))
         self.assertEqual((NAME, 'yt-news-v4-gates-lock', 1), (lock['skill'], lock['schema'], lock['version']))
-        for excluded in ('tests', '__pycache__', '.DS_Store', 'gates.lock.json', '.pyc'):
+        for excluded in ('__pycache__', '.DS_Store', 'gates.lock.json', '.pyc'):
             self.assertFalse(any(excluded in k for k in lock['files']), excluded)
         # excluded paths may change freely
-        (self.skill / 'scripts' / 'tests' / 'test_x.py').write_text('changed\n')
-        (self.skill / 'scripts' / 'tests' / 'test_new.py').write_text('new\n')
         (self.skill / 'scripts' / '__pycache__' / 'gate.cpython-312.pyc').write_bytes(b'other')
+        (self.skill / 'scripts' / 'tests' / '__pycache__').mkdir()
+        (self.skill / 'scripts' / 'tests' / '__pycache__' / 'x.pyc').write_bytes(b'x')
         (self.skill / '.DS_Store').write_bytes(b'ds2')
         self.assertEqual([], self.verify())
+
+    def test_tests_and_fixtures_are_locked(self):
+        (self.skill / 'scripts' / 'tests' / 'test_x.py').write_text('weakened\n')
+        self.assertIn('file-changed', codes(self.verify()))
+        (self.skill / 'scripts' / 'tests' / 'test_x.py').write_text('x\n')
+        (self.skill / 'scripts' / 'tests' / 'test_new.py').write_text('new\n')
+        self.assertIn('file-extra', codes(self.verify()))
+        (self.skill / 'scripts' / 'tests' / 'test_new.py').unlink()
+        (self.skill / 'scripts' / 'tests' / 'fixtures').mkdir()
+        (self.skill / 'scripts' / 'tests' / 'fixtures' / 'f.json').write_text('{}')
+        self.assertIn('file-extra', codes(self.verify()))
 
     def test_lock_is_deterministic(self):
         a = gl.lock_bytes(gl.build_lock(self.skill, self.repo, ['engine/core.ts']))

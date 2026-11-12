@@ -13,10 +13,18 @@ Local tools only (ffmpeg, numpy, PIL, macOS Vision through scripts/ocr_vision.sw
 Exit codes: 0 = pass, 1 = issues found, 2 = bad input, 4 = a required tool (ffmpeg / swift+Vision) cannot run.
 OCR is never skipped silently: when Vision OCR cannot run the command exits 4.
 
-Sampling note: the pixel check samples at THRESHOLDS["sample_fps"]. A run needs at least two consecutive
-flagged samples (first-to-last span >= run_min_seconds), so a single-sample flash (a 0.2 s white flash)
-is never reported; a blank range that is shorter than the run minimum is reported only when the whole
-shown range is blank.
+Coordinates: every crop (--crop, beat `srcCrop`, `crop-propose` output) is in pixels of a 1920x1080 source
+frame and is scaled to the real file resolution when the file differs.
+
+Blank-frame rule: a sampled frame is low-information when the fraction of pixels whose luma differs from the
+frame's MEDIAN luma by more than infoDelta is below infoMinFraction. Dark-theme screen recordings are NOT
+blank (a few bright UI pixels are enough). Subtype in the detail: white (median > 200), black (median < 40), flat.
+A run needs at least two consecutive low-information samples (first-to-last span >= run_min_seconds), so a
+single-sample flash is never reported; a range shorter than the run minimum is reported only when all of it is blank.
+
+V4 playback semantics (engine spec S09-S11): `from` is the offset inside the public cut file; source beats never
+loop (-> `source-loop` error); stock loops restart at `from` with loop length floor((brollDur - from) * 25) - 2
+frames, so only [from, from + loop length] is ever shown.
 """
 from __future__ import annotations
 
@@ -37,27 +45,31 @@ from pathlib import Path
 import numpy as np
 
 THRESHOLDS = {
-    # pixel check
+    # blank-frame rule
     "sample_fps": 2.0,
-    "blank_mean_min": 225,          # blank-white: mean luma above this ...
-    "blank_range_max": 40,          # ... and (max - min luma) below this
-    "black_mean_max": 20,           # near-black: mean luma below this
+    "infoDelta": 40,                # a pixel is "information" when |luma - frame median| exceeds this ...
+    "infoMinFraction": 0.02,        # ... and a frame is blank when fewer than this fraction of pixels are
+    "whiteMedian": 200,             # subtype: median above this = white
+    "blackMedian": 40,              # subtype: median below this = black, otherwise flat
     "run_min_seconds": 0.5,         # a run must span at least this long
-    "sample_size": (96, 54),        # frames are area-downscaled to this before the stats
+    "sample_size": (160, 90),       # frames are area-downscaled to this before the stats
     # OCR
     "ocr_min_frames": 5,            # frames per range = max(ocr_min_frames, ceil(duration / ocr_seconds_per_frame))
-    "ocr_seconds_per_frame": 2.0,
+    "ocr_seconds_per_frame": 1.0,
     "ocr_max_width": 1920,
     "watermark_regex": r"pixabay|shutterstock|getty|istock|envato|storyblocks|pexels|videvo|adobe\s*stock|dreamstime|pond5|watermark",
     "promo_regex": r"subscribe|sponsor(ed)?",
-    # shot reuse
+    # shot reuse (hash of the CONTENT box)
     "reuse_max_distance": 6,        # dHash (64 bit) Hamming distance
     "reuse_window_seconds": 60.0,   # beats whose start times are closer than this are compared
     "reuse_flat_std": 4.0,          # evidence frames flatter than this (luma std) are not compared (all-black == all-black)
-    # crop
+    "reuse_box_min_confidence": 0.7,  # crop-propose boxes below this confidence are ignored
+    "reuse_box_max_area": 0.97,     # ... and so are boxes that are not smaller than this fraction of the frame
+    # crop (S11)
     "crop_aspect": 16 / 9,
-    "crop_aspect_tolerance": 0.02,
-    "crop_min_width": 640,
+    "crop_aspect_error": 0.25,
+    "crop_aspect_warning": 0.10,
+    "crop_min_width": 640,          # 1920-space pixels
     "crop_samples": 24,
     "crop_work_width": 960,
     "crop_dark_mean": 18,
@@ -65,14 +77,17 @@ THRESHOLDS = {
     "crop_dark_tstd": 3.0,
     "crop_uniform_vstd": 10.0,
     "crop_max_bar_fraction": 0.4,   # more than this per side is not a bar, it is content
+    # engine
+    "engine_fps": 25,
 }
+REF_W, REF_H = 1920, 1080
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SWIFT_SRC = SCRIPT_DIR / "ocr_vision.swift"
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
 SCHEMA = "yt-news-v4-frame-checks"
-VERSION = 1
+VERSION = 2
 
 
 class ToolMissing(RuntimeError):
@@ -147,16 +162,32 @@ def decode_gray(video, a, b, vf, w, h, fps, fps_expr=None):
     return buf[: n * w * h].reshape(n, h, w)
 
 
-def luma_samples(video, a, b, crop=None):
-    """-> (times, per-frame stats list). Times are clip-local seconds."""
-    fps = THRESHOLDS["sample_fps"]
-    w, h = THRESHOLDS["sample_size"]
-    arr = decode_gray(video, a, b, _crop_vf(crop), w, h, fps)
+def scale_crop(crop, fw, fh):
+    """1920x1080-space crop -> pixels of a fw x fh file (integers, even size, inside the frame)."""
+    if crop is None:
+        return None
+    x, y, w, h = crop
+    sx, sy = fw / REF_W, fh / REF_H
+    px, py = int(round(x * sx)), int(round(y * sy))
+    pw, ph = int(round(w * sx)), int(round(h * sy))
+    px, py = max(0, min(px, fw - 2)), max(0, min(py, fh - 2))
+    pw, ph = max(2, min(pw, fw - px)), max(2, min(ph, fh - py))
+    return (px, py, pw - pw % 2, ph - ph % 2)
+
+
+def luma_samples(video, a, b, crop_px=None):
+    """-> per-sample stats [{t, mean, median, info}] for [a, b]. crop_px is in FILE pixels.
+    info = fraction of pixels whose luma differs from the frame median by more than infoDelta."""
+    T = THRESHOLDS
+    fps = T["sample_fps"]
+    w, h = T["sample_size"]
+    arr = decode_gray(video, a, b, _crop_vf(crop_px), w, h, fps)
     stats = []
     for i in range(arr.shape[0]):
         f = arr[i].astype(np.float32)
-        stats.append({"t": round(a + i / fps, 3), "mean": float(f.mean()),
-                      "range": float(f.max() - f.min())})
+        med = float(np.median(f))
+        stats.append({"t": round(a + i / fps, 3), "mean": float(f.mean()), "median": med,
+                      "info": float((np.abs(f - med) > T["infoDelta"]).mean())})
     return stats
 
 
@@ -172,26 +203,26 @@ def _runs(flags, times, a, b, fps, min_span):
         span = times[j] - times[i]
         whole = i == 0 and j == n - 1
         if span >= min_span - 1e-9 or (whole and (b - a) >= min_span - 1e-9):
-            out.append((times[i], min(b, times[j] + 1.0 / fps)))
+            out.append((i, j, times[i], min(b, times[j] + 1.0 / fps)))
         i = j + 1
     return out
 
 
 def pixel_issues(stats, a, b):
-    """Blank-white / near-black runs from luma samples -> list of issue dicts (code, range, detail)."""
+    """blank-frame runs from luma samples -> list of issue dicts (code, range, detail)."""
     T = THRESHOLDS
-    fps, minspan = T["sample_fps"], T["run_min_seconds"]
+    fps = T["sample_fps"]
     times = [s["t"] for s in stats]
+    flags = [s["info"] < T["infoMinFraction"] for s in stats]
     issues = []
-    white = [s["mean"] > T["blank_mean_min"] and s["range"] < T["blank_range_max"] for s in stats]
-    black = [s["mean"] < T["black_mean_max"] for s in stats]
-    for code, flags, what in (("blank-white", white, "mean luma > %d and range < %d" % (T["blank_mean_min"], T["blank_range_max"])),
-                              ("near-black", black, "mean luma < %d" % T["black_mean_max"])):
-        for t0, t1 in _runs(flags, times, a, b, fps, minspan):
-            sel = [s for s in stats if t0 - 1e-6 <= s["t"] <= t1]
-            issues.append({"code": code, "range": [round(t0, 3), round(t1, 3)],
-                           "detail": f"{what}; {len(sel)} samples, mean luma {np.mean([s['mean'] for s in sel]):.1f}, "
-                                     f"mean luma range (max-min) {np.mean([s['range'] for s in sel]):.0f}"})
+    for i, j, t0, t1 in _runs(flags, times, a, b, fps, T["run_min_seconds"]):
+        sel = stats[i:j + 1]
+        med = float(np.mean([s["median"] for s in sel]))
+        sub = "white" if med > T["whiteMedian"] else "black" if med < T["blackMedian"] else "flat"
+        issues.append({"code": "blank-frame", "range": [round(t0, 3), round(t1, 3)],
+                       "detail": f"{sub}: {len(sel)} low-information samples (< {T['infoMinFraction']:.0%} of pixels differ from the "
+                                 f"median luma by > {T['infoDelta']}); median luma {med:.0f}, "
+                                 f"info fraction max {max(s['info'] for s in sel):.4f}"})
     return issues
 
 
@@ -200,15 +231,16 @@ def luma_summary(stats):
     if not stats:
         return {"n": 0}
     m = [s["mean"] for s in stats]
-    return {"n": len(stats), "mean": round(float(np.mean(m)), 1), "min_mean": round(min(m), 1),
-            "max_mean": round(max(m), 1),
-            "blank_white_samples": sum(1 for s in stats if s["mean"] > T["blank_mean_min"] and s["range"] < T["blank_range_max"]),
-            "near_black_samples": sum(1 for s in stats if s["mean"] < T["black_mean_max"])}
+    inf = [s["info"] for s in stats]
+    return {"n": len(stats), "mean": round(float(np.mean(m)), 1), "min_mean": round(min(m), 1), "max_mean": round(max(m), 1),
+            "infoFraction": {"min": round(min(inf), 4), "median": round(float(np.median(inf)), 4)},
+            "blank_samples": sum(1 for x in inf if x < T["infoMinFraction"])}
 
 
 def check_pixels(video, a, b, crop=None):
-    """Pixel check of one range. -> {"issues": [...], "luma": {...}, "samples": n}"""
-    stats = luma_samples(video, a, b, crop)
+    """Pixel check of one range; crop in 1920x1080 space. -> {"issues": [...], "luma": {...}, "samples": n}"""
+    _, fw, fh = probe(video)
+    stats = luma_samples(video, a, b, scale_crop(crop, fw, fh))
     issues = pixel_issues(stats, a, b)
     if not stats:
         issues.append({"code": "no-frames", "range": [round(a, 3), round(b, 3)],
@@ -222,7 +254,7 @@ def check_pixels(video, a, b, crop=None):
 
 def ocr_frame_times(a, b):
     T = THRESHOLDS
-    n = max(T["ocr_min_frames"], math.ceil((b - a) / T["ocr_seconds_per_frame"]))
+    n = max(T["ocr_min_frames"], math.ceil((b - a) / T["ocr_seconds_per_frame"] - 1e-9))
     return [round(a + (i + 0.5) * (b - a) / n, 3) for i in range(n)]
 
 
@@ -241,11 +273,18 @@ def extract_frame(video, t, out, crop=None):
     return False
 
 
-def dhash(path):
-    """-> (hex dHash (64 bit), flat?)"""
+def dhash(path, box=None):
+    """-> (hex dHash (64 bit) of the content box, flat?). `box` is x,y,w,h in 1920x1080 space (scaled to the
+    image); None = the whole image."""
     from PIL import Image
     with Image.open(path) as im:
         g = im.convert("L")
+        if box:
+            sx, sy = g.width / REF_W, g.height / REF_H
+            x0, y0 = int(round(box[0] * sx)), int(round(box[1] * sy))
+            x1, y1 = min(g.width, x0 + int(round(box[2] * sx))), min(g.height, y0 + int(round(box[3] * sy)))
+            if x1 - x0 >= 8 and y1 - y0 >= 8:
+                g = g.crop((x0, y0, x1, y1))
         small = np.asarray(g.resize((9, 8), Image.LANCZOS), dtype=np.int16)
         flat = float(np.asarray(g.resize((16, 16), Image.BILINEAR), dtype=np.float32).std()) < THRESHOLDS["reuse_flat_std"]
     bits = (small[:, 1:] > small[:, :-1]).flatten()
@@ -411,21 +450,26 @@ def ocr_frames(runner, frames):
     return problems
 
 
-def cmd_pixels(video, a, b, crop=None):
+def cmd_pixels(video, a, b, crop=None, origin="stock"):
     _check_range(video, a, b)
-    r = check_pixels(video, a, b, crop)
-    return {"schema": SCHEMA, "version": VERSION, "command": "pixels", "video": str(video), "range": [a, b],
-            "crop": crop, "pass": not r["issues"], "issues": r["issues"], "luma": r["luma"]}
+    r = check_pixels(video, a, b, crop)   # crop: 1920x1080 space
+    beat = {"origin": origin}
+    issues = [{**i, "severity": severity_for(i["code"], beat)} for i in r["issues"]]
+    counts = count_issues(issues)
+    return {"schema": SCHEMA, "version": VERSION, "command": "pixels", "video": str(video), "range": [a, b], "origin": origin,
+            "crop": crop, "pass": counts["error"] == 0, "counts": counts, "issues": issues, "luma": r["luma"]}
 
 
 def cmd_watermark(video, a, b, crop, frames_dir, runner):
     _check_range(video, a, b)
-    frames, failed = collect_frames(video, a, b, crop, frames_dir, _prefix_for(video))
+    _, fw, fh = probe(video)
+    frames, failed = collect_frames(video, a, b, scale_crop(crop, fw, fh), frames_dir, _prefix_for(video))
     issues = [{"code": "frame-missing", "range": [t, t], "detail": f"could not extract a frame at t={t}s"} for t in failed]
     issues += ocr_frames(runner, frames)
     issues += text_issues(frames)
+    issues = [{**i, "severity": "error"} for i in issues]
     return {"schema": SCHEMA, "version": VERSION, "command": "watermark", "video": str(video), "range": [a, b],
-            "crop": crop, "pass": not issues, "issues": issues,
+            "crop": crop, "pass": not issues, "counts": count_issues(issues), "issues": issues,
             "frames": [{"path": f["path"], "t": f["t"], "ocr": f["ocr"]} for f in frames],
             "tools": {"ocr": "vision-swift"}}
 
@@ -450,35 +494,19 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def load_beats(path):
+def _episode_data():
+    sys.path.insert(0, str(SCRIPT_DIR))
     try:
-        data = json.loads(Path(path).read_text())
-    except (OSError, ValueError) as e:
-        raise BadInput(f"cannot read beats {path}: {e}") from e
-    if isinstance(data, dict):
-        data = data.get("beats")
-    if not isinstance(data, list) or not all(isinstance(b, dict) and isinstance(b.get("t"), (int, float)) for b in data):
-        raise BadInput("beats must be a JSON list of objects with a numeric `t`")
-    return data
-
-
-def beat_durations(beats, episode_end=None):
-    """-> list of beat durations (None when unknown). End = beat.end, else next beat's t, else episode_end."""
-    out = []
-    for i, b in enumerate(beats):
-        if isinstance(b.get("end"), (int, float)):
-            end = float(b["end"])
-        elif i + 1 < len(beats):
-            end = float(beats[i + 1]["t"])
-        else:
-            end = episode_end
-        out.append(None if end is None else max(0.0, end - float(b["t"])))
-    return out
+        import episode_data
+    finally:
+        sys.path.pop(0)
+    return episode_data
 
 
 def resolve_media(src, roots, cuts):
     cands = [Path(r) / f"{src}.mp4" for r in roots]
-    p = ((cuts or {}).get("clips") or {}).get(src, {}).get("path") if isinstance(cuts, dict) else None
+    clips = (cuts or {}).get("clips") if isinstance(cuts, dict) else None
+    p = (clips or {}).get(src, {}).get("path") if isinstance(clips, dict) else None
     if p:
         cands.append(Path(p))
     for c in cands:
@@ -487,47 +515,85 @@ def resolve_media(src, roots, cuts):
     return None
 
 
-def shown_segments(frm, dur, fdur):
-    """-> (segments [[a,b],...], loops, invalid). Primary segment is [from, min(from+dur, fdur)]; when the
-    beat outlasts the clip and from > 0, the part of the loop that wraps to the clip start is checked too."""
-    frm = float(frm or 0.0)
-    if frm >= fdur:
-        return [], False, True
-    if dur is None or dur <= 0:
-        return [[frm, fdur]], False, False
-    end = min(frm + dur, fdur)
-    segs = [[frm, end]]
-    loops = dur > (fdur - frm) + 1e-6
-    if loops and frm > 0:
-        wrap = min(dur - (fdur - frm), frm)
-        if wrap > 0.05:
-            segs.append([0.0, wrap])
-    return segs, loops, False
+def is_source_beat(beat):
+    return beat.get("origin") == "source" or beat.get("media") == "clip"
 
 
-def _beat_job(idx, beat, dur, path, frames_dir):
-    """Phase 1 for one beat (thread-safe): pixel stats + evidence frames for each shown segment."""
-    fdur, _, _ = probe(path)
+def severity_for(code, beat):
+    """blank-frame is a defect on stock / ai media (error) but source content on a source beat (warn);
+    every other code is an error."""
+    if code == "blank-frame" and is_source_beat(beat or {}):
+        return "warn"
+    return "error"
+
+
+def count_issues(issues):
+    by = {}
+    for i in issues:
+        sev = i.get("severity", "error")
+        by.setdefault(i["code"], {"error": 0, "warn": 0})[sev] += 1
+    return {"error": sum(v["error"] for v in by.values()), "warn": sum(v["warn"] for v in by.values()), "by_code": by}
+
+
+def plan_range(beat, fdur, dur_declared=None):
+    """Which local range of the file the beat really shows (engine spec 1a / S09).
+    -> {"segment": [a, b] | None, "loops": bool, "source_loop": bool, "loop_len": s | None}
+
+    The renderer mounts the clip in a Loop of L = floor((D - from) * fps) - 2 frames starting at `from`
+    (D = brollDur[src], else the real file duration); a loop restarts at `from`, never at 0."""
+    T = THRESHOLDS
+    fps = T["engine_fps"]
+    frm = float(beat.get("from") or 0.0)
+    D = float(dur_declared) if dur_declared else fdur
+    L = math.floor((D - frm) * fps + 1e-9) - 2
+    if frm < 0 or frm >= min(D, fdur) or L < 1:
+        return {"segment": None, "loops": False, "source_loop": False, "loop_len": None}
+    t, end = float(beat["t"]), float(beat["end"])
+    shown_frames = math.ceil(end * fps - 1e-9) - math.ceil(t * fps - 1e-9)
+    loops = shown_frames > L
+    seg_len = min(end - t, L / fps)
+    seg = [frm, min(frm + seg_len, fdur)]
+    return {"segment": seg, "loops": loops, "source_loop": loops and is_source_beat(beat), "loop_len": L / fps}
+
+
+def _beat_job(idx, beat, path, frames_dir, broll_dur):
+    """Phase 1 for one beat (thread-safe): range plan, pixel stats, hash box, evidence frames."""
+    fdur, fw, fh = probe(path)
+    src = beat.get("src")
+    declared = broll_dur.get(src) if isinstance(broll_dur, dict) else None
     crop = parse_crop(beat.get("srcCrop")) if beat.get("srcCrop") else None
-    segs, loops, invalid = shown_segments(beat.get("from"), dur, fdur)
-    res = {"idx": idx, "file": str(path), "segments": [], "loops": loops, "invalid": invalid, "fdur": fdur,
-           "crop": crop, "issues": [], "frames": [], "luma": {}}
-    allstats = []
-    for si, (a, b) in enumerate(segs):
-        stats = luma_samples(path, a, b, crop)
-        allstats += stats
-        for iss in pixel_issues(stats, a, b):
-            res["issues"].append(iss)
-        if not stats:
-            res["issues"].append({"code": "no-frames", "range": [round(a, 3), round(b, 3)],
-                                  "detail": "ffmpeg decoded no frames in the shown range"})
-        prefix = f"b{idx:03d}_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(beat.get('src')))[:40]}" + (f"_w{si}" if si else "")
-        frames, failed = collect_frames(path, a, b, crop, frames_dir, prefix)
-        for t in failed:
-            res["issues"].append({"code": "frame-missing", "range": [t, t], "detail": f"could not extract a frame at t={t}s"})
-        res["frames"] += frames
-        res["segments"].append([round(a, 3), round(b, 3)])
-    res["luma"] = luma_summary(allstats)
+    crop_px = scale_crop(crop, fw, fh)
+    plan = plan_range(beat, fdur, declared)
+    res = {"idx": idx, "file": str(path), "plan": plan, "fdur": fdur, "res": [fw, fh], "crop": crop, "crop_px": crop_px,
+           "issues": [], "frames": [], "luma": {}, "hash_box": {"kind": "frame", "box": None}}
+    if declared and abs(float(declared) - fdur) > 1.0 / THRESHOLDS["engine_fps"] + 0.02:
+        res["issues"].append({"code": "broll-dur-mismatch", "range": None,
+                              "detail": f"brollDur[{src}]={declared} but the file is {fdur:.3f}s (must match within 1 frame)"})
+    if plan["segment"] is None:
+        return res
+    a, b = plan["segment"]
+    stats = luma_samples(path, a, b, crop_px)
+    res["issues"] += pixel_issues(stats, a, b)
+    if not stats:
+        res["issues"].append({"code": "no-frames", "range": [round(a, 3), round(b, 3)],
+                              "detail": "ffmpeg decoded no frames in the shown range"})
+    res["luma"] = luma_summary(stats)
+    # content box used for the shot-reuse hash: explicit srcCrop on any beat; crop-propose on source beats only
+    if crop is not None:
+        res["hash_box"] = {"kind": "srcCrop", "box": None}      # evidence frames are already cropped
+    elif is_source_beat(beat):
+        try:
+            pr = propose_crop(path, a, b)
+        except BadInput:
+            pr = None
+        T = THRESHOLDS
+        if pr and pr["confidence"] >= T["reuse_box_min_confidence"] and pr["w"] * pr["h"] < T["reuse_box_max_area"] * REF_W * REF_H:
+            res["hash_box"] = {"kind": "crop-propose", "box": [pr["x"], pr["y"], pr["w"], pr["h"]]}
+    prefix = f"b{idx:03d}_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(src))[:40]}"
+    frames, failed = collect_frames(path, a, b, crop_px, frames_dir, prefix)
+    for t in failed:
+        res["issues"].append({"code": "frame-missing", "range": [t, t], "detail": f"could not extract a frame at t={t}s"})
+    res["frames"] = frames
     return res
 
 
@@ -562,7 +628,13 @@ def reuse_issues(beat_results):
 
 def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode_end=None, workers=None):
     t_start = time.time()
-    beats = load_beats(beats_path)
+    ed = _episode_data()
+    try:
+        ep = ed.load_episode(beats_path, fallback_vo_end=episode_end)
+    except ed.EpisodeFormatError as e:
+        raise BadInput(str(e)) from e
+    beats = ep["beats"]
+    broll_dur = ep.get("broll_dur") or {}
     cuts = None
     if cuts_path:
         try:
@@ -573,17 +645,15 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
         if not Path(r).is_dir():
             raise BadInput(f"media root not found: {r}")
     Path(frames_dir).mkdir(parents=True, exist_ok=True)
-    durs = beat_durations(beats, episode_end)
-    issues, entries, jobs = [], {}, []
+    issues, jobs = [], []
     inputs = {str(beats_path): _sha256(beats_path)}
     if cuts_path:
         inputs[str(cuts_path)] = _sha256(cuts_path)
+    clips = (cuts or {}).get("clips", {}) if isinstance(cuts, dict) else {}
 
-    def base(i, extra=None):
+    def base(i):
         b = beats[i]
-        d = {"beat_t": b["t"], "src": b.get("src"), "origin": b.get("origin")}
-        d.update(extra or {})
-        return d
+        return {"beat_t": b["t"], "src": b.get("src"), "origin": b.get("origin")}
 
     for i, b in enumerate(beats):
         if b.get("media") not in ("broll", "clip"):
@@ -594,10 +664,10 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
             issues.append({"code": "media-missing", "severity": "error", **base(i), "range": None,
                            "detail": f"no media file for src {src!r} (looked for <media-root>/{src}.mp4 and the _cuts.json path)"})
             continue
-        jobs.append((i, b, durs[i], path))
+        jobs.append((i, b, path))
     workers = workers or min(4, os.cpu_count() or 2)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        results = list(ex.map(lambda j: _beat_job(j[0], j[1], j[2], j[3], frames_dir), jobs))
+        results = list(ex.map(lambda j: _beat_job(j[0], j[1], j[2], frames_dir, broll_dur), jobs))
 
     # phase 2: OCR every evidence frame of the run in ONE batch
     allframes = [f for r in results for f in r["frames"]]
@@ -605,25 +675,45 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
     beat_out = []
     for r in results:
         i, b = r["idx"], beats[r["idx"]]
-        if r["invalid"]:
-            issues.append({"code": "from-out-of-range", "severity": "error", **base(i), "range": None,
-                           "detail": f"from={b.get('from')} is beyond the clip ({r['fdur']:.2f}s)"})
+        plan = r["plan"]
+        if plan["segment"] is None:
+            issues.append({"code": "from-out-of-range", "severity": severity_for("from-out-of-range", b), **base(i), "range": None,
+                           "detail": f"from={b.get('from', 0)} leaves no playable loop in the clip ({r['fdur']:.2f}s)"})
+        elif plan["source_loop"]:
+            need = math.ceil(b["end"] * THRESHOLDS["engine_fps"] - 1e-9) - math.ceil(b["t"] * THRESHOLDS["engine_fps"] - 1e-9)
+            issues.append({"code": "source-loop", "severity": severity_for("source-loop", b), **base(i), "range": plan["segment"],
+                           "detail": f"source beat shows {need / THRESHOLDS['engine_fps']:.2f}s but only {plan['loop_len']:.2f}s of the cut "
+                                     f"remains after from={b.get('from', 0)} (source beats never loop)"})
+        hb = r["hash_box"]["box"]
         for f in r["frames"]:
             o = ocr_res[f["path"]]
             f["ocr"] = list(o.get("lines") or []) if o.get("ok") else []
             if not o.get("ok"):
-                issues.append({"code": "ocr-failed", "severity": "error", **base(i), "range": [f["t"], f["t"]],
+                issues.append({"code": "ocr-failed", "severity": severity_for("ocr-failed", b), **base(i), "range": [f["t"], f["t"]],
                                "detail": f"OCR could not read the frame at t={f['t']}s: {o.get('error')}"})
-            f["dhash"], f["flat"] = dhash(f["path"])
+            f["dhash"], f["flat"] = dhash(f["path"], hb)
         for iss in r["issues"] + text_issues(r["frames"]):
-            issues.append({"code": iss["code"], "severity": "error", **base(i), "range": iss["range"], "detail": iss["detail"]})
-        entry = {"t": b["t"], "src": b.get("src"), "origin": b.get("origin"), "file": r["file"],
-                 "shown": r["segments"][0] if r["segments"] else None, "loops": r["loops"]}
-        if len(r["segments"]) > 1:
-            entry["shown_wrapped"] = r["segments"][1]
+            issues.append({"code": iss["code"], "severity": severity_for(iss["code"], b), **base(i), "range": iss["range"], "detail": iss["detail"]})
+        entry = {"t": b["t"], "src": b.get("src"), "origin": b.get("origin"), "file": r["file"], "resolution": r["res"],
+                 "shown": [round(x, 3) for x in plan["segment"]] if plan["segment"] else None, "loops": plan["loops"]}
+        if plan["loop_len"] is not None:
+            entry["loopSeconds"] = round(plan["loop_len"], 3)
         if r["crop"]:
             entry["srcCrop"] = list(r["crop"])
-        entry["frames"] = [{"path": f["path"], "t": f["t"], "ocr": f["ocr"], "dhash": f["dhash"], "flat": f["flat"]} for f in r["frames"]]
+            entry["srcCropPx"] = list(r["crop_px"])
+        entry["hashBox"] = r["hash_box"]
+        cut = clips.get(b.get("src")) if isinstance(clips, dict) else None
+        sin = cut.get("source_in") if isinstance(cut, dict) else None
+        has_src_t = is_source_beat(b) and isinstance(sin, (int, float)) and not isinstance(sin, bool)
+        if has_src_t and plan["segment"]:
+            entry["shown_source"] = [round(sin + plan["segment"][0], 3), round(sin + plan["segment"][1], 3)]
+        frames_out = []
+        for f in r["frames"]:
+            fo = {"path": f["path"], "t": f["t"], "ocr": f["ocr"], "dhash": f["dhash"], "flat": f["flat"]}
+            if has_src_t:
+                fo["source_t"] = round(sin + f["t"], 3)
+            frames_out.append(fo)
+        entry["frames"] = frames_out
         entry["luma"] = r["luma"]
         beat_out.append(entry)
         if r["file"] not in inputs:
@@ -634,11 +724,13 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
         issues.append({**iss, "severity": "error"})
     order = {b["t"]: n for n, b in enumerate(beats)}
     issues.sort(key=lambda x: (order.get(x["beat_t"], 0), x["code"]))
-    return {"schema": SCHEMA, "version": VERSION, "pass": not issues, "issues": issues, "beats": beat_out,
+    counts = count_issues(issues)
+    return {"schema": SCHEMA, "version": VERSION, "pass": counts["error"] == 0, "counts": counts, "issues": issues, "beats": beat_out,
             "tools": {"ocr": "vision-swift", "ocr_mode": getattr(runner, "mode", None),
                       "ocr_compile_seconds": round(getattr(runner, "compile_seconds", 0.0), 1),
                       "ocr_run_seconds": round(getattr(runner, "run_seconds", 0.0), 1),
-                      "ocr_invocations": getattr(runner, "invocations", None)},
+                      "ocr_invocations": getattr(runner, "invocations", None),
+                      "ocr_frames": len(allframes), "episode_format": ep.get("format")},
             "inputs": inputs, "seconds": round(time.time() - t_start, 1)}
 
 
@@ -704,7 +796,16 @@ def _inner_span(mask, max_frac):
     return (lo if lo_ok else 0), (hi if hi_ok else n), (lo_ok and hi_ok)
 
 
+def _to_ref(x, y, w, h, fw, fh):
+    """file-pixel box -> integer box in 1920x1080 space."""
+    sx, sy = REF_W / fw, REF_H / fh
+    X, Y = int(round(x * sx)), int(round(y * sy))
+    W, H = int(round(w * sx)), int(round(h * sy))
+    return X, Y, min(W, REF_W - X), min(H, REF_H - Y)
+
+
 def propose_crop(video, a, b):
+    """Content box of a (letterboxed / pillarboxed) source cut, snapped to 16:9, in 1920x1080 space."""
     T = THRESHOLDS
     dur, fw, fh = probe(video)
     if not (b > a >= 0) or a >= dur:
@@ -728,44 +829,51 @@ def propose_crop(video, a, b):
         rows = (cy[0], cy[1])
     x0, x1, y0, y1 = cx[0] * sx, cx[1] * sx, cy[0] * sy, cy[1] * sy
     bars = (cx[0] > 0 or cx[1] < ww or cy[0] > 0 or cy[1] < wh)
-    full_ok = abs(fw / fh / T["crop_aspect"] - 1) <= T["crop_aspect_tolerance"]
+    full_ok = abs(fw / fh / T["crop_aspect"] - 1) <= 0.02
+    out = {"frame": [fw, fh], "space": f"{REF_W}x{REF_H}"}
     if not bars:
+        zero = {"left": 0, "right": 0, "top": 0, "bottom": 0}
         if full_ok:
-            return {"x": 0, "y": 0, "w": fw - fw % 2, "h": fh - fh % 2, "confidence": 0.9 if arr.shape[0] >= 3 else 0.6,
-                    "reason": f"no static/black bars found in {arr.shape[0]} samples; full frame is 16:9",
-                    "frame": [fw, fh], "bars": {"left": 0, "right": 0, "top": 0, "bottom": 0}}
+            return {"x": 0, "y": 0, "w": REF_W, "h": REF_H, "confidence": 0.9 if arr.shape[0] >= 3 else 0.6,
+                    "reason": f"no static/black bars found in {arr.shape[0]} samples; full frame is 16:9", "bars": zero, **out}
         x, y, w, h = snap_16_9(0, 0, fw, fh, fw, fh)
-        return {"x": x, "y": y, "w": w, "h": h, "confidence": 0.5,
-                "reason": f"no bars found but the frame is {fw}x{fh} (not 16:9); centered 16:9 crop",
-                "frame": [fw, fh], "bars": {"left": 0, "right": 0, "top": 0, "bottom": 0}}
+        X, Y, W, H = _to_ref(x, y, w, h, fw, fh)
+        return {"x": X, "y": Y, "w": W, "h": H, "confidence": 0.5,
+                "reason": f"no bars found but the frame is {fw}x{fh} (not 16:9); centered 16:9 crop", "bars": zero, **out}
     x, y, w, h = snap_16_9(x0, y0, x1, y1, fw, fh)
+    X, Y, W, H = _to_ref(x, y, w, h, fw, fh)
     clean = cx[2] and cy[2]
     conf = 0.7 if (clean and arr.shape[0] >= 3) else 0.5   # heuristic: a dark baked-in panel looks like a bar
     if (x1 - x0) < 0.3 * fw or (y1 - y0) < 0.3 * fh:
         conf = 0.2
-    return {"x": x, "y": y, "w": w, "h": h, "confidence": conf,
-            "reason": f"content box {int(round(x0))},{int(round(y0))} {int(round(x1 - x0))}x{int(round(y1 - y0))} found by static/black bar scan "
+    bx0, by0, bw, bh = _to_ref(x0, y0, x1 - x0, y1 - y0, fw, fh)
+    return {"x": X, "y": Y, "w": W, "h": H, "confidence": conf,
+            "reason": f"content box {bx0},{by0} {bw}x{bh} (1920x1080 space) found by static/black bar scan "
                       f"over {arr.shape[0]} samples; snapped to 16:9" + ("" if clean else "; a side exceeded the bar cap and was ignored"),
-            "frame": [fw, fh],
-            "bars": {"left": int(round(x0)), "right": int(round(fw - x1)), "top": int(round(y0)), "bottom": int(round(fh - y1))}}
+            "bars": {"left": int(round(x0)), "right": int(round(fw - x1)), "top": int(round(y0)), "bottom": int(round(fh - y1))}, **out}
 
 
 def check_crop(video, a, b, crop):
+    """crop in 1920x1080 space. Errors / warnings follow engine rule S11 (+ minimum width, blank inside)."""
     T = THRESHOLDS
     dur, fw, fh = probe(video)
     x, y, w, h = crop
-    errors = []
-    if x < 0 or y < 0 or x + w > fw or y + h > fh:
-        errors.append({"code": "crop-out-of-bounds", "detail": f"crop {x}:{y}:{w}:{h} exceeds the {fw}x{fh} frame"})
-    if abs(w / h / T["crop_aspect"] - 1) > T["crop_aspect_tolerance"]:
-        errors.append({"code": "crop-aspect", "detail": f"aspect {w / h:.4f} differs from 16:9 by more than {T['crop_aspect_tolerance'] * 100:.0f}%"})
+    errors, warnings = [], []
+    oob = x < 0 or y < 0 or x + w > REF_W or y + h > REF_H
+    if oob:
+        errors.append({"code": "crop-out-of-bounds", "severity": "error", "detail": f"crop {x}:{y}:{w}:{h} exceeds the {REF_W}x{REF_H} source frame"})
+    dev = abs(w / h / T["crop_aspect"] - 1)
+    if dev > T["crop_aspect_error"]:
+        errors.append({"code": "crop-aspect", "severity": "error", "detail": f"aspect {w / h:.4f} is {dev:.0%} off 16:9 (error above {T['crop_aspect_error']:.0%})"})
+    elif dev > T["crop_aspect_warning"]:
+        warnings.append({"code": "crop-aspect", "severity": "warn", "detail": f"aspect {w / h:.4f} is {dev:.0%} off 16:9 (warning above {T['crop_aspect_warning']:.0%})"})
     if w < T["crop_min_width"]:
-        errors.append({"code": "crop-too-small", "detail": f"w={w} < {T['crop_min_width']}"})
-    if not errors:
+        errors.append({"code": "crop-too-small", "severity": "error", "detail": f"w={w} < {T['crop_min_width']} (1920 space)"})
+    if not oob and w > 0 and h > 0:
         for iss in check_pixels(video, a, min(b, dur), (x, y, w, h))["issues"]:
-            errors.append({"code": f"crop-{iss['code']}", "detail": f"inside the crop: {iss['detail']} at {iss['range']}"})
+            errors.append({"code": f"crop-{iss['code']}", "severity": "error", "detail": f"inside the crop: {iss['detail']} at {iss['range']}"})
     return {"schema": SCHEMA, "version": VERSION, "command": "crop-check", "video": str(video), "crop": [x, y, w, h],
-            "pass": not errors, "errors": errors}
+            "pass": not errors, "errors": errors, "warnings": warnings}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -791,6 +899,8 @@ def build_parser():
         sp.add_argument("--report")
 
     sp = sub.add_parser("pixels"); rng(sp); sp.add_argument("--crop")
+    sp.add_argument("--origin", choices=["stock", "ai", "source"], default="stock",
+                    help="blank-frame is an error for stock/ai and a warning for source media")
     sp = sub.add_parser("watermark"); rng(sp); sp.add_argument("--crop"); sp.add_argument("--frames-dir", required=True); sp.add_argument("--cache-dir")
     sp = sub.add_parser("cutaways")
     sp.add_argument("--beats", required=True); sp.add_argument("--cuts"); sp.add_argument("--media-root", action="append", default=[])
@@ -810,7 +920,7 @@ def main(argv=None, ocr_runner=None):
     try:
         runner = ocr_runner or VisionOcr(getattr(args, "cache_dir", None))
         if args.cmd == "pixels":
-            out = cmd_pixels(args.video, args.t_in, args.t_out, parse_crop(args.crop))
+            out = cmd_pixels(args.video, args.t_in, args.t_out, parse_crop(args.crop), args.origin)
             _emit(out, args.report); return 0 if out["pass"] else 1
         if args.cmd == "watermark":
             out = cmd_watermark(args.video, args.t_in, args.t_out, parse_crop(args.crop), args.frames_dir, runner)

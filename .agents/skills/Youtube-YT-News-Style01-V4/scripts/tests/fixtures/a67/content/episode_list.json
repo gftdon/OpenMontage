@@ -1,10 +1,10 @@
 [
   {"t": 0, "mode": "full", "kicker": "BREAKING NEWS"},
-  {"t": 5, "mode": "pip", "media": "clip", "src": "yt_a", "origin": "source", "layout": "stage", "chrome": true,
+  {"t": 5, "mode": "pip", "media": "clip", "src": "yt_gemini_demo", "origin": "source", "layout": "stage", "chrome": true,
    "headline": "ทำงานต่อเนื่อง 20 ชั่วโมง"},
   {"t": 12, "mode": "pip", "media": "typo", "src": "typo_score", "origin": "stock", "layout": "stage", "chrome": false,
    "cards": [{"t": 13, "lines": ["คะแนน 3 เต็ม 10"]}, {"t": 17.5, "lines": ["รอบที่ 65"]}]},
-  {"t": 20, "mode": "pip", "media": "clip", "src": "yt_b", "origin": "source", "layout": "stage", "chrome": true,
+  {"t": 20, "mode": "pip", "media": "clip", "src": "yt_code_lines", "origin": "source", "layout": "stage", "chrome": true,
    "headline": "โค้ดเกือบ 13,000 บรรทัด",
    "stats": [{"t": 21.0, "big": "13,000", "label": "บรรทัด"}]},
   {"t": 28, "mode": "full"}

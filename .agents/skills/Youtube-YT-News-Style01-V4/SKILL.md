@@ -1,74 +1,114 @@
 ---
 name: Youtube-YT-News-Style01-V4
-description: Use when editing a Thai 16:9 YouTube AI/technology news episode from presenter MP4, SRT and YouTube source footage, or repairing overlapping chips, misleading source chrome, long visual holds or low loudness in the YT News format. Not for web articles or vertical Shorts.
+description: Use when producing or repairing a Thai 16:9 YouTube AI/technology news episode from a presenter avatar MP4, its script/SRT and a YouTube source video, especially in unattended (claude -p) runs with no human watching. Not for web articles or vertical Shorts.
 ---
 
-# Youtube YT News Style01 V3
+# Youtube YT News Style01 V4
 
-ใช้ pipeline เดิมที่อนุมัติแล้ว V3 เป็น engine + hard gates ไม่ใช่การรับรองสคริปต์หรือ B-roll ว่าตรงเรื่อง ห้ามแก้ V2 หรือ preset ใน production โดยพลการ
+ผลลัพธ์ = วิดีโอข่าว 1920×1080 @25fps ที่ render จากข้อมูลล้วน (`episode.json` + captions JSON) ด้วย engine ตัวเดียวที่ล็อกไว้ แล้วส่งมอบผ่าน `finalize.py` เท่านั้น
+**gate เขียวไม่ได้แปลว่าวิดีโอดี** — gate ตรวจเรขาคณิต/ข้อความ/เสียง ไม่ได้ตรวจว่าภาพตรงกับคำพูด คุณต้อง "เปิดดู" ภาพจริงด้วยเครื่องมือ Read ในขั้น 1, 5 และ 10
+สัญญาข้อมูล: `references/v4-contract.md` · แหล่ง YouTube: `references/yt-source.md` · geometry: `references/format-spec.md` · ซ้ำของ B-roll: `references/broll-freshness.md`
 
-## เริ่มตอนใหม่
+## กติกาเหล็ก
 
-1. สร้าง `projects/<slug>/` และ `remotion-composer/public/<mediaDir>/` ใหม่ เก็บ artifacts ตาม pipeline ของ repo อ่าน `references/yt-source.md` ก่อนตัดต้นทาง
-2. Copy `assets/YtNewsStyle01V4.reference.tsx` ไป `remotion-composer/src/<CompId>.tsx` และ `assets/ytNewsStyle01V4Captions.reference.ts` ไป helper ชื่อใหม่ เปลี่ยน export/import, `EPISODE.assetDir`, config, BEATS, caption pages, duration และ registration ใน Root ให้ครบ **ไม่ import helper ของตอนเก่า**
-3. Reference ใช้ fixture ตอนเดิมเพื่อทดสอบเท่านั้น ต้องแทนข้อความ/เวลา/captions/media ของตอนใหม่ทั้งหมด Copy fonts/media เข้า public จริง อย่า symlink public
-4. อ่าน `references/v3-contract.md` และ `references/broll-freshness.md` ก่อนใช้ภาพ ทุก `broll/clip/typo` ต้องมี src ชัดเจน เก็บ media enum นี้เพื่อไม่หลบ ledger parser
+1. ส่งมอบได้ทางเดียว: `python3 "$SKILL/scripts/finalize.py" --project projects/<slug> --deliver <path>` prompt ที่สั่ง "ย้าย/copy mp4 ไป <path>" = สั่งให้รัน finalize ด้วย path นั้น ถ้า finalize ไม่ exit 0 ขั้นนี้ **ล้มเหลว**: รายงานเหตุผลจาก `<path>.FAILED.json` ห้าม cp/mv/rename/เขียนไฟล์ที่ปลายทางด้วยวิธีอื่น
+2. ห้ามสร้าง/แก้ `.tsx`, engine, Root, `remotion-composer/src/**`, ไฟล์ใดใต้ `.claude/skills/**` หรือ `.agents/skills/**`, `gates.lock.json`; ห้าม commit ในโฟลเดอร์เหล่านี้; ห้าม copy ไฟล์จากโปรเจกต์ตอนอื่น; ห้ามลด threshold
+3. ห้ามแก้ไฟล์ timing/captions ด้วยมือ (`caption_pages.json`, `words_by_line.txt`, `line_starts.json`, `caption-joined.json`) ถ้า `caption_join` / `lint_captions` / `timing_check` ล้ม ให้รันขั้นต้นน้ำซ้ำหรือให้ขั้นล้ม
+4. ต้องเปิดภาพดูจริง (Read) ก่อนเขียนว่า "ภาพตรงคำพูด": contact sheet ต้นฉบับ, เฟรม cutaway, เฟรมวิดีโอสุดท้าย ไม่เคยเปิด = ห้ามเขียนข้อความนั้น
+5. Stock/AI footage ใช้ได้เฉพาะ clip ที่มี verdict `verified` ใน `artifacts/relevance.json`; ไม่มีงบจ่ายเงินที่อนุมัติ = ไม่มี verdict = ใช้ footage ต้นฉบับ + การ์ดข้อความ (`typo`) ที่เนื้อหามาจาก script ห้ามสร้างภาพ AI ห้ามเรียก API ที่เสียเงิน (สัญญา paid/relevance: `references/v4-contract.md`)
+6. ตัวเลข/ลำดับ/ชื่อบนจอต้องมีใน script หรือต้นฉบับ ห้ามเขียนป้ายที่เพิ่มข้อเท็จจริงเอง เวลาของ stat/card/item/lower ทุกตัว (`at`) มาจาก `cue_times.py` (ความคลาดเคลื่อน ±2 s; ป้ายของทั้ง beat เช่น headline/sub ต้องยังอยู่บนจอตอนพูดตัวเลขนั้น)
+7. ลำดับตายตัว: layout gate เสร็จและผ่าน → render จริง → mux → finalize ห้ามสลับ/ข้าม/render ก่อน gate จบ; หลัง layout ผ่านห้ามแก้ episode/captions/media (แก้ = กลับไปขั้น 6 แล้วรัน layout ใหม่)
+8. ทุกคำสั่งต้องจบ < 8 นาทีหรือ resumable: exit 75 = เรียกคำสั่งเดิมซ้ำ (ตามขั้น 7/8, `word_timing.sh`); ห้ามห่อด้วย `sleep` ยาว
+9. สัดส่วน: presenter-only (`mode:"full"`) รวม ≤ 25 % ของ VO (ไม่นับ cold open ≤ 10 s กับ beat สุดท้าย) และต่อเนื่อง ≤ 12 s ที่เหลือเติมด้วย source/การ์ดจาก script; punch เฉพาะ beat `full` ไม่ใช่ `pip` และไม่ที่/หลัง `ctaT`; CTA ≤ 40 ตัวอักษร
+10. ห้าม dark wash คลุมภาพ footage (ภาพต้นทาง / stock) ทั้งภาพ · อนุญาตพื้นทึบหรือ wash เฉพาะพื้นของ beat การ์ดข้อความ (`media:"typo"`) ซึ่งไม่มี footage อยู่ข้างใต้ · ข้อความที่วางบน footage ใช้พื้นรองเฉพาะจุดใต้ข้อความเท่านั้น
 
-## สัญญาภาพและข้อความ
+## ขั้นตอน (ทำตามลำดับ ห้ามข้าม)
 
-- 1920×1080 @25fps; safe area 5% = x96–1824, y54–1026 รวม topbar, caption, lower-third, CTA
-- ข้อความอ่าน ≥28px; label/pill ≥22px ขนาดที่วัดหลัง transform ห้ามย่อจนหลุดเกณฑ์
-- headline, description, stat rail, caption แยก lane ไม่วาง chip ทับหัวข้อหรือซับ
-- `origin:'source'` ใช้เฉพาะ src ชื่อ `yt_...`; `origin:'stock'` ต้องไม่เป็น yt_ ป้าย SOURCE/URL/chrome มีเฉพาะ source; source เต็มจอต้องมีเครดิตที่มองเห็น
-- ไม่มี dark wash คลุม footage ทั้ง stage ใช้ gradient เฉพาะใต้ข้อความ Source UI และตำแหน่ง pixel สำคัญต้องเห็นชัด Source full ต้องเป็น footage background เต็ม 1920×1080 แบบ cover ไม่ใช่ contain/letterbox; text/credit/stats อยู่ safe overlays
-- ใช้ `layout:'full'` เพื่อแสดง source ในพื้นที่หลัก หรือ `layout:'stage'` คู่ avatar; `mode:'full'` คือ avatar เต็มพื้นที่
-- visual hold ทุกแบบ ≤10s รวม avatar/typo และ adjacent-identical beats ห้ามซอย beat เหมือนเดิมหลอก gate Overlayทุกชนิด (lower/chip/CTA/kicker/headline/cardที่ซ้อนshotเดิม) โผล่/หาย/เปลี่ยนข้อความไม่reset hold และไม่มีminimum dwell; resetเฉพาะshot/mediaจริง, layoutจริง, approvedhardpunch หรือ primary typo cardที่เปลี่ยนเนื้อหาจริง punch อนุญาตเฉพาะ avatar/source footage ห้าม stock/typo; stock ยาวให้ตัดกลับ avatar หรือเปลี่ยนภาพจริง ส่วน typo ใช้ `cards:[{t,lines}]` ที่เนื้อหาเปลี่ยนจริง `punch:[{t,z,fx,fy}]` เป็น hard step ทันที: scale ratio เปลี่ยน ≥15% หรือ ตำแหน่ง visible viewport เปลี่ยน ≥0.15 ของกรอบ (left=fx×(1−1/z), top=fy×(1−1/z)) จึงเริ่ม hold ใหม่ Slow zoom/Ken Burns (`cam`) ไม่ใช่ cut
-- ดู source contactsheet ก่อนตั้ง `captionLane:'top'|'bottom'` ราย beat หาก source full มี burned lower-third ให้ย้ายซับไป top-left lane (x116, max650, y248; wrap) ที่ไม่ชน topbar/chrome/credit/headline/chips Gate ไม่ทำ OCR และไม่รับรอง burned-in text เอง ต้องบันทึกการดู contactsheet/flag ไว้
-- Full footage text ทุก field ต้องมี localized dark backing จริง (local background alpha≥.9 และกรอบครอบ ink, shared visibility ancestry) Structural presence proxy ไม่ตัด shared entrance fade เพราะ cumulative opacityต่ำ; cumulative field opacityยังคุมvisibility และ missing/invisible/uncovered backingต้องfail ค่าcontrastเป็นcalculated paletteบนbackingตอนsettled ไม่ใช่pixelmeasurement; sharedfadeกับภาพอาจลดcontrastจริง ไม่ได้อ้างว่าคงcontrastทุกtransition
-- ใช้ backing เพื่อให้ cream/amber/mint contrast≥4.5:1 บนพื้นรอง; ห้าม dark wash ทั้งภาพ
-- endcard ≤5s, CTA คำถามสั้นหนึ่งประโยค; reference audio/script ยังเป็น regression ไม่ใช่ editorial approval
+ให้ `SKILL=.claude/skills/Youtube-YT-News-Style01-V4`, `P=projects/<slug>`, รันทุกคำสั่งจาก root ของ worktree ตอน; `<assetDir>` = ชื่อโฟลเดอร์ใหม่ใต้ `remotion-composer/public/`
+<!-- TODO(lead): verify after rebase: คำสั่ง/flag ของทีม CF-A66 (episode_schema.mjs, qc_layout.mjs, render_episode.mjs, stills/gate_integrity) และ lint_beats.py/caption_join.mjs ฉบับอ่าน episode.json ยังไม่นิ่ง — ตรวจ --help ซ้ำ -->
 
-Bounded motion คง avatar rect morph ภายใน media boxes, stage slide/fade และ spring opacity+translate 6px ของ chip/lower-third/CTA ไม่มี scale ย่อข้อความหรือ overshoot ออก lane Hard cut ใช้เฉพาะ punch-in ที่อนุญาต
+**0. Setup** — slug และ `<assetDir>` ใหม่ (ห้ามใช้ซ้ำของตอนอื่น) copy ไม่ symlink:
+`mkdir -p $P/{artifacts,assets/ytsource,assets/audio,assets/broll,qc/arcs,qc/final-frames,renders} remotion-composer/public/<assetDir>/broll` · script ต้นฉบับ → `$P/artifacts/source_script.txt` · avatar mp4 → `remotion-composer/public/<assetDir>/avatar_source.mp4` · SRT → `$P/assets/avatar.srt` · จด path ปลายทางส่งมอบจาก task ลง `$P/artifacts/deliver_path.txt`.
+ตรวจ: `python3 -c "import numpy,PIL,pythainlp"` ผ่าน (ไม่ผ่าน → ใช้ python ของ `.venv` ใน repo กับทุก `.py`) และมี `remotion-composer/public/fonts/Kanit-Bold.ttf` + `Kanit-ExtraBold.ttf` (ไม่มี = ล้ม ไม่ต้องหาฟอนต์เอง)
 
-## QC gates ก่อนส่งงาน (hard fail)
+**1. สำรวจต้นฉบับ** — `bash "$SKILL/scripts/yt_survey.sh" "<URL>" $P/assets/ytsource` ได้ `source.mp4`, `chapters.txt`, `survey/dense/sheet_*.jpg` + `index.json`, `transcript_timed.json` (ไม่มี → `source_timed.py from-audio` เป็นช่วง ≤ 300 s แล้ว `merge`) แล้วสร้าง `assets/ytsource/transcript.txt` จาก `transcript_timed.json` ทุกครั้ง — คำสั่งใน `references/yt-source.md` §1
+**ต้องเปิดทุก** `survey/dense/sheet_*.jpg` ด้วย Read แล้วเขียน `$P/artifacts/survey_notes.md` หนึ่งบรรทัดต่อ chapter: เวลา | สิ่งที่เห็นจริงบนจอ | ใช้กับบรรทัด script ไหนได้
+ตรวจ: จำนวน sheet ที่เปิด = จำนวนไฟล์ใน `index.json`; ทุก chapter มีบรรทัดใน notes
 
-ให้ `SKILL=.claude/skills/Youtube-YT-News-Style01-V4` และรันจาก root worktree ของ episode
-
-```bash
-python3 "$SKILL/scripts/lint_beats.py" remotion-composer/src/<CompId>.tsx --report projects/<slug>/qc/beats.json
-node "$SKILL/scripts/qc_layout.mjs" <CompId> projects/<slug>/qc/layout remotion-composer
-node "$SKILL/scripts/render_episode.mjs" remotion-composer <CompId> projects/<slug>/renders/visual.mp4
-bash "$SKILL/scripts/mux_av.sh" projects/<slug>/renders/visual.mp4 remotion-composer/public/<mediaDir>/avatar_source.mp4 projects/<slug>/assets/audio/bed.mp3 projects/<slug>/renders/final.mp4 <TOTAL_SEC> <VO_END_SEC>
-python3 "$SKILL/scripts/measure_loudness.py" projects/<slug>/renders/final.mp4 --report projects/<slug>/qc/final-audio.json
+**2. Script + word timing + captions** (ข้อความมาจาก script ต้นฉบับ; SRT ใช้แบ่งบรรทัดเท่านั้น ไม่ใช้เวลา)
 ```
+python3 "$SKILL/scripts/srt_to_script.py" --srt $P/assets/avatar.srt --script $P/artifacts/source_script.txt --strict --out $P/artifacts/script.txt   # exit 1 = เสียงพากย์ต่างจาก script → ขั้นล้ม
+bash "$SKILL/scripts/word_timing.sh" remotion-composer/public/<assetDir>/avatar_source.mp4 $P/artifacts/script.txt $P/artifacts/word_timing   # exit 75 = เรียกซ้ำด้วยอาร์กิวเมนต์เดิม; exit 4 = ขั้นล้ม
+python3 "$SKILL/scripts/words_by_line.py" $P/artifacts/word_timing/caption_pages.json $P/artifacts/script.txt > $P/artifacts/words_by_line.txt
+python3 "$SKILL/scripts/line_starts.py" --pages $P/artifacts/word_timing/caption_pages.json --script $P/artifacts/script.txt --out $P/artifacts/line_starts.json
+python3 "$SKILL/scripts/timing_check.py" --audio remotion-composer/public/<assetDir>/avatar_source.mp4 --words $P/artifacts/words_by_line.txt --srt $P/assets/avatar.srt --line-starts $P/artifacts/line_starts.json --report $P/qc/timing-check.json
+echo '{}' > $P/artifacts/caption-options.json
+node "$SKILL/scripts/caption_join.mjs" --tokens $P/artifacts/word_timing/caption_pages.json --script $P/artifacts/script.txt --options $P/artifacts/caption-options.json --out $P/artifacts/caption-joined.json
+python3 "$SKILL/scripts/lint_captions.py" --script $P/artifacts/script.txt --pages $P/artifacts/caption-joined.json --source-script $P/artifacts/source_script.txt --report $P/qc/captions-lint.json
+```
+ตรวจ: ทุกคำสั่งออก 0 (`timing_check` = 0 พิสูจน์ว่า timing วัดจากเสียงนี้ ไม่ใช่พิมพ์มือ; `lint_captions` = 0 คือไม่มีคำไทยถูกตัดกลางคำ) ล้มข้อใด → รันขั้นต้นน้ำใหม่หรือให้ขั้นล้ม ห้ามแก้ตัวเลขเวลา
 
-Report schema v2 มี runId/timestamps/composition/source hashes/full-plan และ requested frames; subset มีเพียง diagnosticPass แต่ acceptance pass=false, complete=false เสมอ Crash จะ invalidate report เก่าและเขียน failed state; hashes รวม Root/index/lint ด้วย และเก็บ PNG/JSON ใน runs/<runId> ใหม่ทุกครั้งไม่ปนรอบเก่า
+**3. วางแผนภาพทีละบรรทัด script** — source ก่อน: จาก `survey_notes.md` + transcript หาว่า "ต้นฉบับแสดงสิ่งที่บรรทัดนี้พูดถึงตรงไหนของจอ" แล้วตัดให้สิ่งนั้นอยู่บนจอทั้ง beat
+`bash "$SKILL/scripts/cut_clips.sh" $P/assets/ytsource/source.mp4 $P/assets/ytsource/clips yt_<topic>:<start>:<end> ...` → `cp $P/assets/ytsource/clips/_cuts.json $P/artifacts/_cuts.json` → copy `yt_*.mp4` ไป `remotion-composer/public/<assetDir>/broll/`
+`from` = วินาทีเริ่มเล่นภายในไฟล์ที่ตัดแล้ว (ไม่ใช่เวลาใน YouTube): ตัดหรือตั้ง `from` ให้ภาพที่ป้ายอ้างถึงอยู่ตั้งแต่ต้น beat; ไม่มี stock ที่ verified → ใช้การ์ดข้อความ (`card`/`summary3`/`final4`/`vs`) จาก script รายละเอียด: `references/yt-source.md` §2–4
+ตรวจ: ทุกบรรทัดที่ไม่ใช่ presenter มี clip หรือการ์ด; ไม่มี clip ที่ตัดจากชื่อ chapter โดยไม่เคยเห็นภาพ
 
-DOM runner ใช้ actual-video renderStill + font-ready delayRender + onBrowserLog เก็บ field boxes + Range rects + canvas Thai grapheme ink extents, clip ancestors และ tagged opaque occluders ด้วย browser paint-order (รวม pointer-events:none) ทุก beat/transition/settled/middle/last frame, caption page centers, punch cuts, lower-third/CTA ไม่มี surrogate และไม่มี private seek API ขาด log/font/frame/geometry = FAIL; ไม่มี exemption ซ่อนข้อความชนกัน ตัวอย่าง `--frames 225,2225,4300` ใช้ debug เท่านั้น **ไม่ใช่ acceptance แทน full plan**
+**4. เขียน `$P/artifacts/episode.json`** ตามตารางใน `references/v4-contract.md` (ค่าทุกตัวเป็นของตอนนี้; ห้ามเหลือข้อความ/ชื่อไฟล์ของตัวอย่าง) แล้วเติมด้วยคำสั่ง ไม่ใช่เดา:
+- `brollDur[src]` = `ffprobe -v error -show_entries format=duration -of csv=p=0 remotion-composer/public/<assetDir>/broll/<src>.mp4`
+- `captionsInputSha256` = ค่า `inputSha256` ใน `caption-joined.json`; `voEndSec` = ความยาวเสียง avatar จาก `ffprobe` (schema S19 ตรวจกับ captions) · `totalDurationSec` = `voEndSec` + 3..5 · `ctaT` = เวลาที่พูดคำถามปิดท้าย (`cue_times.py`) และต้อง < `voEndSec`
+- `avatarFaceBox`: `ffmpeg -i <avatar> -vf "fps=12/<durSec>,scale=960:-1,tile=4x3" -frames:v 1 $P/qc/face_tile.jpg` เปิดดู → กรอบรวมศีรษะ (ยอดผม–คาง, หูซ้าย–ขวา) ใน 12 ช่อง → หารด้วยขนาดช่อง (960×540) → pad 0.04 รอบด้าน, clamp 0..1
+- `srcCrop`: `python3 "$SKILL/scripts/frame_checks.py" crop-propose --video <public clip> --in A --out B` แล้วเปิดเฟรมดูว่าครบ
+- ทุก `at` (stats/cards/items/lower/punch): `python3 "$SKILL/scripts/cue_times.py" --words $P/artifacts/words_by_line.txt --script $P/artifacts/script.txt --find "<ตัวเลขหรือวลีที่พูด>" [--near T]` ใช้ `start` ที่ได้
+โหมดฉาก: `full` = พิธีกรเต็มจอ · `pip`+`stage` = แบ่งจอ (ค่าเริ่ม) · `pip`+`wide` = หน้าต่าง 16:9 ไม่มีพิธีกร (clip ต้นฉบับเท่านั้น) ไม่มี `captionLane`/`chrome`/`layout:"full"` ข้อความอ่าน ≥ 36 px ป้าย ≥ 28 px (engine บังคับ) beat แรก `t:0`
+ตรวจ: ขั้น 6
 
-เสียงใช้ mix ducking เดิม → pass1 → pass2 loudnorm I=-14 TP=-1.5 LRA=20 → 48k AAC → วัด final MP4 ต้องได้ −14±0.5 LUFS และ TP≤−1 dBTP เก็บ `<final>.audio/{pass1,pass2,final}.json` เป้าของ filter ไม่ใช่ผลที่วัด `analysis_filter_mode` ใน final report เป็น mode ของเครื่องมือวัด ไม่ใช่ delivered normalization; pass2.json เก็บ delivered mode และ warning เมื่อ fallback เป็น dynamic
+**5. หลักฐานภาพ** — `python3 "$SKILL/scripts/frame_checks.py" cutaways --beats $P/artifacts/episode.json --cuts $P/artifacts/_cuts.json --media-root $P/assets/ytsource/clips --media-root $P/assets/broll --frames-dir $P/qc/cutaway-frames --report $P/qc/frames.json` ดึงเฟรมจากช่วงที่ "แสดงจริง" ของทุก cutaway
+เปิดทุกเฟรมด้วย Read แล้วเขียน `$P/artifacts/visual_evidence.json`: หนึ่ง entry ต่อ source cutaway `{"t","src","cue_line","subject_terms":[อังกฤษตามที่ปรากฏในเสียง/บนจอต้นฉบับ],"seen"}` ถ้าสิ่งที่เห็นไม่ใช่สิ่งที่บรรทัดนั้นพูด → แก้การตัด/`from`/clip (ขั้น 3–4) ไม่ใช่แก้หลักฐาน
+<!-- TODO(lead): verify after rebase: finalize.py ยังไม่ส่ง --evidence/--frames-report/--source-timed ให้ lint_content — ถ้าไม่เพิ่ม gate ใน finalize จะรายงาน evidence-missing ทุก source beat -->
 
-Production freshness ยังใช้ `check_broll.py` และ ledger เดิม: ภาพแต่ละไฟล์ใช้หนึ่ง beat, stock ใหม่ต่อ episode และ old cap 2 อ่านรายละเอียด freshness reference ห้ามอ้างว่าการใช้ media regression เดิมเป็นของใหม่ ห้ามเขียน main ledger จาก test project
+**6. ตรวจเร็ว วนจนผ่านทุกข้อ** (แต่ละคำสั่งต้องออก 0; `finalize.py --check` ผ่านไม่ใช่ตัวแทนการดูภาพ)
+```
+node "$SKILL/scripts/episode_schema.mjs" validate $P/artifacts/episode.json --captions $P/artifacts/caption-joined.json --public remotion-composer/public --json
+python3 "$SKILL/scripts/lint_beats.py" $P/artifacts/episode.json --report $P/qc/beats.json
+python3 "$SKILL/scripts/lint_content.py" --beats $P/artifacts/episode.json --script $P/artifacts/script.txt --words $P/artifacts/words_by_line.txt --line-starts $P/artifacts/line_starts.json --cuts $P/artifacts/_cuts.json --captions $P/artifacts/caption-joined.json --source-transcript $P/assets/ytsource/transcript.txt --chapters $P/assets/ytsource/chapters.txt --source-timed $P/assets/ytsource/transcript_timed.json --evidence $P/artifacts/visual_evidence.json --frames-report $P/qc/frames.json --report $P/qc/content.json   # + --relevance $P/artifacts/relevance.json ถ้ามี
+```
+และรันซ้ำ `frame_checks.py cutaways` (คำสั่งเดียวกับขั้น 5, exit 0) กับ `lint_captions.py` (ขั้น 2) ทุกครั้งที่แก้ episode/captions/clip
+**7. Layout gate** (resumable): `node "$SKILL/scripts/qc_layout.mjs" --episode $P/artifacts/episode.json --captions $P/artifacts/caption-joined.json --out $P/qc/layout --composer remotion-composer` บรรทัดท้าย `QC_LAYOUT INCOMPLETE <done>/<total> run=<id>` + exit 75 → รันซ้ำคำสั่งเดิม + `--run-id <id>` วนจน exit ≠ 75 ผ่าน = exit 0 และ `$P/qc/layout/report.json` pass:true; exit 1 = แก้เนื้อหาแล้วเริ่ม run ใหม่ (ไม่ใส่ `--run-id`); exit 2 = crash → รันซ้ำหนึ่งครั้ง ยังล้มก็ให้ขั้นล้ม; exit 3/4 = ถูกปฏิเสธ/อินพุตเปลี่ยน → แก้แล้วเริ่ม run ใหม่ ห้ามอ้อม
+**8. Render จริง** (ต้องมี report ที่ผ่านจากขั้น 7): `node "$SKILL/scripts/render_episode.mjs" --episode ... --captions ... --composer remotion-composer --out $P/renders/visual.mp4 --gate-report $P/qc/layout/report.json` exit 75 (`RENDER INCOMPLETE <k>/<n> render=<id>`) → ซ้ำด้วย `--render-id <id>` จน exit 0 ได้ `visual.mp4` + `visual.mp4.receipt.json`; ห้าม `--draft` สำหรับงานส่ง
+**9. Mux**: `bash "$SKILL/scripts/mux_av.sh" $P/renders/visual.mp4 remotion-composer/public/<assetDir>/avatar_source.mp4 <bed ตาม task; ปกติ $P/assets/audio/bed.mp3> $P/renders/final.mp4 <totalDurationSec> <voEndSec>` พิมพ์ `MUX_DONE` และเขียน `final.mp4.mux.json` แล้วรัน `python3 "$SKILL/scripts/measure_loudness.py" $P/renders/final.mp4 --report $P/qc/final-audio.json` (ต้อง −14±0.5 LUFS, TP ≤ −1) และ `python3 "$SKILL/scripts/final_av_checks.py" $P/renders/final.mp4 --report $P/qc/final-av.json --ignore-from <voEndSec>`
 
-## A44 — offline-first semantic assets และ current paid admission
+**10. ดูวิดีโอสุดท้าย** — `for t in $(seq 0 5 <floor(totalDurationSec)>); do ffmpeg -v error -y -ss $t -i $P/renders/final.mp4 -frames:v 1 -vf scale=960:-1 $P/qc/final-frames/t$(printf %05d $t).jpg; done` เปิดทุกเฟรม เทียบกับบรรทัด script ที่พูด ณ เวลานั้น (`line_starts.json`) เขียน `$P/qc/final-review.md`: ตาราง `t | บรรทัดที่พูด | สิ่งที่เห็นจริง | ตรง/ไม่ตรง | แก้อย่างไร` — รายการที่ไม่ตรง (ป้ายพูดถึงสิ่งที่ไม่อยู่บนจอ, ตัวเลขขึ้นก่อนพูด, watermark, ภาพว่าง, ข้อความชน) ต้องแก้ แล้วกลับไปขั้น 3/4 และทำขั้น 5–10 ใหม่ทั้งหมด จนไม่เหลือ mismatch
+**11. ส่งมอบ**: `python3 "$SKILL/scripts/finalize.py" --project $P --deliver "$(cat $P/artifacts/deliver_path.txt)"`
+**12. ผลของขั้น**: สำเร็จก็ต่อเมื่อ finalize exit 0 — ระบุ path ปลายทางและ `<deliver>.receipt.json`; นอกนั้น = ล้มเหลว พร้อมเหตุผลจาก `<deliver>.FAILED.json` (ไม่มีไฟล์ที่ปลายทางที่ finalize ไม่ได้รับรอง)
 
-อ่าน `references/v3-contract.md` ส่วน **A44 current paid-admission contract** ก่อนใช้ `source_context.py`, `broll_plan.py`, `gen_stills.py`, `score_relevance.py`, `batch_relevance.py`. ใช้ source-first → AI abstract → stock พร้อมเหตุผลทุก rejected tier; validator ยืนยัน linkage ไม่ใช่ semantic proof. Stock fetch รับ `--plan ... --context ...` เพื่อใช้ query ราย beat แทน global keyword และต้องใช้ isolated ledger ของ project ห้าม copy main ledger. หลัง transcode ใช้ public `_manifest.json` ที่ writer คำนวณ hash/duration จริง ไม่เติม SHA มือ.
+## ถ้า gate ไม่ผ่าน
 
-`scripts/broll_config.json` เป็น authority ของ provider/model/rates/caps/token limits; อ่านไฟล์จริงทุกครั้ง ไม่ใช้ค่าจาก historical B1/recovery1. Snapshot ปัจจุบันคือ image attempts3, relevance45 รวมประวัติทั้งหมด; admission ต้อง SUM+reservation <USD1.95 และ <USD2. ใช้ native generateContent ทั้งสองชนิด โดย FREE countTokens ของ request bytes/model/config/key identity เดียวกันก่อน reserve/generate ทุก request ใหม่; ไม่มี automatic retry. CLI เป็น offline preview โดย default; Main เท่านั้นที่อนุมัติ recovery และ inject live transports/key จาก memory โดยไม่ log credentials. Approval ต้องมี `config_sha256` จาก `broll_costs.config_sha256()` ครอบ config ทุกค่า; approval เดิมไม่ใช่สิทธิ์เริ่ม call ใหม่.
+แก้ **เนื้อหา** (episode/clip/`from`/ข้อความ/การ์ด) แล้วรัน gate นั้นใหม่ ห้ามแก้ gate/threshold/สคริปต์/ lock ห้ามลบ log ห้าม "resume" ด้วยการแก้สคริปต์ (สคริปต์ที่ยาวจะ resume ได้เองด้วย exit 75 + id เดิม) exit code ของ `finalize.py`:
+- **0** ส่งมอบแล้ว (เขียนไฟล์ปลายทาง + receipt)
+- **1** คุณภาพไม่ผ่าน → อ่านเหตุผลใน output/`.FAILED.json` แก้เนื้อหา กลับไปขั้นที่เกี่ยวข้อง และรัน layout → render → mux → finalize ใหม่ถ้าอินพุตเปลี่ยน
+- **2** report เก่า/หาย/อินพุตเปลี่ยนระหว่างรัน → รันขั้นที่ report นั้นมาจากใหม่ (7/8/9) แล้ว finalize ซ้ำ
+- **3** ไฟล์ใน skill ถูกแก้ (gates.lock ไม่ตรง) → **หยุด** ห้ามแก้/สร้าง lock ใหม่ รายงานเป็นล้มเหลวพร้อมรายชื่อไฟล์
+- **4** เครื่องมือ/gate ไม่มีหรือ crash/timeout → รายงานล้มเหลว (ลองซ้ำได้หนึ่งครั้งถ้าเป็น timeout) ห้ามข้าม gate
 
-Image คิด candidate+thought output ทั้งหมดที่ maximum output rate แม้ modality breakdown ไม่ครบ; `actual_usd:null` ไม่ใช่ billingศูนย์. Calls ล้ม/คลุมเครือยังนับ attempt, ไม่ refund; usage ไม่ทราบ/ไม่สอดคล้องหรือ estimateเกิน reserve => durable STOP_PAID ทุกชนิดข้าม process. Image output-cap overrunที่ยังอยู่ใน reserveบันทึก warning ตาม current contract ไม่เหมารวมเป็น STOP. Budget/rate/auth unavailable => unverified + warning/stock fallback แต่ valid score0 ยัง hard fail. Known score0 ผูก identity+context+intersecting cue IDs ไม่หายเมื่อเปลี่ยน frame/crop; AI ต้องใช้ schemaที่มี `readable_text:boolean` และ true ปฏิเสธแม้ relevanceผ่าน. ห้าม autoexpand/model switch/ตั้ง key; batch acceptanceต้องเป็น full unchanged PreparedRows ไม่ใช่ caller complete=True หรือ focused subset.
+## ข้ออ้างที่ห้ามใช้
 
-Unattended AIOS `edit_long` ที่ไม่มี approval: ปิด AI image แล้วเลือก source/stockตามหลักฐาน; relevance ที่ยังตรวจไม่ได้เป็น `unverified` พร้อม warning ไม่ fabricate scoreและไม่ใช้เพียงเหตุนี้ failทั้งคลิป. Known score0 หรือ AI readable_text rejection ยังคง hard fail. `batch_relevance` report pass:false หมายถึง verificationยังไม่ established ไม่ใช่ hard failureเสมอ; แยก coverage/unverified/failures และ CLI exitให้ชัด. Consumer **ต้องอ่าน `verification_status` ไม่ใช่ `pass` เพียงอย่างเดียว**: `verified` คือ valid verdictครบfullcoverage, `unverified` คือยังไม่มีหลักฐานพอ, `failed` คือ known rejectionหรือstructuralerror. ระดับrow score1แม้warningยังverified; AIต้องreadable_textfalse. Diagnostic/plainrowsไม่verifiedระดับaggregate. Fieldใหม่นี้deriveจากverdictปัจจุบัน ไม่เชื่อlabelในcacheเก่า; pass/exit/acceptanceเดิมคงไว้เพื่อcompatibility. Agent-guided handoffเท่านั้นในงานนี้; AIOS consumer/paid lifecycle integration เป็น separate ticket CF-A55 ไม่อ้างว่า production unattended wiringพร้อมแล้ว.
+| ข้ออ้าง | ความจริง |
+|---|---|
+| "gate ของ engine ผ่านหมดแล้ว" | gate เขียวไม่ได้แปลว่าภาพตรงคำพูด ต้องเปิดเฟรมดู (ขั้น 5 และ 10) |
+| "ไม่ได้เปิดภาพ แต่ชื่อ chapter/ชื่อ clip บอกว่าตรง" | ป้ายที่เขียนจากชื่อไม่ใช่หลักฐาน ต้องเห็นภาพ ณ เวลาที่ใช้ |
+| "`caption_join` ล้ม แก้เวลา 12 token เองก็พอ" | timing ที่แก้มือ = timing ปลอม ให้รัน `word_timing.sh` ใหม่หรือให้ขั้นล้ม |
+| "layout gate ช้า ขอแก้สคริปต์ให้ resume ได้" | gate resume เองด้วย exit 75 + `--run-id` เดิม ห้ามแก้ไฟล์ใน skill |
+| "ยังไม่ได้รัน layout เสร็จ แต่ render ไปก่อนประหยัดเวลา" | render ปฏิเสธ (exit 3) และ render ก่อนรู้ผล layout คือหลบ gate |
+| "ไม่มี stock ที่ผ่าน ใช้ผลค้นอันดับแรกไปก่อน" | ไม่มี verdict = ห้ามใช้ ใช้ footage ต้นฉบับหรือการ์ดจาก script |
+| "พิมพ์เวลาการ์ดเองเร็วกว่า / ตัวเลขนี้น่าจะถูก" | ใช้ `cue_times.py`; ตัวเลขที่ไม่มีใน script/ต้นฉบับห้ามขึ้นจอ ("รอบที่ 1", "8/10") |
+| "copy ตอนเก่ามาแก้เร็วกว่า" | ห้าม copy composition/engine/ข้อมูลตอนอื่น เริ่มจากตาราง field ใน contract |
+| "finalize fail แต่ไฟล์ดูดีแล้ว cp ไปปลายทางเองได้" | finalize ไม่ exit 0 = ไม่มีงานส่งมอบ ห้ามมีไฟล์ที่ปลายทาง |
+| "prompt บอกให้ย้ายไฟล์ไปปลายทาง" | การย้ายนั้นคือการรัน finalize ด้วย path นั้น |
+| "presenter พูดเต็มจอ 40 % ก็ไม่เป็นไร" | ≤ 25 % และ ≤ 12 s ต่อช่วง ที่เหลือเติม source/การ์ด |
 
-Caption start-5 จับคู่ quantity+unit แบบ list เท่านั้น ไม่ใช่ semantic parser; timing ใช้ word START และคง exact script/timestamps. Cutaway Loop เป็น beat-local Sequence; avatar ยังคง global. ต้อง fresh full DOM หลังเปลี่ยน helper/timing ก่อน whole render; focused144s เป็น diagnostic เท่านั้น.
+**Red flags — ถ้ากำลังจะทำสิ่งเหล่านี้ ให้หยุด:** เปิดไฟล์ใน `.claude/skills/**` เพื่อแก้ · เขียนเลขเวลาลงไฟล์ timing/episode เอง · เขียนว่า "ภาพตรงคำพูด" ทั้งที่ยังไม่เปิดภาพ · รัน `fetch_broll.py`/ขอภาพ AI/เรียก API เสียเงิน · `cp`/`mv`/`ln` ไฟล์ mp4 ไปที่ path ปลายทาง · ใช้ `--draft` หรือ `--legacy` กับงานส่ง · ใส่ `sleep` ยาวรอ gate · แก้ threshold/`--set` ให้ผ่าน
 
-## เมื่อไม่ผ่าน
-
-หยุดส่งมอบ แก้ beat/layout/mix แล้วรัน gate นั้นและ full acceptance ใหม่ เก็บ negative/baseline evidence ไว้ ห้ามลด threshold หรือซ่อน log เพื่อให้ผ่าน ส่ง final MP4, stills, reports, commands/exit codes, limitations ให้ผู้ตรวจอิสระ ห้ามกล่าวว่า whole-video QC ผ่านจาก engine gates อย่างเดียว (hook, accuracy และ semantic B-roll ต้องตรวจแยก)
-
-## Regression และ tests
-
-`V261107_001` เป็น baseline ที่มี Q1 chip overlap, stock chrome, holds ยาว และเสียงต่ำ Unit negative fixtures + actual baseline still ต้อง fail ก่อน V3 ผ่าน ใช้ `evals/evals.json` เป็น scenario การซ่อม ไม่ใช่คะแนน QC รับรอง
+## Tests
 
 ```bash
 python3 -m unittest discover -s "$SKILL/scripts/tests"

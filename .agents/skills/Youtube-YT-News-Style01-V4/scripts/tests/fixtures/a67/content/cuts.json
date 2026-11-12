@@ -1,4 +1,4 @@
 {"schema": "fixture", "clips": {
-  "yt_a": {"origin": "source", "source_in": 0.0, "source_out": 15.0},
-  "yt_b": {"origin": "source", "source_in": 100.0, "source_out": 130.0}
+  "yt_gemini_demo": {"origin": "source", "source_in": 0.0, "source_out": 15.0},
+  "yt_code_lines": {"origin": "source", "source_in": 100.0, "source_out": 130.0}
 }}

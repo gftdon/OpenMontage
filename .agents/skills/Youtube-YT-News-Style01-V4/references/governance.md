@@ -67,3 +67,9 @@ subtitle_check}`.
 
 When in doubt, read the JSON Schema in `schemas/artifacts/<name>.schema.json`
 rather than guessing a field.
+
+## V4 unattended: สิ่งที่กฎด้านบนไม่เปลี่ยน
+
+- ใน V4 `bespoke.entry` / `composition_id` ชี้ไป engine ที่ล็อกไว้ (`YtNewsStyle01V4`) ไม่ใช่ไฟล์ที่ agent เขียน; agent ไม่สร้าง/แก้ไฟล์ `.tsx`, Root หรือไฟล์ใน skill
+- checkpoint, `decision_log` และ `render_report` ไม่ใช่ทางส่งมอบและไม่ใช่หลักฐานว่าผ่าน: ส่งมอบได้ทางเดียวคือ `finalize.py --deliver` ที่ exit 0 (ดู SKILL.md) `render_report` / `final_review` ห้ามระบุ `pass` ถ้า finalize ไม่ exit 0 หรือ `qc/final-review.md` ยังมี mismatch ค้าง
+- `final_review.checks.visual_spotcheck` ต้องอ้างเฟรมที่เปิดดูจริงใน `qc/final-frames/` ไม่ใช่ผลของ gate
