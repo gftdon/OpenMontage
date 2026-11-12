@@ -76,14 +76,23 @@ FONT_FILES = ('fonts/Kanit-Bold.ttf', 'fonts/Kanit-ExtraBold.ttf')
 WHISPER_DEFAULT_MODEL = 'mlx-community/whisper-large-v3-mlx'      # word_timing.sh default
 # music-presence gate (fresh, on renders/final.mp4): the mean volume of the final file just after the voice ends.
 # Measured on real files, window voEnd+0.5 ... +2.5 s (ffmpeg volumedetect mean_volume): four finals WITH music -27.3, -27.6,
-# -29.4, -29.5 dB; the real mux with a silent bed (voice only) -91.0 dB.  Threshold locked by lead 2026-11-12.
-MUSIC_PRESENCE_MIN_MEAN_DB = -60.0
+# -29.4, -29.5 dB; a correct mix whose window falls on the fading last 2 s of the LOOPED approved bed -56.1, -60.9, -61.8 dB (worst
+# case measured; -51.5 across the loop seam); the real mux with a silent bed (voice only) -91.0 dB.  -75 locked by lead 2026-11-12.
+MUSIC_PRESENCE_MIN_MEAN_DB = -75.0
 MUSIC_PRESENCE_START_AFTER_VO = 0.5       # the avatar audio ends at voEndSec; start a little later, the bed is still fading out
 MUSIC_PRESENCE_END_AFTER_VO = 2.5
 MUSIC_PRESENCE_MIN_WINDOW = 1.0           # a shorter window measures too little
 # mirrors `afade=t=out:st=${VO_END}:d=4.2` in mux_av.sh (a test reads the script and compares); END_AFTER_VO must stay <= 0.6 x this,
 # so that the whole window lies in the part of the fade where the bed is still clearly audible
 MUX_FADE_OUT_SECONDS = 4.2
+# voEndSec is compared with the real length of the avatar audio before the window is measured: a voEndSec earlier than the real end
+# of speech would make the window measure speech, not the bed.  The avatar is ctx.avatar (the file the mux receipt's avatar.sha256 is
+# bound to, see verify_mux_receipt), not a path read from a receipt.
+VO_END_AVATAR_TOLERANCE = 0.25
+# mux_av.sh mixes the bed at this fixed volume (`VOL=0.22` in the script, a test compares); the mux receipt must carry it
+MUX_BED_VOLUME = 0.22
+MUX_RECEIPT_VERSION = 2                    # mux receipts carry total / vo_end / bed_volume since version 2
+MUX_EPISODE_TOLERANCE = 0.01
 MUSIC_PRESENCE_END_MARGIN = 0.1           # the window stops this far before the end of the file
 
 # =================================================================================================================
@@ -176,12 +185,19 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    library: library_file, license, origin, approved_by, approved_on, manifest_sha256 (+ sidecar_manifest_sha256).
 # -- music-presence (fresh gate, in a real run and in --check, listed right after `loudness`): mean_volume of renders/final.mp4
 #    (ffmpeg -ss <start> -t <len> -i final.mp4 -vn -af volumedetect -f null -) in the window voEndSec+0.5 ... min(voEndSec+2.5,
-#    duration-0.1), voEndSec from artifacts/episode.json (Ctx.ep['vo_end']).  PASS when the mean is above -60.0 dB.  It proves
-#    ONLY that there is sound after the voice ends, i.e. that a bed was muxed in at all (a voice-only mux measures -91 dB).  It
-#    does NOT prove that the sound is the approved bed (the `mux` record binds that), nor that music is present throughout
-#    the video.  Window < 1.0 s = quality failure (exit 1); no audio stream / unreadable / ffmpeg failure / timeout = exit 4.
-#    The record carries mean_db, window [start, end], threshold_db; the delivery receipt carries `music_presence`
-#    {mean_db, window_start, window_end} (next to the `music` entry).
+#    duration-0.1), voEndSec from artifacts/episode.json (Ctx.ep['vo_end']).  PASS when the mean is above
+#    MUSIC_PRESENCE_MIN_MEAN_DB (-75.0).  It proves ONLY that there is sound after the voice ends, i.e. that a bed was muxed in at
+#    all (a voice-only mux measures -91 dB).  It does NOT prove that the sound is the approved bed (the `mux` record binds that),
+#    nor that music is present throughout the video.  Before measuring, voEndSec must match the audio length of the avatar
+#    (ctx.avatar, the file the mux receipt's avatar.sha256 is bound to) within VO_END_AVATAR_TOLERANCE (0.25 s), else the window
+#    could measure speech.  Exit classes: window < 1.0 s, no audio stream in the final, silence, voEndSec != avatar length = 1
+#    (quality); ffprobe / ffmpeg failing to run, unparsable output, timeout = 4; a missing avatar file = 2 (required input, like
+#    the `timing` gate).  The record carries mean_db, window [start, end], threshold_db, avatar_audio_seconds; the delivery
+#    receipt carries `music_presence` {mean_db, window_start, window_end} (next to the `music` entry).
+# -- mux receipt (mux_av.sh, version 2): {schema, version, visual, avatar, bed, final, total, vo_end, bed_volume, created_at}.
+#    mux_av.sh takes exactly 6 arguments (the bed volume is the constant VOL=0.22 in the script).  verify_mux_receipt requires
+#    version 2, bed_volume == MUX_BED_VOLUME, |vo_end - episode voEndSec| <= 0.01 and |total - episode totalDurationSec| <= 0.01;
+#    a missing field (an older receipt) or a mismatch fails the `mux` record (stale, exit 2): run mux_av.sh again.
 # -- music-library (`--preflight` ONLY, like word-timing; a real run and --check do not run it): at least one track of
 #    scripts/music_library.json must be usable (music_library.check_library status "ok").  The online source (Pixabay) is
 #    refused at the time of writing, so the library is the one music source every run can rely on; failing at step 0 is
@@ -246,7 +262,7 @@ GATES = [
     dict(name='loudness', interp='python', script='measure_loudness.py', args=['{final}', '--report', '{report}'],
          optional_args=[], inputs=['final'], needs=[], report='{reports}/final-audio.json',
          limit=60, required=True),
-    dict(name='music-presence', runner='music_presence', optional_args=[], inputs=['final'], needs=['vo_end'],
+    dict(name='music-presence', runner='music_presence', optional_args=[], inputs=['final', 'avatar'], needs=['vo_end'],
          report='{reports}/music-presence.json', limit=30, required=True),
     dict(name='timing', interp='python', script='timing_check.py',
          args=['--audio', '{avatar}', '--words', '{words}', '--line-starts', '{line_starts}', '--srt', '{srt}',
@@ -1004,33 +1020,53 @@ def runner_music_presence(gate, ctx, base, report, limit, env):
         has_audio = any(st.get('codec_type') == 'audio' for st in info.get('streams', []))
     except (ValueError, KeyError, TypeError):
         return fail('crashed', 4, 'cannot read the duration of %s' % ctx.rel(final))
-    if not has_audio:
-        return fail('crashed', 4, 'the final file %s has no audio stream: nothing to measure' % ctx.rel(final))
+    if not has_audio:      # a mux defect (the mix is missing), not a tool failure
+        return fail('fail', 1, 'the final file has no audio stream; run the mux (mux_av.sh) again')
+    # voEndSec vs the real length of the avatar audio (the audio stream; the container duration when it has none)
+    ap = spawn([ffprobe, '-v', 'error', '-show_entries', 'stream=codec_type,duration:format=duration', '-of', 'json', str(ctx.avatar)],
+               ctx, max(left(), 1), env)
+    if ap['cancelled'] or ap['timed_out']:
+        return fail('crashed' if ap['cancelled'] else 'timeout', 4, 'cancelled: finalize was terminated' if ap['cancelled']
+                    else 'ffprobe timed out on the avatar %s' % ctx.rel(ctx.avatar))
+    try:
+        if ap['code'] != 0:
+            raise ValueError('ffprobe exited %s' % ap['code'])
+        ainfo = json.loads(ap['stdout'].decode('utf-8', 'replace'))
+        audio = [float(st['duration']) for st in ainfo.get('streams', [])
+                 if st.get('codec_type') == 'audio' and str(st.get('duration', 'N/A')).replace('.', '', 1).isdigit()]
+        avatar_audio = audio[0] if audio else float(ainfo['format']['duration'])
+    except (ValueError, KeyError, TypeError) as e:     # ffprobe ran, the avatar is not readable media: bad input (class 2), like a missing avatar
+        return fail('bad-input', 2, 'cannot read the audio length of the avatar %s: %s' % (ctx.rel(ctx.avatar), e))
+    if abs(vo - avatar_audio) > VO_END_AVATAR_TOLERANCE + 1e-9:
+        return fail('fail', 1, 'voEndSec %s does not match the avatar audio length %.2f s (tolerance %s s): the window after the voice cannot be '
+                    'trusted; set voEndSec to the avatar\'s real length (SKILL.md step 4) and rebuild' % (vo, avatar_audio, VO_END_AVATAR_TOLERANCE),
+                    {'avatar_audio_seconds': round(avatar_audio, 3)})
     start = vo + MUSIC_PRESENCE_START_AFTER_VO
     end = min(vo + MUSIC_PRESENCE_END_AFTER_VO, duration - MUSIC_PRESENCE_END_MARGIN)
     window = [round(start, 3), round(end, 3)]
+    avx = {'avatar_audio_seconds': round(avatar_audio, 3)}
     if end - start < MUSIC_PRESENCE_MIN_WINDOW:
         need = MUSIC_PRESENCE_START_AFTER_VO + MUSIC_PRESENCE_MIN_WINDOW + MUSIC_PRESENCE_END_MARGIN
         return fail('fail', 1, 'only %.2f s of the final file is left after the voice ends (voEndSec %s, duration %.2f); at least %.1f s is '
                     'needed to measure that the music bed is present' % (max(duration - vo, 0.0), vo, duration, need),
-                    {'window': window, 'duration': round(duration, 3)})
+                    dict(avx, window=window, duration=round(duration, 3)))
     res = spawn([ffmpeg, '-nostdin', '-hide_banner', '-ss', '%.3f' % start, '-t', '%.3f' % (end - start), '-i', str(final), '-vn',
                  '-af', 'volumedetect', '-f', 'null', '-'], ctx, max(left(), 1), env)
     out = res['stderr']
     if res['cancelled']:
-        return fail('crashed', 4, 'cancelled: finalize was terminated', {'window': window}, out)
+        return fail('crashed', 4, 'cancelled: finalize was terminated', dict(avx, window=window), out)
     if res['timed_out']:
-        return fail('timeout', 4, 'timeout: the volume measurement exceeded the %.0fs limit of the gate' % limit, {'window': window}, out)
+        return fail('timeout', 4, 'timeout: the volume measurement exceeded the %.0fs limit of the gate' % limit, dict(avx, window=window), out)
     if res['code'] != 0:
-        return fail('crashed', 4, 'ffmpeg volumedetect exited with code %s' % res['code'], {'window': window}, out)
+        return fail('crashed', 4, 'ffmpeg volumedetect exited with code %s' % res['code'], dict(avx, window=window), out)
     found = _MEAN_VOLUME.search(out)
     if not found:
-        return fail('crashed', 4, 'cannot read mean_volume from the ffmpeg volumedetect output', {'window': window}, out)
+        return fail('crashed', 4, 'cannot read mean_volume from the ffmpeg volumedetect output', dict(avx, window=window), out)
     silent = found.group(1).endswith('inf')
     mean = None if silent else float(found.group(1))
     shown = '-inf' if silent else '%.1f' % mean
     where = '%.2f\u2013%.2f s' % (start, end)
-    extra = {'mean_db': mean, 'window': window, 'threshold_db': MUSIC_PRESENCE_MIN_MEAN_DB}
+    extra = dict(avx, mean_db=mean, window=window, threshold_db=MUSIC_PRESENCE_MIN_MEAN_DB)
     if silent or mean <= MUSIC_PRESENCE_MIN_MEAN_DB:
         return fail('fail', 1, 'the final file is silent after the voice ends (mean %s dB in %s, must be above %.1f dB): the music bed is '
                     'missing from the mix; run the music step and the mux again' % (shown, where, MUSIC_PRESENCE_MIN_MEAN_DB), extra, out)
@@ -1399,6 +1435,17 @@ def verify_mux_receipt(receipt_path, ctx):
     p, info = [], {'receiptSha256': ctx.hash(receipt_path)}
     if data.get('schema') != 'yt-news-v4-mux-receipt':
         p.append('mux receipt has the wrong schema')
+    again = 'run mux_av.sh again with <TOTAL>=<totalDurationSec> <VO_END>=<voEndSec>'
+    if data.get('version') != MUX_RECEIPT_VERSION:
+        p.append('mux receipt version is %r, expected %d (it was written by an older mux_av.sh); %s' % (data.get('version'), MUX_RECEIPT_VERSION, again))
+    for key, ep_key, ep_name in (('vo_end', 'vo_end', 'voEndSec'), ('total', 'total', 'totalDurationSec')):
+        v, want = data.get(key), ctx.ep[ep_key]
+        if not is_num(v):
+            p.append('mux receipt %s is missing (an old receipt); %s' % (key, again))
+        elif want is not None and abs(v - want) > MUX_EPISODE_TOLERANCE + 1e-9:
+            p.append('mux receipt %s %s does not match the episode %s %s; %s' % (key, v, ep_name, want, again))
+    if data.get('bed_volume') != MUX_BED_VOLUME:
+        p.append('mux receipt bed_volume is %r, not %s (the fixed mix setting of mux_av.sh); %s' % (data.get('bed_volume'), MUX_BED_VOLUME, again))
     avatar = ctx.avatar
     if avatar is None:
         p.append('episode.json has no assetDir/avatarFile; cannot bind the avatar')

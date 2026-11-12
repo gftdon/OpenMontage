@@ -1,8 +1,21 @@
 #!/bin/bash
-# VISUAL AVATAR_WITH_VO BED OUT TOTAL_SEC VO_END_SEC [BED_VOL=.22]
+# VISUAL AVATAR_WITH_VO BED OUT TOTAL_SEC VO_END_SEC      (exactly 6 arguments)
 # Preserve the V2 ducked mix, then normalize twice and measure FINAL AAC MP4.
 set -euo pipefail
-VISUAL="$1"; VO="$2"; BED="$3"; OUT="$4"; TOTAL="$5"; VO_END="$6"; VOL="${7:-0.22}"
+if [ "$#" -ne 6 ]; then
+  echo "usage: mux_av.sh VISUAL AVATAR_WITH_VO BED OUT TOTAL_SEC VO_END_SEC   (exactly 6 arguments; the bed volume is fixed)" >&2
+  exit 2
+fi
+VISUAL="$1"; VO="$2"; BED="$3"; OUT="$4"; TOTAL="$5"; VO_END="$6"
+# fixed mix setting (not an argument): finalize.py verifies that the mux receipt carries exactly this value (MUX_BED_VOLUME)
+VOL=0.22
+# TOTAL and VO_END are positive decimals and the voice ends before the file does; checked before anything is written
+for n in "$TOTAL" "$VO_END"; do
+  [[ "$n" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v n="$n" 'BEGIN{exit !(n>0)}' \
+    || { echo "mux_av.sh: TOTAL_SEC and VO_END_SEC must be positive decimals (got '$TOTAL' '$VO_END')" >&2; exit 2; }
+done
+awk -v t="$TOTAL" -v v="$VO_END" 'BEGIN{exit !(v<t)}' \
+  || { echo "mux_av.sh: VO_END_SEC ($VO_END) must be smaller than TOTAL_SEC ($TOTAL)" >&2; exit 2; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${OUT%.mp4}.audio"
 rm -f "${OUT}.mux.json"   # a receipt only ever describes a mux that completed in THIS run
@@ -34,14 +47,14 @@ PY
 python3 "$HERE/measure_loudness.py" "$OUT" --report "$WORK/final.json"
 # Mux receipt: binds visual + avatar VO + bed + final by sha256 (verified later by finalize.py).
 RECEIPT="${OUT}.mux.json"
-python3 - "$RECEIPT" "$VISUAL" "$VO" "$BED" "$OUT" \
+python3 - "$RECEIPT" "$VISUAL" "$VO" "$BED" "$OUT" "$TOTAL" "$VO_END" "$VOL" \
   "$(shasum -a 256 "$VISUAL" | cut -d' ' -f1)" "$(shasum -a 256 "$VO" | cut -d' ' -f1)" \
   "$(shasum -a 256 "$BED" | cut -d' ' -f1)" "$(shasum -a 256 "$OUT" | cut -d' ' -f1)" <<'PY'
 import datetime,json,os,sys
-rcpt,visual,vo,bed,out,sv,sa,sb,sf=sys.argv[1:10]
+rcpt,visual,vo,bed,out,total,vo_end,vol,sv,sa,sb,sf=sys.argv[1:13]
 ent=lambda p,h:{'path':os.path.abspath(p),'sha256':h}
-d={'schema':'yt-news-v4-mux-receipt','version':1,'visual':ent(visual,sv),'avatar':ent(vo,sa),'bed':ent(bed,sb),
-   'final':ent(out,sf),'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
+d={'schema':'yt-news-v4-mux-receipt','version':2,'visual':ent(visual,sv),'avatar':ent(vo,sa),'bed':ent(bed,sb),
+   'final':ent(out,sf),'total':float(total),'vo_end':float(vo_end),'bed_volume':float(vol),'created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
 tmp=rcpt+'.tmp';open(tmp,'w').write(json.dumps(d,indent=2)+'\n');os.replace(tmp,rcpt)
 PY
 printf 'MUX_DONE %s\n' "$OUT"

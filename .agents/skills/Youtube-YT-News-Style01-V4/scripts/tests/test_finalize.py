@@ -226,6 +226,43 @@ def make_videos(proj, visual_args=None, pix_fmt='yuv420p', audio=TONE):
     final_with_audio(proj, audio=audio)
 
 
+def synth_wav(segments, rate=48000, freq=440.0):
+    """Deterministic mono 16-bit sine bed as WAV bytes: segments = [(seconds, amplitude 0..1), ...] (pure Python, no ffmpeg:
+    the bytes - hence the sha256 that goes into the approved list - are known when the test classes are defined)."""
+    import io as _io
+    import math
+    import struct
+    import wave
+    frames = bytearray()
+    t = 0
+    for seconds, amp in segments:
+        for i in range(int(seconds * rate)):
+            frames += struct.pack('<h', int(32767 * amp * math.sin(2 * math.pi * freq * (t + i) / rate)))
+        t += int(seconds * rate)
+    buf = _io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+# the loop-seam case: an approved bed of 4.5 s whose last 2 s are ~22 dB quieter (the real approved track: -25.7 dB at the start,
+# -47.5 dB in the last 2 s); voEndSec 2.0 + the window 2.5 ... 3.9 s lands exactly on that quiet tail
+SEAM_BED = synth_wav([(2.5, 0.07), (2.0, 0.07 * 0.08)])        # sine amplitude 0.07 = about -26 dB mean, the tail 22 dB below
+SILENT_BED = synth_wav([(4.5, 0.0)])
+SEAM_SHA, SILENT_SHA = hashlib.sha256(SEAM_BED).hexdigest(), hashlib.sha256(SILENT_BED).hexdigest()
+AVATAR_FILE = []
+
+
+def make_avatar(path, seconds=2.0):
+    """A tiny avatar mp4 whose AUDIO stream lasts `seconds` (the real avatar's audio ends at voEndSec)."""
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=25:d=%s' % seconds, '-f', 'lavfi', '-i',
+           'sine=frequency=300:sample_rate=48000:duration=%s' % seconds, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+           '-shortest', str(path))
+
+
 ENV_BACKUP = {}
 ENV_DIR = []
 
@@ -273,6 +310,8 @@ def setUpModule():
     (p / 'assets' / 'broll' / 'a.mp4').write_bytes(b'x')
     (p / 'assets' / 'ytsource' / 'transcript.txt').write_text('transcript\n')
     make_videos(p)
+    make_avatar(t / 'avatar.mp4')
+    AVATAR_FILE.append(t / 'avatar.mp4')
     PROJECT_TEMPLATE = t
 
 
@@ -378,7 +417,9 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=None, sidecar=None)
                'gateManifestHash': mhash, 'gateCheckedAtStart': 't0', 'gateCheckedAtConcat': 't1', 'segments': [],
                'tools': {}, 'startedAt': 't0', 'finishedAt': 't1', 'wallSecondsTotal': 3, 'invocations': []}
     Path(str(vis) + '.receipt.json').write_text(json.dumps(receipt, indent=2))
-    mux = {'schema': 'yt-news-v4-mux-receipt', 'version': 1, 'visual': {'path': str(vis), 'sha256': sha(vis)},
+    eps = json.loads(ep.read_text())
+    mux = {'schema': 'yt-news-v4-mux-receipt', 'version': 2, 'visual': {'path': str(vis), 'sha256': sha(vis)},
+           'total': eps.get('totalDurationSec'), 'vo_end': eps.get('voEndSec'), 'bed_volume': 0.22,
            'avatar': {'path': str(avatar), 'sha256': sha(avatar)}, 'bed': {'path': str(bed), 'sha256': sha(bed)},
            'final': {'path': str(fin), 'sha256': sha(fin)}, 'created_at': 't'}
     Path(str(fin) + '.mux.json').write_text(json.dumps(mux, indent=2))
@@ -447,7 +488,7 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     shutil.copytree(PROJECT_TEMPLATE / 'p1', repo / 'projects' / 'p1')
     (repo / 'remotion-composer' / 'public' / 'ep1' / 'broll').mkdir(parents=True)
     (repo / 'remotion-composer' / 'public' / 'ep1' / 'broll' / 'a.mp4').write_bytes(b'x')
-    (repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4').write_bytes(b'AVATAR')
+    shutil.copy(AVATAR_FILE[0], repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4')      # a real mp4: 2.0 s of audio = voEndSec
     (repo / 'remotion-composer' / 'public' / 'fonts').mkdir(parents=True)
     for font in ('Kanit-Bold.ttf', 'Kanit-ExtraBold.ttf'):
         (repo / 'remotion-composer' / 'public' / 'fonts' / font).write_bytes(b'FONT')
@@ -2752,6 +2793,16 @@ class MusicPresenceTests(FinalizeBase):
     def gate_rec(self, doc=None):
         return self.gate(doc or self.failed(), 'music-presence')
 
+    @property
+    def floor(self):
+        """MUSIC_PRESENCE_MIN_MEAN_DB: every level test is relative to it, so a change of the constant needs no test edit."""
+        return self.module().MUSIC_PRESENCE_MIN_MEAN_DB
+
+    def noise_at(self, db):
+        """a final whose whole audio is white noise with a mean volume of about `db` dB"""
+        amp = (10 ** (db / 20)) * (3 ** 0.5)               # uniform white noise: rms = amp / sqrt(3)
+        self.new_final('anoisesrc=d=30:a=%.7f:r=48000' % min(amp, 1.0))
+
     def new_final(self, audio):
         final_with_audio(self.proj, audio=audio)
         write_receipts(self.repo, name=self.name)          # the mux receipt describes the new file
@@ -2765,10 +2816,11 @@ class MusicPresenceTests(FinalizeBase):
         rc = self.receipt()
         g = self.gate_rec(rc)
         self.assertEqual('pass', g['status'])
-        self.assertGreater(g['mean_db'], -60.0)
+        self.assertGreater(g['mean_db'], self.floor)
         self.assertEqual([2.5, 3.9], g['window'])
-        self.assertEqual(-60.0, g['threshold_db'])
-        self.assertRegex(g['detail'], r'^mean -?\d+\.\d dB in 2\.50\u20133\.90 s \(must be above -60\.0 dB\)$')
+        self.assertEqual(self.floor, g['threshold_db'])
+        self.assertRegex(g['detail'], r'^mean -?\d+\.\d dB in 2\.50\u20133\.90 s \(must be above %s dB\)$' % re.escape('%.1f' % self.floor))
+        self.assertAlmostEqual(2.0, g['avatar_audio_seconds'], delta=0.1)
         self.assertEqual({'mean_db', 'window_start', 'window_end'}, set(rc['music_presence']))
         self.assertEqual((g['mean_db'], 2.5, 3.9), (rc['music_presence']['mean_db'], rc['music_presence']['window_start'], rc['music_presence']['window_end']))
         report = json.loads((self.rdir / 'music-presence.json').read_text())
@@ -2789,21 +2841,20 @@ class MusicPresenceTests(FinalizeBase):
         self.assertNotDelivered()
         g = self.gate_rec()
         self.assertEqual('fail', g['status'])
-        self.assertRegex(g['reason'], r'^the final file is silent after the voice ends \(mean (-91\.0|-inf) dB in 2\.50\u20133\.90 s, must be above -60\.0 dB\): '
-                                       r'the music bed is missing from the mix; run the music step and the mux again$')
+        self.assertRegex(g['reason'], r'^the final file is silent after the voice ends \(mean (-91\.0|-inf) dB in 2\.50\u20133\.90 s, must be above %s dB\): '
+                                       r'the music bed is missing from the mix; run the music step and the mux again$' % re.escape('%.1f' % self.floor))
         self.assertTrue(any(r.startswith('music-presence: the final file is silent after the voice ends') for r in self.failed()['reasons']))
 
-    def test_quiet_noise_about_minus_70_db_fails_and_about_minus_50_db_passes(self):
-        self.new_final('anoisesrc=d=30:a=0.00055:r=48000')
+    def test_noise_10_db_below_the_threshold_fails_and_10_db_above_passes(self):
+        self.noise_at(self.floor - 10)
         self.assertEqual(1, self.run_fin(), self.out)
         low = self.gate_rec()['mean_db']
-        self.assertLess(low, -60.0)
-        self.assertGreater(low, -85.0)
-        self.new_final('anoisesrc=d=30:a=0.0055:r=48000')
+        self.assertTrue(low is None or low <= self.floor, low)
+        self.noise_at(self.floor + 10)
         self.assertEqual(0, self.run_fin(), self.out)
         high = self.gate_rec(self.receipt())['mean_db']
-        self.assertGreater(high, -60.0)
-        self.assertLess(high, -40.0)
+        self.assertGreater(high, self.floor)
+        self.assertLess(high, self.floor + 20)
 
     def runner(self, vo_end):
         m = self.module()
@@ -2816,10 +2867,13 @@ class MusicPresenceTests(FinalizeBase):
         return m.runner_music_presence(gate, ctx, base, report, 30, m.gate_env(ctx.tools))
 
     def test_a_tail_that_is_too_short_is_a_quality_failure_exit_1_with_the_reason(self):
+        avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+        make_avatar(avatar, 3.0)                       # voEndSec must match the avatar audio, else the avatar check comes first
         rec = self.runner(3.0)                         # 1.0 s left after the voice ends
         self.assertEqual(('fail', 1), (rec['status'], rec['cls']))
         self.assertEqual('only 1.00 s of the final file is left after the voice ends (voEndSec 3.0, duration 4.00); at least 1.6 s is needed to '
                          'measure that the music bed is present', rec['reason'])
+        make_avatar(avatar, 2.4)
         rec = self.runner(2.4)                         # window 2.9 .. 3.9 = 1.0 s: enough
         self.assertEqual('pass', rec['status'])
 
@@ -2830,13 +2884,13 @@ class MusicPresenceTests(FinalizeBase):
         self.assertEqual('fail', self.gate_rec()['status'])
         self.assertIn('is left after the voice ends', self.gate_rec()['reason'])
 
-    def test_a_final_without_an_audio_stream_is_exit_4(self):
+    def test_a_final_without_an_audio_stream_is_a_quality_failure_exit_1(self):
         final_with_audio(self.proj, audio=None)
         write_receipts(self.repo, name=self.name)
-        self.assertEqual(4, self.run_fin(), self.out)
+        self.assertEqual(1, self.run_fin(), self.out)
         g = self.gate_rec()
-        self.assertEqual('crashed', g['status'])
-        self.assertIn('has no audio stream', g['reason'])
+        self.assertEqual('fail', g['status'])
+        self.assertEqual('the final file has no audio stream; run the mux (mux_av.sh) again', g['reason'])
 
     def fake_ffmpeg(self, body):
         f = Path(self.tmp) / 'fake-ffmpeg'
@@ -2870,11 +2924,33 @@ class MusicPresenceTests(FinalizeBase):
         self.assertEqual('timeout', g['status'])
         self.assertIn('exceeded the 30s limit', g['reason'])
 
-    def test_exit_precedence_integrity_and_tool_failures_still_win_over_a_music_failure(self):
+    def silent_final(self):
         self.new_final('sine=frequency=440:sample_rate=48000:duration=2,apad=whole_dur=30')
-        self.edit(self.layout_path(), lambda d: d.update(complete=False))            # a class 2 problem as well
+
+    def broken_ffmpeg(self):
+        return self.with_ffmpeg(self.fake_ffmpeg('echo boom >&2\nexit 1\n'))
+
+    def test_precedence_3_beats_4(self):
+        self.behavior(gate_integrity={'exit': 3})                                         # an integrity refusal by the gate ...
+        self.assertEqual(3, self.run_fin(patch=self.broken_ffmpeg()), self.out)          # ... and ffmpeg broken (class 4 records)
+        self.assertEqual('crashed', self.gate_rec()['status'])
+
+    def test_precedence_4_beats_2(self):
+        self.edit(self.layout_path(), lambda d: d.update(complete=False))                # class 2 (stale layout report)
+        self.assertEqual(4, self.run_fin(patch=self.broken_ffmpeg()), self.out)
+        self.assertEqual('stale', self.gate(self.failed(), 'layout')['status'])
+        self.assertEqual('crashed', self.gate_rec()['status'])
+
+    def test_precedence_2_beats_1(self):
+        self.silent_final()                                                              # class 1 (silent mix)
+        self.edit(self.layout_path(), lambda d: d.update(complete=False))                # class 2
         self.assertEqual(2, self.run_fin(), self.out)
         self.assertEqual('fail', self.gate_rec()['status'])
+        self.assertEqual('stale', self.gate(self.failed(), 'layout')['status'])
+
+    def test_the_music_failure_alone_is_exit_1(self):
+        self.silent_final()
+        self.assertEqual(1, self.run_fin(), self.out)
 
     def test_the_constants_and_the_mux_script_still_agree(self):
         m = self.module()
@@ -2882,8 +2958,146 @@ class MusicPresenceTests(FinalizeBase):
         self.assertIn('afade=t=out:st=${VO_END}:d=4.2', mux)
         self.assertEqual(4.2, m.MUX_FADE_OUT_SECONDS)
         self.assertLessEqual(m.MUSIC_PRESENCE_END_AFTER_VO, 0.6 * m.MUX_FADE_OUT_SECONDS)
-        self.assertEqual((-60.0, 0.5, 2.5, 1.0), (m.MUSIC_PRESENCE_MIN_MEAN_DB, m.MUSIC_PRESENCE_START_AFTER_VO,
-                                                 m.MUSIC_PRESENCE_END_AFTER_VO, m.MUSIC_PRESENCE_MIN_WINDOW))
+        self.assertEqual((0.5, 2.5, 1.0), (m.MUSIC_PRESENCE_START_AFTER_VO, m.MUSIC_PRESENCE_END_AFTER_VO, m.MUSIC_PRESENCE_MIN_WINDOW))
+        self.assertIn('\nVOL=0.22\n', mux)                                           # the fixed bed volume of the mix ...
+        self.assertEqual(0.22, m.MUX_BED_VOLUME)                                         # ... is what finalize requires in the receipt
+        self.assertEqual(2, m.MUX_RECEIPT_VERSION)
+        self.assertIn("'version':2", mux)
+        self.assertEqual(0.25, m.VO_END_AVATAR_TOLERANCE)
+
+    def test_the_gate_is_registered_in_the_fresh_gate_order_and_has_a_runner(self):
+        m = self.module()
+        names = [g['name'] for g in m.GATES]
+        self.assertEqual(names.index('loudness') + 1, names.index('music-presence'))     # right after loudness
+        gate = m.GATES[names.index('music-presence')]
+        self.assertIn(gate['runner'], m.RUNNERS)
+        self.assertTrue(callable(m.RUNNERS[gate['runner']]))
+        self.assertTrue(gate['required'])
+        self.assertIn('avatar', gate['inputs'])
+        self.assertEqual(['music-presence'], [n for n in names if n.startswith('music-')])
+
+    def test_the_gate_is_in_every_real_run(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertIn('music-presence', [g['name'] for g in self.receipt()['gates']])
+
+
+class VoEndAvatarTests(FinalizeBase):
+    """voEndSec must match the audio length of the avatar (ctx.avatar) within 0.25 s, else the window could measure speech."""
+
+    def avatar(self, seconds):
+        path = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+        make_avatar(path, seconds)
+        write_receipts(self.repo, name=self.name)            # the mux receipt binds the avatar by sha256
+
+    def test_a_voendsec_one_second_earlier_than_the_avatar_audio_fails_exit_1_although_the_window_has_sound(self):
+        self.avatar(3.0)
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        g = self.gate(self.failed(), 'music-presence')
+        self.assertEqual('fail', g['status'])
+        self.assertRegex(g['reason'], r"^voEndSec 2\.0 does not match the avatar audio length 3\.0\d s \(tolerance 0\.25 s\): the window after the "
+                                      r"voice cannot be trusted; set voEndSec to the avatar's real length \(SKILL\.md step 4\) and rebuild$")
+        self.assertAlmostEqual(3.0, g['avatar_audio_seconds'], delta=0.1)
+        self.assertNotIn('mean_db', g)                      # refused before measuring
+
+    def test_an_avatar_shorter_than_voendsec_fails_too(self):
+        self.avatar(1.0)
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertIn('does not match the avatar audio length', self.gate(self.failed(), 'music-presence')['reason'])
+
+    def test_within_the_tolerance_passes(self):
+        for seconds in (2.2, 1.85):
+            self.avatar(seconds)
+            self.assertEqual(0, self.run_fin(), (seconds, self.out))
+            g = self.gate(self.receipt(), 'music-presence')
+            self.assertAlmostEqual(seconds, g['avatar_audio_seconds'], delta=0.1)
+            self.deliver.unlink()
+            Path(str(self.deliver) + '.receipt.json').unlink()
+
+    def test_the_container_duration_is_the_fallback_when_the_avatar_has_no_audio_stream_duration(self):
+        path = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+        ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=25:d=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(path))      # video only
+        write_receipts(self.repo, name=self.name)
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_a_missing_or_unreadable_avatar_is_bad_input_not_a_second_confusing_tool_failure(self):
+        (self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4').unlink()
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertEqual('bad-input', self.gate(self.failed(), 'music-presence')['status'])        # like the timing gate
+        (self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4').write_bytes(b'not media')
+        write_receipts(self.repo, name=self.name)
+        self.assertEqual(2, self.run_fin(), self.out)
+        g = self.gate(self.failed(), 'music-presence')
+        self.assertEqual('bad-input', g['status'])
+        self.assertIn('cannot read the audio length of the avatar', g['reason'])
+
+
+class MuxReceiptFieldsTests(FinalizeBase):
+    """The mux receipt must say how the mix was made: total / vo_end of the episode and the fixed bed volume."""
+
+    def test_the_fixture_receipt_passes(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def check(self, fn, text):
+        write_receipts(self.repo, name=self.name)
+        self.edit(self.mux_path(), fn)
+        self.assertEqual(2, self.run_fin(), self.out)
+        g = self.gate(self.failed(), 'mux')
+        self.assertEqual('stale', g['status'])
+        self.assertIn(text, g['reason'])
+        self.assertIn('run mux_av.sh again with <TOTAL>=<totalDurationSec> <VO_END>=<voEndSec>', g['reason'])
+
+    def test_vo_end_total_and_bed_volume_must_match(self):
+        self.check(lambda d: d.update(vo_end=640.0), 'mux receipt vo_end 640.0 does not match the episode voEndSec 2.0;')
+        self.check(lambda d: d.update(total=3.0), 'mux receipt total 3.0 does not match the episode totalDurationSec 4.0;')
+        self.check(lambda d: d.update(bed_volume=0.01), 'mux receipt bed_volume is 0.01, not 0.22 (the fixed mix setting of mux_av.sh);')
+
+    def test_within_a_hundredth_of_a_second_is_accepted(self):
+        write_receipts(self.repo, name=self.name)
+        self.edit(self.mux_path(), lambda d: d.update(vo_end=2.009, total=4.009))
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_missing_fields_an_old_receipt_are_refused(self):
+        for key in ('vo_end', 'total'):
+            self.check(lambda d, k=key: d.pop(k), 'mux receipt %s is missing (an old receipt);' % key)
+        self.check(lambda d: d.pop('bed_volume'), 'mux receipt bed_volume is None, not 0.22')
+        self.check(lambda d: (d.update(version=1), [d.pop(k) for k in ('vo_end', 'total', 'bed_volume')]), 'mux receipt version is 1, expected 2')
+
+
+class RealMuxMusicPresenceTests(FinalizeBase):
+    """The music-presence gate against files made by the REAL mux_av.sh (the approved bed is synthetic, its bytes are in the list)."""
+    library_tracks = [lib_track(sha256=SEAM_SHA, file='seam.mp3'), lib_track(sha256=SILENT_SHA, file='silent.mp3')]
+
+    def real_mux(self, bed_bytes, library_file):
+        bed = self.proj / 'assets' / 'audio' / 'bed.mp3'
+        bed.write_bytes(bed_bytes)
+        Path(str(bed) + '.source.json').write_text(json.dumps(library_sidecar(bed, library_file=library_file)))
+        avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+        r = subprocess.run(['bash', str(SCRIPTS / 'mux_av.sh'), str(self.proj / 'renders' / 'visual.mp4'), str(avatar), str(bed),
+                            str(self.fin), '4', '2'], capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        rc = json.loads(Path(str(self.fin) + '.mux.json').read_text())
+        self.assertEqual((2, 4.0, 2.0, 0.22), (rc['version'], rc['total'], rc['vo_end'], rc['bed_volume']))
+
+    def test_a_silent_approved_bed_passes_the_mux_record_but_the_music_gate_fails_exit_1(self):
+        self.real_mux(SILENT_BED, 'silent.mp3')
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        f = self.failed()
+        self.assertEqual('pass', self.gate(f, 'mux')['status'])                         # the bytes ARE the approved track
+        g = self.gate(f, 'music-presence')
+        self.assertEqual('fail', g['status'])
+        self.assertIn('the final file is silent after the voice ends', g['reason'])
+        self.assertLessEqual(g['mean_db'] if g['mean_db'] is not None else -999, self.module().MUSIC_PRESENCE_MIN_MEAN_DB)
+
+    def test_the_quiet_tail_of_a_looped_approved_bed_still_passes_and_is_well_below_a_normal_mix(self):
+        self.real_mux(SEAM_BED, 'seam.mp3')
+        self.assertEqual(0, self.run_fin(), self.out)
+        mean = self.gate(self.receipt(), 'music-presence')['mean_db']
+        floor = self.module().MUSIC_PRESENCE_MIN_MEAN_DB
+        self.assertGreater(mean, floor + 5, 'the quiet-tail case must sit at least 5 dB above the threshold (got %s)' % mean)
+        self.assertLess(mean, -45.0)                      # a normal mix measures about -21 dB in the fixture
+        self.assertEqual(sha(self.proj / 'assets' / 'audio' / 'bed.mp3'), self.receipt()['music']['bed_sha256'])
 
 
 class MusicBedProvenanceTests(FinalizeBase):
@@ -3372,12 +3586,43 @@ class MuxReceiptTests(unittest.TestCase):
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         rc = json.loads(Path(str(out) + '.mux.json').read_text())
         self.assertEqual('yt-news-v4-mux-receipt', rc['schema'])
-        self.assertEqual(1, rc['version'])
+        self.assertEqual(2, rc['version'])
+        self.assertEqual((6.0, 5.0, 0.22), (rc['total'], rc['vo_end'], rc['bed_volume']))
         for key, f in (('visual', 'visual.mp4'), ('avatar', 'vo.wav'), ('bed', 'bed.wav'), ('final', 'final.mp4')):
             self.assertEqual(str((tmp / f).resolve()), str(Path(rc[key]['path']).resolve()))
             self.assertEqual(sha(tmp / f), rc[key]['sha256'], key)
         self.assertIn('created_at', rc)
         self.assertIn('MUX_DONE', r.stdout)
+
+    def media(self):
+        tmp = Path(tempfile.mkdtemp(prefix='mux-'))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=6', '-pix_fmt', 'yuv420p', str(tmp / 'visual.mp4'))
+        ffmpeg('-f', 'lavfi', '-i', 'anoisesrc=d=6:c=pink:a=0.3:r=48000', str(tmp / 'vo.wav'))
+        ffmpeg('-f', 'lavfi', '-i', 'anoisesrc=d=3:c=brown:a=0.2:r=48000', str(tmp / 'bed.wav'))
+        return tmp
+
+    def run_mux(self, tmp, *extra):
+        return subprocess.run(['bash', str(SCRIPTS / 'mux_av.sh'), str(tmp / 'visual.mp4'), str(tmp / 'vo.wav'), str(tmp / 'bed.wav'),
+                               str(tmp / 'final.mp4'), *extra], capture_output=True, text=True, cwd=tmp)
+
+    def test_a_seventh_argument_is_refused_exit_2_and_nothing_is_written(self):
+        tmp = self.media()
+        before = sorted(p.name for p in tmp.iterdir())
+        r = self.run_mux(tmp, '6', '5', '0.01')                      # the old optional bed volume
+        self.assertEqual(2, r.returncode, r.stdout + r.stderr)
+        self.assertIn('usage: mux_av.sh VISUAL AVATAR_WITH_VO BED OUT TOTAL_SEC VO_END_SEC', r.stderr)
+        self.assertEqual(before, sorted(p.name for p in tmp.iterdir()))          # no final.mp4, no final.audio/, no receipt
+        self.assertEqual(2, self.run_mux(tmp, '6').returncode)       # too few
+        self.assertEqual(before, sorted(p.name for p in tmp.iterdir()))
+
+    def test_total_and_vo_end_must_be_positive_decimals_with_vo_end_before_total(self):
+        tmp = self.media()
+        before = sorted(p.name for p in tmp.iterdir())
+        for total, vo_end in (('0', '5'), ('6', '0'), ('x', '5'), ('6', '-1'), ('6', '6'), ('6', '7'), ('6', '5s'), ('', '5')):
+            r = self.run_mux(tmp, total, vo_end)
+            self.assertEqual(2, r.returncode, (total, vo_end, r.stderr))
+            self.assertEqual(before, sorted(p.name for p in tmp.iterdir()), (total, vo_end))
 
     def test_failed_mux_leaves_no_receipt(self):
         mux = SCRIPTS / 'mux_av.sh'
