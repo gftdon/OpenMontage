@@ -1,28 +1,64 @@
+// Typo cards (CF-A66 step 3): rows / chips keep their own staggered entrance but never start before the scene's labelDelay.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-const root=path.resolve(new URL('../../../../..',import.meta.url).pathname);
-const source=fs.readFileSync(path.join(root,'remotion-composer/src/YtNewsStyle01V4.tsx'),'utf8');
-const sampleBeats=JSON.parse(fs.readFileSync(path.join(root,'remotion-composer/src/ytNewsStyle01V4Sample.json'),'utf8')).beats;
-test('primary typography waits for full-avatar morph, then keeps bounded entrance',{skip:"rewritten in CF-A66 step 3 (transitions)"},()=>{
- assert.match(source.split("\n").find(line=>line.includes("const typoEntranceStart"))??"",/const typoEntranceStart=Math\.max\(typoCard\?\.t\?\?beat\.t,beat\.t\+\(previous\.mode==="full"\?MODE_BLEND_SEC:0\)\)/);
- assert.match(source.split("\n").find(line=>line.includes("beat.media===\"typo\"&&<div"))??"",/beat\.media==="typo"[^\n]+boundedEntrance\(t,typoEntranceStart,fps\)/);
- assert.match(source,/const MODE_BLEND_SEC = 0\.55;/);
- assert.match(source,/const stageMotion=\{opacity:clamp01\(\(t-beat\.t\)\/\.35\)/);
+import { loadEngine } from './_engine_bundle.mjs';
+const root = path.resolve(new URL('../../../../..', import.meta.url).pathname);
+const source = fs.readFileSync(path.join(root, 'remotion-composer/src/YtNewsStyle01V4.tsx'), 'utf8');
+const sampleBeats = JSON.parse(fs.readFileSync(path.join(root, 'remotion-composer/src/ytNewsStyle01V4Sample.json'), 'utf8')).beats;
+const fps = 25;
+const { layerPlan, sceneKind, IN_F, entranceStartSec } = await loadEngine();
+const startOf = (i) => Math.ceil(sampleBeats[i].t * fps);
+const typoIdx = sampleBeats.map((b, i) => (b.media === 'typo' ? i : -1)).filter((i) => i >= 0);
+
+test('constants and engine wiring: MODE_BLEND_SEC stays .55, IN_F covers it, typo content uses the shared label entrance', () => {
+  assert.match(source, /const MODE_BLEND_SEC = 0\.55;/);
+  assert.ok(IN_F / fps >= 0.55 && (IN_F - 1) / fps < 0.55);
+  assert.ok(source.includes('chipEntrance(labels.t, Math.max(item.at, labels.startSec), labels.fps)'), 'chips wait for the label start');
+  assert.ok(source.includes('...enter(labels, card?.at ?? beat.t)'), 'card rows wait for the label start');
 });
-test('actual failing frames precede morph completion, later cards do not replay initial delay',()=>{
- const duration=Number(source.match(/const MODE_BLEND_SEC = ([\d.]+);/)[1]);
- const beats=sampleBeats;
- for(const frame of [1870,2870,3594]){
-  const index=beats.findLastIndex(b=>frame/25>=b.t);const beat=beats[index];
-  assert.equal(beat.media,'typo');assert.equal(beats[index-1].mode,'full');
-  assert.ok(frame/25<beat.t+duration);
- }
- for(const beat of beats.filter(b=>b.media==='typo')){
-  for(const card of beat.cards??[]){
-   const entrance=Math.max(card.t,beat.t+duration);
-   if(card.t>=beat.t+duration)assert.equal(entrance,card.t);
+
+test('the frames that failed before (1870, 2870, 3594) land on a typo beat that follows a presenter and are still inside the label delay', () => {
+  for (const frame of [1870, 2870, 3594]) {
+    const p = layerPlan(frame, sampleBeats, fps);
+    assert.equal(sampleBeats[p.index].media, 'typo');
+    assert.equal(p.prevKind, 'P');
+    assert.equal(p.labelDelayFrames, IN_F);
+    assert.ok(frame < p.labelStartFrame, `frame ${frame} must precede label start ${p.labelStartFrame}`);
   }
- }
+});
+
+test('every typo card, chip and row starts no earlier than the beat labelDelay; later ones keep their own time (no replayed delay)', () => {
+  let later = 0, first = 0;
+  for (const i of typoIdx) {
+    const b = sampleBeats[i], p = layerPlan(startOf(i), sampleBeats, fps), ls = p.labelStartFrame / fps;
+    const timed = b.typo === 'vs' ? [b.t] : [...(b.cards ?? []).map((c) => c.at), ...(b.items ?? []).map((it) => it.at)]; // vs has no per-row times: the whole card enters at the beat start
+    assert.ok(timed.length, `typo beat ${b.t} has no timed content`);
+    for (const at of timed) {
+      const s = entranceStartSec(at, p, fps);
+      assert.ok(s >= ls && s >= at, `beat ${b.t}: entrance ${s} before label start ${ls}`);
+      if (at >= ls) { assert.equal(s, at); later++; } else { assert.equal(s, ls); first++; }
+    }
+  }
+  assert.ok(first >= 10 && later >= 8, `first=${first} later=${later}`);
+});
+
+test('multi-card and multi-item beats: the 2nd+ entries come from cards[].at / items[].at and are not delayed again', () => {
+  const multi = typoIdx.filter((i) => (sampleBeats[i].cards?.length ?? 0) >= 2 || (sampleBeats[i].items?.length ?? 0) >= 2);
+  assert.ok(multi.length >= 6);
+  for (const i of multi) {
+    const b = sampleBeats[i], p = layerPlan(startOf(i), sampleBeats, fps);
+    const list = b.cards ?? b.items;
+    assert.ok(list[0].at >= b.t - 1e-9);
+    for (const entry of list.slice(1)) { assert.ok(entry.at > list[0].at, `beat ${b.t}: entries are increasing`); assert.equal(entranceStartSec(entry.at, p, fps), entry.at, `beat ${b.t}: entry at ${entry.at}`); }
+  }
+});
+
+test('a T beat that follows a T beat (or S) starts its rows immediately; one that follows P waits', () => {
+  for (const i of typoIdx) {
+    if (i === 0) continue;
+    const p = layerPlan(startOf(i), sampleBeats, fps), prev = sceneKind(sampleBeats[i - 1]);
+    assert.equal(p.labelDelayFrames, prev === 'S' || prev === 'T' ? 0 : IN_F, `beat ${i} after ${prev}`);
+  }
 });

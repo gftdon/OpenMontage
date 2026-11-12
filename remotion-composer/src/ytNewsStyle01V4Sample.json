@@ -532,10 +532,10 @@
       "src": "yt_complexity_variants",
       "origin": "source",
       "srcCrop": {
-        "x": 160,
-        "y": 90,
-        "w": 1600,
-        "h": 900
+        "x": 48,
+        "y": 27,
+        "w": 1824,
+        "h": 1026
       },
       "kicker": "SOURCE DEMO",
       "headline": "ลองตัวเลือกภาพหลายแบบ"
