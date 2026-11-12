@@ -7,26 +7,35 @@ export const thresholds = loadThresholds();
 export const fieldRules = loadFieldRules();
 
 // ---- plan used by the synthetic tests (inside the 5 % safe area: x 96..1824, y 54..1026) ----
+// Lane ids are the engine's LANES ids (the text lanes of plan v2); the boxes are roomy synthetic ones.
+// The engine plan has no single `header` lane (the header is two lanes, header.brand / header.kicker, whose backings
+// are reserved), so PLAN has none either. PLAN_WITH_HEADER adds the synthetic header zone the evaluator also understands.
+export const HEADER_ZONE = { x: 116, y: 58, width: 1688, height: 48 };
 export const PLAN = {
   planVersion: 2, fps: 25, durationInFrames: 16296, voEndFrame: 16183,
   lanes: {
-    header: { x: 116, y: 58, width: 1688, height: 48 },
-    'chrome-full': { x: 116, y: 112, width: 600, height: 52 },
-    'chrome-stage': { x: 116, y: 112, width: 600, height: 52 },
-    'credit-full': { x: 116, y: 186, width: 600, height: 40 },
-    'credit-stage': { x: 116, y: 186, width: 600, height: 40 },
-    'panel-full': { x: 116, y: 700, width: 1688, height: 72 },
-    'panel-stage': { x: 116, y: 700, width: 1688, height: 72 },
-    'stat-rail': { x: 116, y: 300, width: 400, height: 300 },
-    'stage-typo': { x: 300, y: 300, width: 1300, height: 300 },
-    'lower-third': { x: 116, y: 780, width: 1000, height: 120 },
-    cta: { x: 116, y: 805, width: 1688, height: 60 },
-    'caption-top': { x: 116, y: 240, width: 1000, height: 80 },
-    'caption-bottom': { x: 700, y: 940, width: 600, height: 80 },
-    endcard: { x: 300, y: 300, width: 1320, height: 480 },
+    'header.brand': { x: 116, y: 58, width: 600, height: 48 },
+    'header.kicker': { x: 1204, y: 58, width: 600, height: 48 },
+    'split.chrome.url': { x: 116, y: 112, width: 600, height: 52 },
+    'wide.chrome.url': { x: 116, y: 112, width: 600, height: 52 },
+    'split.chrome.label': { x: 116, y: 186, width: 600, height: 40 },
+    'wide.chrome.label': { x: 116, y: 186, width: 600, height: 40 },
+    'split.headline': { x: 116, y: 700, width: 1688, height: 72 },
+    'wide.headline': { x: 116, y: 700, width: 1688, height: 72 },
+    sub: { x: 116, y: 300, width: 400, height: 300 },
+    'typo.content': { x: 300, y: 300, width: 1300, height: 300 },
+    'full.lowerThird': { x: 116, y: 780, width: 1000, height: 120 },
+    'full.cta': { x: 116, y: 805, width: 1688, height: 60 },
+    caption: { x: 700, y: 940, width: 600, height: 80 },
+    'end.eyebrow': { x: 300, y: 300, width: 1320, height: 60 },
+    'end.title': { x: 300, y: 380, width: 1320, height: 100 },
+    'end.sub': { x: 300, y: 500, width: 1320, height: 70 },
+    'end.cta': { x: 300, y: 600, width: 1320, height: 160 },
   },
 };
+export const PLAN_WITH_HEADER = { ...PLAN, lanes: { header: HEADER_ZONE, ...Object.fromEntries(Object.entries(PLAN.lanes).filter(([k]) => !k.startsWith('header.'))) } };
 export const CTX = { plan: PLAN, fieldRules };
+export const CTX_HEADER = { plan: PLAN_WITH_HEADER, fieldRules };
 
 const rect = (x, y, width, height) => ({ x, y, width, height });
 export const FULL_FRAME = rect(0, 0, 1920, 1080);
@@ -77,7 +86,7 @@ export function v3Snap(fields = [v3Field('headline'), v3Field('description', { y
 export function permissiveCtx(snapshot) {
   const rules = {};
   for (const f of snapshot?.fields ?? []) if (f?.id) rules[f.id] = { tier: f.tier ?? f.role, lanes: ['any'], maxLines: 99 };
-  return { plan: { lanes: { header: PLAN.lanes.header, any: rect(0, 0, 1920, 1080) } }, fieldRules: rules };
+  return { plan: { lanes: { header: HEADER_ZONE, any: rect(0, 0, 1920, 1080) } }, fieldRules: rules };
 }
 
 // ---- real V3 frames (byte-identical copies of the V2-shaped probe output) ----

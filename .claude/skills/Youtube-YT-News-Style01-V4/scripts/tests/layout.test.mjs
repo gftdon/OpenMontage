@@ -48,6 +48,17 @@ test('source needs credit and stock rejects chrome or credit', () => {
   assert.ok(codes(s).includes('credit'));
   s = snap(); s.footage.chrome = true; assert.ok(codes(s).includes('stock-chrome'));
 });
+test('credit / ai-label are required once the beat has settled, not inside the transition window (snapshot.transition)', () => {
+  const mk = (origin, src, transition, fields) => { const s = snap(fields); s.footage = { origin, src, credit: false, chrome: false }; s.transition = transition; return s; };
+  assert.ok(codes(mk('source', 'yt_demo', false)).includes('credit'), 'settled source frame without a credit fails');
+  assert.ok(!codes(mk('source', 'yt_demo', true)).includes('credit'), 'a credit that is still coming in during the transition window is allowed');
+  assert.ok(codes(mk('source', 'demo', true)).includes('credit'), 'a wrong path still fails inside the window');
+  assert.ok(codes(mk('ai', 'ai_demo', false)).includes('ai-label'));
+  assert.ok(!codes(mk('ai', 'ai_demo', true)).includes('ai-label'));
+  assert.ok(codes(mk('ai', 'demo', true)).includes('origin'));
+  assert.ok(codes(mk('stock', 'yt_demo', true)).includes('origin'), 'provenance rules other than credit / ai-label are not softened');
+  assert.ok(codes(mk('ai', 'ai_demo', true, [field('source-credit')])).includes('ai-chrome'));
+});
 test('nested logical field fragments are not compared against themselves', () => {
   const r = [{ x: 100, y: 100, width: 200, height: 40 }, { x: 120, y: 100, width: 50, height: 40 }];
   assert.deepEqual(codes(snap([field('caption', { rects: r })])), []);

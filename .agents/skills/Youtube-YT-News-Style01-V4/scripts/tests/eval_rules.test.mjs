@@ -8,7 +8,7 @@ import {
   ruleTextAlpha, ruleProbeIssues, ruleLane, ruleReservedIntersect, ruleLineCount, ruleNowrapOverflow, ruleLaneTable, ruleSchema,
 } from '../qc_layout_eval.mjs';
 import {
-  thresholds as t, fieldRules, PLAN, CTX, v3Field, v3Snap, backingFor, loadRaw, RAW, augmentDark, withHeldStage,
+  thresholds as t, fieldRules, PLAN, PLAN_WITH_HEADER, CTX, CTX_HEADER, v3Field, v3Snap, backingFor, loadRaw, RAW, augmentDark, withHeldStage,
   augmentPresenter, mapFaceBox, inkBox, clone,
 } from './fixtures/v3/builders.mjs';
 
@@ -133,6 +133,18 @@ test('face-backing: a visible backing box over the face fails; the same backing 
   s.backings.at(-1).opacity = 0.04;
   assert.deepEqual(ruleFace(s, t), []);
 });
+test('face-backing: a backing the probe measured UNDER the presenter does not cover the face; true / null / missing count', () => {
+  const s = faceFrame1860();
+  const cover = { id: 'face-cover', path: 'div:9', reserved: null, alpha: 1, opacity: 1, box: { x: 800, y: 200, width: 300, height: 300 } };
+  s.backings.push(cover);
+  for (const v of [undefined, null, true]) { cover.aboveAvatarAtFace = v; assert.deepEqual(ruleFace(s, t).map(i => i.id), ['face-backing'], String(v)); }
+  cover.aboveAvatarAtFace = false;
+  assert.deepEqual(ruleFace(s, t), [], 'painted below the presenter (e.g. the leaving wide window)');
+  // text over the face is unaffected by the paint-order exemption
+  const cap = field(s, 'caption');
+  for (const r of [...cap.inkRects, ...cap.rects]) r.x += 500;
+  assert.deepEqual(ruleFace(s, t).map(i => i.id), ['face-text']);
+});
 test('face rules: missing faceBox / backings while the presenter is visible fail closed', () => {
   const s = faceFrame1860();
   assert.deepEqual(ids(ruleFace({ ...s, avatar: { ...s.avatar, faceBox: undefined } }, t)), ['schema']);
@@ -185,12 +197,14 @@ test('font-rubric: mixed text uses the smaller ink; scaleY scales it; glyph none
   assert.equal(rubricSize({ glyph: 'thai', thaiInkPx: 14, latinInkPx: null, scaleY: 1, rubricPx: null }, { rubricInkDivisor: 0.7 }), 20);
 });
 
-test('text-alpha: read text with colour alpha * opacity < .85 fails (V3 CREAM_DIM .62), .85 passes, labels are exempt', () => {
+test('text-alpha: read text drawn with a translucent colour (alpha < .85) fails (V3 CREAM_DIM .62); a fade (opacity) is not text-alpha; labels are exempt', () => {
   const run = (over, tier = 'read') => ruleTextAlpha(v3Snap([v3Field('description', { tier, ...over })]), t);
   const bad = run({ colorAlpha: 0.62 });
   assert.deepEqual(ids(bad), ['text-alpha']); near(bad[0].alpha, 0.62);
   assert.deepEqual(run({ colorAlpha: 0.85 }), []);
-  assert.deepEqual(ids(run({ colorAlpha: 0.9, opacity: 0.9 })), ['text-alpha'], '0.81 combined');
+  assert.deepEqual(ids(run({ colorAlpha: 0.84 })), ['text-alpha']);
+  assert.deepEqual(run({ colorAlpha: 1, opacity: 0.4 }), [], 'an entrance / exit fade inside an opaque backing is not a translucent colour');
+  assert.deepEqual(ids(run({ colorAlpha: 0.62, opacity: 0.4 })), ['text-alpha'], 'a translucent colour fails at any opacity');
   assert.deepEqual(run({ colorAlpha: 0.62 }, 'label'), []);
   assert.deepEqual(ids(run({ colorAlpha: undefined })), ['text-alpha'], 'missing colorAlpha fails closed');
 });
@@ -204,8 +218,10 @@ test('tier-missing / tier-mismatch / unknown-field (fail closed)', () => {
   assert.deepEqual(ids(mis), ['tier-mismatch']); assert.equal(mis[0].expected, 'read');
   assert.deepEqual(run(v3Field('mystery')).map(i => [i.id, i.field]), [['unknown-field', 'mystery']]);
   assert.deepEqual(ids(run(v3Field('_status'))), ['unknown-field'], '_status is metadata, not a field');
-  assert.deepEqual(ids(run(v3Field('typo-headline-extra'), v3Field('stat-5', { tier: 'label' }))), []);
+  assert.deepEqual(ids(run(v3Field('typo-headline-extra'), v3Field('stat-big-1-2'), v3Field('stat-label-1-2', { tier: 'label' }))), []);
   assert.deepEqual(ids(run(v3Field('typo-x', { tier: 'label' }))), ['tier-mismatch']);
+  assert.deepEqual(ids(run(v3Field('stat-big-1-2', { tier: 'label' }), v3Field('stat-label-1-2'))), ['tier-mismatch', 'tier-mismatch'], 'big = read, label = label');
+  assert.deepEqual(ids(run(v3Field('stat-5', { tier: 'label' }))), ['unknown-field'], 'the old stat-N ids are gone');
   assert.deepEqual(ids(run(v3Field('typo'))), ['unknown-field'], '"typo" alone does not match the typo-* pattern');
   assert.deepEqual(ids(ruleTier(v3Snap([v3Field('headline')]), t, {})), ['ctx-missing']);
 });
@@ -217,23 +233,27 @@ test('resolveFieldRule: exact beats prefix, longest prefix wins, underscore keys
   assert.equal(resolveFieldRule(rules, '_status'), null);
   assert.equal(resolveFieldRule(rules, 'nope'), null);
 });
-test('qc_field_rules.json carries the spec table and the provisional marker', () => {
-  assert.match(fieldRules._status, /^provisional/);
+test('qc_field_rules.json carries the engine table (ids, tiers, engine lane ids)', () => {
+  assert.doesNotMatch(fieldRules._status, /^provisional/);
   const keys = Object.keys(fieldRules).filter(k => !k.startsWith('_'));
-  assert.equal(keys.length, 18);
-  assert.deepEqual(fieldRules['typo-*'], { tier: 'read', lanes: ['stage-typo'], maxLines: 2 });
-  assert.deepEqual(fieldRules['stat-*'], { tier: 'label', lanes: ['stat-rail'], maxLines: 1 });
-  assert.deepEqual(fieldRules.caption, { tier: 'read', lanes: ['caption-top', 'caption-bottom'], maxLines: 2 });
-  assert.deepEqual(fieldRules['end-cta'], { tier: 'read', lanes: ['endcard'], maxLines: 2 });
-  assert.deepEqual(fieldRules.brand.lanes, ['header']);
+  assert.equal(keys.length, 23);
+  assert.deepEqual(fieldRules['typo-*'], { tier: 'read', lanes: ['typo.content'], maxLines: 2 });
+  assert.deepEqual(fieldRules['stat-big-*'], { tier: 'read', lanes: ['sub'], maxLines: 1 });
+  assert.deepEqual(fieldRules['stat-label-*'], { tier: 'label', lanes: ['sub'], maxLines: 1 });
+  assert.deepEqual(fieldRules.caption, { tier: 'read', lanes: ['caption'], maxLines: 1 });
+  assert.deepEqual(fieldRules['end-cta'], { tier: 'read', lanes: ['end.cta'], maxLines: 2 });
+  assert.deepEqual(fieldRules.brand.lanes, ['header.brand']);
+  assert.deepEqual(fieldRules.kicker.lanes, ['header.kicker']);
 });
 
-test('line-count: more lines than maxLines fails (headline 1, caption 2)', () => {
+test('line-count: more lines than maxLines fails (headline 1, caption 1, typo-* 2, cta 2)', () => {
   const run = (id, n) => ruleLineCount(v3Snap([v3Field(id, { lineCount: n })]), t, CTX);
   assert.deepEqual(run('headline', 1), []);
   const bad = run('headline', 2);
   assert.deepEqual(ids(bad), ['line-count']); assert.equal(bad[0].maxLines, 1); assert.equal(bad[0].lineCount, 2);
-  assert.deepEqual(run('caption', 2), []); assert.deepEqual(ids(run('caption', 3)), ['line-count']);
+  assert.deepEqual(run('caption', 1), []); assert.deepEqual(ids(run('caption', 2)), ['line-count']);
+  assert.deepEqual(run('cta', 2), []); assert.deepEqual(ids(run('cta', 3)), ['line-count']);
+  assert.deepEqual(run('typo-line-1', 2), []);
   assert.deepEqual(ids(run('typo-big', 3)), ['line-count']);
   assert.deepEqual(ids(run('headline', undefined)), ['line-count'], 'missing lineCount fails closed');
   assert.deepEqual(run('mystery', 9), [], 'unknown fields are reported by ruleTier');
@@ -254,23 +274,24 @@ test('nowrap-overflow: scrollWidth > clientWidth + 1 fails for nowrap/pre only',
 
 test('lane-missing / lane-forbidden / lane-overflow', () => {
   const inLane = (id, lane, extra = {}) => {
-    const L = PLAN.lanes[lane] ?? PLAN.lanes.header;
+    const L = PLAN.lanes[lane] ?? PLAN.lanes['header.brand'];
     return v3Field(id, { lane, x: L.x + 10, y: L.y + 5, w: 100, h: 30, ...extra });
   };
   const run = (...fs) => ruleLane(v3Snap(fs), t, CTX);
-  assert.deepEqual(run(inLane('headline', 'panel-full'), inLane('brand', 'header', { tier: 'label' })), []);
+  assert.deepEqual(run(inLane('headline', 'split.headline'), inLane('headline', 'wide.headline'), inLane('brand', 'header.brand', { tier: 'label' })), []);
   assert.deepEqual(run(v3Field('headline', { lane: null })).map(i => i.id), ['lane-missing']);
-  const forb = run(inLane('headline', 'header'));
-  assert.deepEqual(ids(forb), ['lane-forbidden']); assert.equal(forb[0].lane, 'header');
-  assert.deepEqual(ids(run(inLane('headline', 'cta'))), ['lane-forbidden']);
+  const forb = run(inLane('headline', 'header.brand'));
+  assert.deepEqual(ids(forb), ['lane-forbidden']); assert.equal(forb[0].lane, 'header.brand');
+  assert.deepEqual(ids(run(inLane('headline', 'full.cta'))), ['lane-forbidden']);
+  assert.deepEqual(ids(run(inLane('brand', 'header.kicker', { tier: 'label' }))), ['lane-forbidden'], 'brand may not sit in the kicker lane');
   // overflow: ink 1 px outside passes (lanePadPx = 1), 2 px outside fails
-  const L = PLAN.lanes['panel-full'];
-  const at = dx => v3Field('headline', { lane: 'panel-full', x: L.x + L.width - 100 + dx, y: L.y + 5, w: 100, h: 30 });
+  const L = PLAN.lanes['split.headline'];
+  const at = dx => v3Field('headline', { lane: 'split.headline', x: L.x + L.width - 100 + dx, y: L.y + 5, w: 100, h: 30 });
   assert.deepEqual(run(at(1)), []);
   assert.deepEqual(ids(run(at(2))), ['lane-overflow']);
-  const up = v3Field('headline', { lane: 'panel-full', x: L.x + 5, y: L.y - 2, w: 100, h: 30 });
+  const up = v3Field('headline', { lane: 'split.headline', x: L.x + 5, y: L.y - 2, w: 100, h: 30 });
   assert.deepEqual(ids(run(up)), ['lane-overflow']);
-  assert.deepEqual(ids(run(inLane('headline', 'panel-full', { inkRects: [{ x: L.x + 5, y: L.y + 5, width: 100, height: 30 }, { x: L.x + 5, y: L.y + 5, width: 100, height: 200 }] }))), ['lane-overflow']);
+  assert.deepEqual(ids(run(inLane('headline', 'split.headline', { inkRects: [{ x: L.x + 5, y: L.y + 5, width: 100, height: 30 }, { x: L.x + 5, y: L.y + 5, width: 100, height: 200 }] }))), ['lane-overflow']);
   assert.deepEqual(ids(run(v3Field('headline', { lane: 'no-such-lane' }))).sort(), ['lane-forbidden', 'lane-overflow']);
   assert.deepEqual(ids(ruleLane(v3Snap([]), t, { fieldRules })), ['ctx-missing']);
 });
@@ -282,7 +303,7 @@ const bk = (id, path, box, over = {}) => ({ id, path, reserved: null, alpha: 1, 
 const HEADER_BACKING = bk('header', 'div:1/div:2', { x: 116, y: 58, width: 1688, height: 48 }, { reserved: 'header' });
 const CHROME_BACKING = bk('chrome', 'div:1/div:5', { x: 116, y: 112, width: 476, height: 52 }, { reserved: 'chrome' });
 test('reserved-intersect: a backing that overlaps the header lane or visible reserved chrome fails', () => {
-  const run = (...bs) => ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, CHROME_BACKING, ...bs] }), t, CTX);
+  const run = (...bs) => ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, CHROME_BACKING, ...bs] }), t, CTX_HEADER);
   assert.deepEqual(run(bk('pill', 'div:1/div:7', { x: 700, y: 900, width: 400, height: 60 })), []);
   const hit = run(bk('panel', 'div:1/div:8', { x: 116, y: 90, width: 600, height: 40 }));
   // zones hit: the header lane, the visible header backing and the visible chrome backing
@@ -290,7 +311,7 @@ test('reserved-intersect: a backing that overlaps the header lane or visible res
   assert.deepEqual(ids(run(bk('under-chrome', 'div:1/div:9', { x: 130, y: 120, width: 100, height: 30 }))), ['reserved-intersect']);
 });
 test('reserved-intersect: reserved backings, their ancestors/descendants, hidden backings and touching edges are exempt', () => {
-  const run = (...bs) => ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, CHROME_BACKING, ...bs] }), t, CTX);
+  const run = (...bs) => ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, CHROME_BACKING, ...bs] }), t, CTX_HEADER);
   assert.deepEqual(run(bk('child', 'div:1/div:2/div:3', { x: 120, y: 60, width: 100, height: 30 })), [], 'descendant of the header backing');
   assert.deepEqual(run(bk('parent', 'div:1', { x: 100, y: 40, width: 1700, height: 100 })), [], 'ancestor of the header backing');
   assert.deepEqual(run(bk('chrome-child', 'div:1/div:5/div:6', { x: 130, y: 120, width: 100, height: 30 })), [], 'descendant of the chrome backing');
@@ -298,13 +319,17 @@ test('reserved-intersect: reserved backings, their ancestors/descendants, hidden
   assert.deepEqual(run(bk('hidden', 'div:1/div:8', { x: 116, y: 90, width: 600, height: 40 }, { opacity: 0.04 })), []);
   assert.deepEqual(run(bk('touch', 'div:1/div:8', { x: 116, y: 106, width: 600, height: 6 })), [], 'edges that merely touch are not an intersection');
   const hiddenChrome = bk('chrome', 'div:1/div:5', CHROME_BACKING.box, { reserved: 'chrome', opacity: 0.04 });
-  assert.deepEqual(ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, hiddenChrome, bk('p', 'div:1/div:9', { x: 130, y: 120, width: 100, height: 30 })] }), t, CTX), [], 'invisible chrome is not a reserved zone');
-  assert.deepEqual(ids(ruleReservedIntersect(v3Snap([], { backings: undefined }), t, CTX)), ['schema']);
+  assert.deepEqual(ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, hiddenChrome, bk('p', 'div:1/div:9', { x: 130, y: 120, width: 100, height: 30 })] }), t, CTX_HEADER), [], 'invisible chrome is not a reserved zone');
+  assert.deepEqual(ids(ruleReservedIntersect(v3Snap([], { backings: undefined }), t, CTX_HEADER)), ['schema']);
+  // the engine plan has no `header` lane: the reserved header backings still protect the header
+  const noHeader = ruleReservedIntersect(v3Snap([], { backings: [HEADER_BACKING, bk('panel', 'div:1/div:8', { x: 116, y: 90, width: 600, height: 40 })] }), t, CTX);
+  assert.deepEqual(noHeader.map(i => i.zone), ['reserved:header']);
 });
 
 test('lane-table: lanes outside the safe area or intersecting the header fail; the test plan passes', () => {
   assert.deepEqual(evaluatePlanRules(PLAN, t), []);
-  const withLane = (name, r) => ({ ...PLAN, lanes: { ...PLAN.lanes, [name]: r } });
+  assert.deepEqual(evaluatePlanRules(PLAN_WITH_HEADER, t), []);
+  const withLane = (name, r) => ({ ...PLAN_WITH_HEADER, lanes: { ...PLAN_WITH_HEADER.lanes, [name]: r } });
   const outside = evaluatePlanRules(withLane('bad', { x: 50, y: 300, width: 200, height: 100 }), t);
   assert.deepEqual(outside.map(i => [i.id, i.lane]), [['lane-table', 'bad']]);
   assert.deepEqual(ids(evaluatePlanRules(withLane('bad', { x: 300, y: 1000, width: 200, height: 60 }), t)), ['lane-table']);
@@ -323,8 +348,8 @@ test('lane-table: lanes outside the safe area or intersecting the header fail; t
 // ======================================================================================
 
 function validSnapshot() {
-  const headline = v3Field('headline', { lane: 'panel-full', x: 128, y: 712, w: 800, h: 52 });
-  const kicker = v3Field('kicker', { tier: 'label', lane: 'header', x: 1546, y: 66, w: 258, h: 34 });
+  const headline = v3Field('headline', { lane: 'split.headline', x: 128, y: 712, w: 800, h: 52 });
+  const kicker = v3Field('kicker', { tier: 'label', lane: 'header.kicker', x: 1546, y: 66, w: 258, h: 34 });
   return v3Snap([headline, kicker]);
 }
 test('evaluateLayout: a fully valid schema-3 snapshot with the real field rules passes', () => {
@@ -342,7 +367,7 @@ test('evaluateLayout: every new defect class is reported through the full rule l
   field(s, 'headline').lane = null;                  // lane-missing
   field(s, 'headline').colorAlpha = 0.5;             // text-alpha
   field(s, 'headline').fontSize = 30;                // font
-  s.fields.push(v3Field('mystery', { lane: 'cta', x: 130, y: 820 }));   // unknown-field
+  s.fields.push(v3Field('mystery', { lane: 'full.cta', x: 130, y: 820 }));   // unknown-field
   s.layers = [];                                     // content-presence
   const got = new Set(ids(evaluateLayout(s, t, CTX).issues));
   for (const id of ['lane-missing', 'text-alpha', 'font', 'unknown-field', 'content-presence']) assert.ok(got.has(id), `${id} missing from ${[...got]}`);

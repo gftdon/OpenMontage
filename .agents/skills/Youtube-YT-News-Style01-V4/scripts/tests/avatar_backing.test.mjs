@@ -36,13 +36,23 @@ test('temporal incomplete prevents report completeness without changing legacy r
 });
 test('actual default plan sweeps geometry changes and all-root paint-order probe has no tag filter',async()=>{
  const fs=await import('node:fs/promises');const source=await fs.readFile(new URL('../../../../../remotion-composer/src/YtNewsStyle01V4.tsx',import.meta.url),'utf8');
- assert.ok(source.includes('sceneKind(BEATS[i-1])!==sceneKind(b)||JSON.stringify(rectFor(BEATS[i-1]))!==JSON.stringify(rectFor(b))'),'window on any scene-kind change or presenter-state change');
- assert.ok(source.includes('startFrame:Math.ceil(b.t*fps),endFrame:Math.min(Math.ceil(TOTAL_DURATION_SEC*fps)-1,Math.ceil(b.t*fps)+IN_F+OUT_F+3)'),'window = ceil(b.t*fps) .. +IN_F+OUT_F+3');
+ assert.ok(source.includes('sceneKind(BEATS[i - 1]) !== sceneKind(b) || JSON.stringify(rectFor(BEATS[i - 1])) !== JSON.stringify(rectFor(b))'),'window on any scene-kind change or presenter-state change');
+ assert.ok(source.includes('startFrame: Math.ceil(b.t * fps), endFrame: Math.min(durationInFrames - 1, Math.ceil(b.t * fps) + IN_F + OUT_F + 3)'),'window = ceil(b.t*fps) .. +IN_F+OUT_F+3');
  assert.ok(!source.includes('Math.ceil((b.t+MODE_BLEND_SEC)*fps)+3'),'old .55 s window is gone');
  assert.ok(source.includes('\'[data-qc-scene-role="current"] [data-qc-footage]\''),'footage selector reads the current layer only');
- assert.ok(source.includes("root.querySelectorAll<HTMLElement>('*')"));
- assert.ok(source.includes('const candidateIndex=stack.indexOf(el)'));
- assert.ok(source.includes('avatarBacking,transition:'));
+ assert.ok(source.includes('root.querySelectorAll<HTMLElement>("*")'));
+ assert.ok(source.includes('const candidateIndex = stack.indexOf(el)'));
+ assert.ok(source.includes('avatarBacking, probeIssues,'));
+});
+test('the sample plan has a sweep window for every scene-kind or presenter-state change, IN_F+OUT_F+3 frames long',async()=>{
+ const fs=await import('node:fs/promises');const {loadEngine}=await import('./_engine_bundle.mjs');const engine=await loadEngine();
+ const sample=JSON.parse(await fs.readFile(new URL('../../../../../remotion-composer/src/ytNewsStyle01V4Sample.json',import.meta.url),'utf8'));
+ const captions=JSON.parse(await fs.readFile(new URL('../../../../../remotion-composer/src/ytNewsStyle01V4SampleCaptions.json',import.meta.url),'utf8'));
+ const plan=engine.buildQcPlan(sample,captions,25);const B=sample.beats;
+ const expected=B.flatMap((b,i)=>i&&(engine.sceneKind(B[i-1])!==engine.sceneKind(b))?[i]:[]);
+ assert.ok(expected.length>20);
+ assert.deepEqual(plan.sweepWindows.map(w=>w.id),expected.map(i=>`avatar-${i}`));
+ for(const w of plan.sweepWindows){const i=Number(w.id.slice(7));assert.equal(w.startFrame,Math.ceil(B[i].t*25));assert.equal(w.endFrame,Math.min(plan.durationInFrames-1,w.startFrame+engine.IN_F+engine.OUT_F+3));for(let f=w.startFrame;f<=w.endFrame;f++)assert.ok(plan.frames.includes(f),'every sweep frame is in the plan');}
 });
 
 test('actual old 88.62 headline fixture fails continuous gate for12 frames .48s',async()=>{

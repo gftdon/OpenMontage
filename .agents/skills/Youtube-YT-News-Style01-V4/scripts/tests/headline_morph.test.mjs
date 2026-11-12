@@ -59,7 +59,8 @@ test('chrome: the bar is persistent, its URL pill and credit enter with the labe
   const chrome = block('BrowserChrome');
   const barLine = chrome.split('\n').find((l) => l.includes('<Backing id={chromeId}')) ?? '';
   assert.ok(barLine && !barLine.includes('enter('), 'the bar backing itself must not wait');
-  assert.equal((chrome.match(/\.\.\.enter\(labels\)/g) ?? []).length, 2, 'URL pill and credit/AI label use the label entrance');
+  assert.equal((chrome.match(/\.\.\.enter\(labels, 0, CHROME_LEAD_F\)/g) ?? []).length, 2, 'URL pill and credit/AI label use the label entrance, 2 frames ahead of the other labels');
+  assert.match(source, /const CHROME_LEAD_F = 2;/);
   for (const pre of ['split', 'wide']) {
     const bar = LANES[`${pre}.chrome`], url = LANES[`${pre}.chrome.url`], lab = LANES[`${pre}.chrome.label`];
     for (const l of [url, lab]) assert.ok(l.x >= bar.x && l.x + l.w <= bar.x + bar.w && l.y >= bar.y && l.y + l.h <= bar.y + bar.h, `${pre} lane inside the chrome bar`);

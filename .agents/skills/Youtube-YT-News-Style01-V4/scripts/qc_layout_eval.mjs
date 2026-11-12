@@ -284,7 +284,12 @@ export function ruleTier(s, t, ctx) {
   return out;
 }
 
-/** text-alpha: read text drawn too transparent (colour alpha * opacity < t.minReadTextAlpha). */
+/**
+ * text-alpha: read text drawn with a translucent colour (the colour's own alpha < t.minReadTextAlpha, e.g. V3's CREAM_DIM .62).
+ * Element opacity is deliberately NOT part of this rule: it is also what an entrance / exit fade animates, and a fade inside an opaque
+ * backing is not a legibility defect. Text over the presenter and its backing are covered by the opacity-aware backedEff rules
+ * (backing, presenter-text-backing), which is where a half-transparent label really matters.
+ */
 export function ruleTextAlpha(s, t) {
   const out = [];
   for (const f of visibleFields(s, t)) {
@@ -293,9 +298,9 @@ export function ruleTextAlpha(s, t) {
       out.push(issue(s, 'text-alpha', 'colorAlpha missing', { field: f.id }));
       continue;
     }
-    const alpha = f.colorAlpha * f.opacity;
+    const alpha = f.colorAlpha;
     if (alpha < t.minReadTextAlpha - EPS) {
-      out.push(issue(s, 'text-alpha', `text alpha ${roundN(alpha)} < ${t.minReadTextAlpha}`, { field: f.id, colorAlpha: f.colorAlpha, opacity: f.opacity, alpha: roundN(alpha) }));
+      out.push(issue(s, 'text-alpha', `text colour alpha ${roundN(alpha)} < ${t.minReadTextAlpha}`, { field: f.id, colorAlpha: f.colorAlpha, opacity: f.opacity, alpha: roundN(alpha) }));
     }
   }
   return out;
@@ -475,7 +480,9 @@ export function rulePresenterTextBacking(s, t) {
 /**
  * face-text / face-backing: nothing but the presenter may cover the presenter's face (F = faceBox ∩ P).
  *   face-text    a visible field's ink intersects F
- *   face-backing a visible backing (opacity >= visibleOpacity) intersects F
+ *   face-backing a visible backing (opacity >= visibleOpacity) intersects F AND is not painted below the presenter there
+ *                (backing.aboveAvatarAtFace === false means the probe measured it under the presenter; absent / null / true
+ *                 count: a snapshot that does not say is treated as covering the face).
  */
 export function ruleFace(s, t) {
   const P = presenterRegion(s, t);
@@ -490,7 +497,7 @@ export function ruleFace(s, t) {
     if (inkOf(f).some(r => intersects(r, F))) out.push(issue(s, 'face-text', 'text over the presenter face', { field: f.id }));
   }
   for (const b of s.backings) {
-    if (finiteRect(b.box) && b.opacity >= t.visibleOpacity && intersects(b.box, F)) {
+    if (finiteRect(b.box) && b.opacity >= t.visibleOpacity && intersects(b.box, F) && b.aboveAvatarAtFace !== false) {
       out.push(issue(s, 'face-backing', 'backing over the presenter face', { detail: b.id, backing: b.id }));
     }
   }
@@ -624,7 +631,12 @@ export function ruleContentPresence(s, t) {
 // Footage provenance (behaviour unchanged from V2)
 // ---------------------------------------------------------------------------------------------
 
-/** footage / credit / stock-chrome / origin / ai-chrome / ai-label. */
+/**
+ * footage / credit / stock-chrome / origin / ai-chrome / ai-label.
+ * credit and ai-label are required once the beat has settled (snapshot.transition !== true, i.e. not within MODE_BLEND_SEC of the beat
+ * start): while the incoming picture is still dissolving in or the presenter is still leaving, its attribution is allowed to be
+ * a few frames behind (the engine starts chrome labels 2 frames ahead of the other labels so they are there when the window ends).
+ */
 export function ruleFootage(s, t) {
   const out = [];
   const f = s.footage;
@@ -634,9 +646,10 @@ export function ruleFootage(s, t) {
   const visible = visibleFields(s, t);
   const covered = coveredFieldIds(s, t);
   const chromeText = visible.some(x => ['source-credit', 'source-url'].includes(x.id));
+  const transitioning = s.transition === true;
   if (f.origin === 'source') {
     const creditOk = visible.some(x => x.id === 'source-credit' && !x.clipped && !covered.has(x.id) && finiteRect(x.box));
-    if (!creditOk || !f.src?.startsWith('yt_')) out.push(issue(s, 'credit', 'source missing visible credit/path'));
+    if ((!creditOk && !transitioning) || !f.src?.startsWith('yt_')) out.push(issue(s, 'credit', 'source missing visible credit/path'));
   }
   if (f.origin === 'stock') {
     if (f.chrome || f.credit || chromeText) out.push(issue(s, 'stock-chrome', 'stock misattribution'));
@@ -645,7 +658,7 @@ export function ruleFootage(s, t) {
   if (f.origin === 'ai') {
     if (!f.src?.startsWith('ai_')) out.push(issue(s, 'origin', 'AI path mismatch'));
     if (f.chrome || f.credit || chromeText) out.push(issue(s, 'ai-chrome', 'AI misattribution'));
-    if (!visible.some(x => x.id === 'ai-label' && x.text === 'ภาพประกอบ AI' && !x.clipped && !covered.has(x.id))) {
+    if (!transitioning && !visible.some(x => x.id === 'ai-label' && x.text === 'ภาพประกอบ AI' && !x.clipped && !covered.has(x.id))) {
       out.push(issue(s, 'ai-label', 'missing visible AI label'));
     }
   }

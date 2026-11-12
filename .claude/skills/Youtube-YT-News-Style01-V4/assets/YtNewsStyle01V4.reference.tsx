@@ -360,7 +360,7 @@ export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
     if (pk === "P" && zc) { av = { rect: lerpRect(FULL, CARD, eIn), opacity: 1, cropProgress: eIn, interpolated: true }; }
     else if (zp && kind === "P") { stage.mounted = true; stage.opacity = 1; stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1)); av = { rect: lerpRect(CARD, FULL, eIn), opacity: 1, cropProgress: 1 - eIn, interpolated: true }; }
     else if (zp && zc) { curOpacity = eXf; layers.push(mk(prevIndex as number, prevK, "outgoing", hold(XF_F))); av = { rect: CARD, opacity: 1, cropProgress: 1, interpolated: false }; }
-    else if (zp && kind === "W") { wide.opacity = eIn; wide.z = 21; stage.mounted = true; stage.opacity = hold(IN_F); stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1)); av = { rect: CARD, opacity: hold(IN_F), cropProgress: 1, interpolated: false }; }
+    else if (zp && kind === "W") { wide.opacity = eIn; stage.mounted = true; stage.opacity = hold(IN_F); stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1)); av = { rect: CARD, opacity: 1 - eIn, cropProgress: 1, interpolated: false }; }
     else if (pk === "W" && zc) { stage.opacity = eIn; wide.mounted = true; wide.opacity = hold(IN_F); wide.z = 10; layers.push(mk(prevIndex as number, "W", "outgoing", 1)); av = { rect: CARD, opacity: eIn, cropProgress: 1, interpolated: false }; }
     else if (pk === "W" && kind === "W") { curOpacity = eXf; layers.push(mk(prevIndex as number, "W", "outgoing", hold(XF_F))); }
     else if (pk === "P" && kind === "W") { av = { rect: FULL, opacity: 1 - eIn, cropProgress: 0, interpolated: false }; }
@@ -431,7 +431,7 @@ const springIn = (frame: number, fps: number, damping = 16, stiffness = 130) =>
 
 const boundedEntrance = (t: number, start: number, fps: number): React.CSSProperties => {
   const p = clamp01(springIn(Math.round((t - start) * fps), fps, 18, 130));
-  return { opacity: p, transform: `translateY(${(1 - p) * 6}px)` };
+  return { opacity: p, transform: `translateY(${(1 - p) * 3}px)` }; // 3 px: the ink of a Thai line has ~4 px of room below it in its lane
 };
 
 const tone = (k?: string) => (k === "mint" ? MINT : k === "clay" ? CLAY : AMBER);
@@ -445,7 +445,7 @@ const laneBox = (id: LaneId, origin?: LaneId): React.CSSProperties => {
 // ---- Text -----------------------------------------------------------------
 // Minimum sizes: label 30 px / read 38 px. Text never shrinks; overflow is a layout bug to fix.
 const MIN_PX = { label: 30, read: 38 } as const;
-const LH: Record<number, number> = { 30: 44, 34: 48, 38: 56, 40: 56, 42: 58, 44: 62, 46: 64, 48: 66, 52: 68, 54: 76, 56: 76, 60: 82, 64: 86, 68: 88, 72: 94 };
+const LH: Record<number, number> = { 30: 44, 34: 48, 38: 56, 40: 56, 42: 58, 44: 62, 46: 64, 48: 66, 52: 68, 54: 76, 56: 76, 60: 82, 64: 86, 68: 88, 72: 94, 76: 98 };
 const lhFor = (px: number) => LH[px] ?? Math.round(px * 1.4);
 type Tier = "read" | "label";
 const TextField: React.FC<{ id: string; role?: Tier; lane: LaneId; size?: number; style?: React.CSSProperties; attrs?: Record<string, string>; children: React.ReactNode }> = ({ id, role = "read", lane: laneId, size, style, attrs, children }) => {
@@ -471,13 +471,13 @@ const Backdrop: React.FC = () => (
 const Header: React.FC<{ episode: EpisodeData; beat: Beat }> = ({ episode, beat }) => (
   <>
     <div style={{ ...laneBox("header.brand"), zIndex: 30, display: "flex", alignItems: "center", justifyContent: "flex-start" }}>
-      <Backing id="header.brand" reserved="header" occluder="header-brand" style={{ backgroundColor: "rgba(11,14,23,.92)", borderRadius: LANES["header.brand"].r, padding: "0 14px", height: 44 }}>
-        <TextField id="brand" role="label" lane="header.brand" style={{ color: AMBER, whiteSpace: "nowrap" }}>{episode.brand} · {episode.dateLabel}</TextField>
+      <Backing id="header.brand" reserved="header" occluder="header-brand" style={{ backgroundColor: "rgba(11,14,23,.92)", borderRadius: LANES["header.brand"].r, padding: "7px 14px" }}>
+        <TextField id="brand" role="label" lane="header.brand" style={{ color: AMBER, whiteSpace: "nowrap", lineHeight: "30px" }}>{episode.brand} · {episode.dateLabel}</TextField>
       </Backing>
     </div>
     <div style={{ ...laneBox("header.kicker"), zIndex: 30, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
-      <Backing id="header.kicker" reserved="header" occluder="header-kicker" style={{ backgroundColor: AMBER, borderRadius: LANES["header.kicker"].r, padding: "0 14px", height: 44 }}>
-        <TextField id="kicker" role="label" lane="header.kicker" style={{ color: NAVY, whiteSpace: "nowrap" }}>{beat.kicker ?? "AI NEWS"}</TextField>
+      <Backing id="header.kicker" reserved="header" occluder="header-kicker" style={{ backgroundColor: AMBER, borderRadius: LANES["header.kicker"].r, padding: "7px 14px" }}>
+        <TextField id="kicker" role="label" lane="header.kicker" style={{ color: NAVY, whiteSpace: "nowrap", lineHeight: "30px" }}>{beat.kicker ?? "AI NEWS"}</TextField>
       </Backing>
     </div>
   </>
@@ -518,19 +518,22 @@ const Footage: React.FC<{ beat: Beat; episode: EpisodeData; box: Rect }> = ({ be
 
 // What a label does on entering: wait for labelStartSec, then the bounded entrance. Outgoing layers render no labels at all.
 type Labels = { on: boolean; startSec: number; t: number; fps: number };
-const enter = (l: Labels, at = 0) => boundedEntrance(l.t, Math.max(at, l.startSec), l.fps);
+const enter = (l: Labels, at = 0, leadFrames = 0) => boundedEntrance(l.t, Math.max(at, l.startSec) - leadFrames / l.fps, l.fps);
+// Source URL / credit / AI label are attribution: they start 2 frames before the other labels so they are visible (>= .05) by
+// the time the 0.55 s transition window of the beat has passed.
+const CHROME_LEAD_F = 2;
 
 // Browser chrome: 52 px bar (persistent in its frame); URL pill + right-hand label only for the CURRENT beat's source / AI image.
 const BrowserChrome: React.FC<{ prefix: "split" | "wide"; origin: LaneId; beat: Beat | null; episode: EpisodeData; labels: Labels }> = ({ prefix, origin, beat, episode, labels }) => {
   const chromeId = `${prefix}.chrome` as LaneId, urlId = `${prefix}.chrome.url` as LaneId, labelId = `${prefix}.chrome.label` as LaneId;
   const source = !!beat && beat.media !== "typo" && beat.origin === "source", ai = !!beat && beat.media !== "typo" && beat.origin === "ai";
   return (
-    <Backing id={chromeId} reserved="chrome" occluder="chrome" attrs={{ "data-qc-chrome": true }} style={{ ...laneBox(chromeId, origin), zIndex: 5, backgroundColor: "#232B45", borderBottom: "1px solid rgba(245,241,232,0.10)" }}>
+    <Backing id={chromeId} reserved="chrome" occluder="chrome" style={{ ...laneBox(chromeId, origin), zIndex: 5, backgroundColor: "#232B45", borderBottom: "1px solid rgba(245,241,232,0.10)" }}>
       {[0, 1, 2].map(i => <div key={i} style={{ position: "absolute", left: 18 + i * 22, top: 19, width: 14, height: 14, borderRadius: 7, background: ["#FF5F56", "#FFBD2E", "#27C93F"][i] }} />)}
-      {source && <Backing id={urlId} style={{ ...laneBox(urlId, chromeId), backgroundColor: NAVY_3, borderRadius: LANES[urlId].r, padding: "0 14px", ...enter(labels) }}>
+      {source && <Backing id={urlId} attrs={{ "data-qc-chrome": true }} style={{ ...laneBox(urlId, chromeId), backgroundColor: NAVY_3, borderRadius: LANES[urlId].r, padding: "0 14px", ...enter(labels, 0, CHROME_LEAD_F) }}>
         <TextField id="source-url" role="label" lane={urlId} style={{ whiteSpace: "nowrap" }}>{episode.page.domain}{episode.page.path}</TextField>
       </Backing>}
-      {(source || ai) && <div data-qc-credit={source ? true : undefined} style={{ ...laneBox(labelId, chromeId), textAlign: "right", ...enter(labels) }}>
+      {(source || ai) && <div data-qc-credit={source ? true : undefined} style={{ ...laneBox(labelId, chromeId), textAlign: "right", ...enter(labels, 0, CHROME_LEAD_F) }}>
         <TextField id={source ? "source-credit" : "ai-label"} role="label" lane={labelId} style={{ color: AMBER, whiteSpace: "nowrap" }}>{source ? episode.officialTag : "ภาพประกอบ AI"}</TextField>
       </div>}
     </Backing>
@@ -541,7 +544,7 @@ const FRAME_SHADOW = "0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(245,241,232,0
 
 // Persistent stage window (S and T): frame + chrome bar; scene layers (children) are positioned relative to the stage lane.
 const StageFrame: React.FC<{ plan: FramePlan; kind: SceneKind; chromeBeat: Beat | null; episode: EpisodeData; labels: Labels; children: React.ReactNode }> = ({ plan, kind, chromeBeat, episode, labels, children }) => (
-  <div data-qc-layer="stage" data-qc-scene={kind} style={{ ...laneBox("stage"), zIndex: plan.z, opacity: plan.opacity, borderRadius: LANES.stage.r, overflow: "hidden", backgroundColor: NAVY_2, boxShadow: FRAME_SHADOW }}>
+  <div data-qc-frame="stage" data-qc-scene={kind} style={{ ...laneBox("stage"), zIndex: plan.z, opacity: plan.opacity, borderRadius: LANES.stage.r, overflow: "hidden", backgroundColor: NAVY_2, boxShadow: FRAME_SHADOW }}>
     {children}
     <BrowserChrome prefix="split" origin="stage" beat={chromeBeat} episode={episode} labels={labels} />
   </div>
@@ -549,7 +552,7 @@ const StageFrame: React.FC<{ plan: FramePlan; kind: SceneKind; chromeBeat: Beat 
 
 // Persistent wide window (W): frame + chrome bar; picture layers are children.
 const WideFrame: React.FC<{ plan: FramePlan; chromeBeat: Beat | null; episode: EpisodeData; labels: Labels; children: React.ReactNode }> = ({ plan, chromeBeat, episode, labels, children }) => (
-  <div data-qc-layer="stage" data-qc-scene="wide" style={{ ...laneBox("wide.window"), zIndex: plan.z, opacity: plan.opacity, borderRadius: LANES["wide.window"].r, overflow: "hidden", backgroundColor: NAVY_2, boxShadow: FRAME_SHADOW }}>
+  <div data-qc-frame="wide" data-qc-scene="wide" style={{ ...laneBox("wide.window"), zIndex: plan.z, opacity: plan.opacity, borderRadius: LANES["wide.window"].r, overflow: "hidden", backgroundColor: NAVY_2, boxShadow: FRAME_SHADOW }}>
     {children}
     <BrowserChrome prefix="wide" origin="wide.window" beat={chromeBeat} episode={episode} labels={labels} />
   </div>
@@ -557,7 +560,7 @@ const WideFrame: React.FC<{ plan: FramePlan; chromeBeat: Beat | null; episode: E
 
 // One scene layer inside a frame. The same keyed instance moves from "current" to "outgoing" and keeps its footage playing.
 const SceneLayer: React.FC<{ layer: SceneLayerPlan; children: React.ReactNode }> = ({ layer, children }) => (
-  <div data-qc-scene-role={layer.role} data-qc-scene-index={layer.index} style={{ position: "absolute", inset: 0, opacity: layer.opacity, zIndex: layer.role === "current" ? 2 : 1 }}>{children}</div>
+  <div data-qc-layer="stage" data-qc-layer-id={`stage-${layer.index}`} data-qc-scene-role={layer.role} data-qc-scene-index={layer.index} style={{ position: "absolute", inset: 0, opacity: layer.opacity, zIndex: layer.role === "current" ? 2 : 1 }}>{children}</div>
 );
 
 // Museum card (S): picture + headline + description (the description yields to the stat rail).
@@ -622,7 +625,10 @@ const VsCard: React.FC<{ side: VsSide; accent: string; k: "left" | "right" }> = 
   </Backing>
 );
 
-const CARD_ROW_H = 76 + 40; // 54 px text (line-height 76) + 20 px padding top and bottom
+// Card variant (sizes final): title 76 px, rows 60 px, numbered amber badge, inner padding 26, row gap 22.
+// 1-3 rows: one column, one line each (nowrap; overflow is a gate failure). 4 rows: two columns, a row may wrap to 2 lines.
+const CARD_TITLE_H = 98, CARD_RULE_MARGIN = "16px 0 34px", CARD_RULE_H = 6, CARD_PAD = 26, CARD_GAP = 22, CARD_ROW_PX = 60;
+const CARD_ROW_H = 82 + 2 * CARD_PAD; // 60 px text (line-height 82) + 26 px padding top and bottom = 134
 const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({ beat, labels, current }) => {
   const { t, fps } = labels;
   const variant = beat.typo;
@@ -631,6 +637,8 @@ const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({
   const cardIdx = Math.max(0, cardList.length - 1);
   const card = cardList[cardIdx] ?? beat.cards?.[0];
   const maxRows = Math.max(1, ...(beat.cards ?? []).map(c => c.lines.length)); // reserve the tallest card so nothing jumps
+  const twoCols = (card?.lines.length ?? 0) > 3;
+  const minRows = maxRows > 3 ? 2 : maxRows; // rows stacked in the reserved height (4 rows = 2 columns x 2)
   const chipW = (it: Item) => 0.62 * 56 * graphemeCount(it.text) + (it.icon ? 52 + 16 : 0) + 72;
   const rowOk = items.length > 0 && items.every(it => graphemeCount(it.text) <= 8) && items.reduce((n, it) => n + chipW(it), 0) + 22 * (items.length - 1) <= 1130;
   return (
@@ -638,12 +646,15 @@ const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({
       <div style={{ position: "absolute", inset: 20, borderRadius: 18, border: "1.5px solid rgba(242,179,76,0.35)", pointerEvents: "none" }} />
       {current && <div style={{ ...laneBox("typo.content", "typo.backing"), display: "flex", flexDirection: "column", justifyContent: "center" }}>
         {variant === "card" && <div style={{ display: "flex", flexDirection: "column" }}>
-          <TextField id="typo-title" lane="typo.content" size={68} style={{ fontWeight: 800, whiteSpace: "nowrap", ...enter(labels) }}>{beat.headline}</TextField>
-          <div style={{ width: 140, height: 6, borderRadius: 3, background: AMBER, margin: "16px 0 34px" }} />
-          <div key={cardIdx} style={{ display: "flex", flexDirection: "column", gap: 18, minHeight: maxRows * CARD_ROW_H + (maxRows - 1) * 18, ...enter(labels, card?.at ?? beat.t) }}>
+          <TextField id="typo-title" lane="typo.content" size={76} style={{ fontWeight: 800, whiteSpace: "nowrap", ...enter(labels) }}>{beat.headline}</TextField>
+          <div style={{ width: 140, height: CARD_RULE_H, borderRadius: 3, background: AMBER, margin: CARD_RULE_MARGIN }} />
+          <div key={cardIdx} style={{ display: "grid", gridTemplateColumns: twoCols ? "1fr 1fr" : "1fr", gap: CARD_GAP, alignItems: "stretch", minHeight: minRows * CARD_ROW_H + (minRows - 1) * CARD_GAP, ...enter(labels, card?.at ?? beat.t) }}>
             {(card?.lines ?? []).map((line, i) => (
-              <Backing key={i} id={`typo-row-${i}`} style={{ backgroundColor: NAVY, borderLeft: `6px solid ${i % 2 ? MINT : AMBER}`, borderRadius: 12, padding: "20px 32px" }}>
-                <TextField id={`typo-line-${i}`} lane="typo.content" size={54} style={{ whiteSpace: "nowrap" }}>{line}</TextField>
+              <Backing key={i} id={`typo-row-${i}`} style={{ display: "flex", alignItems: "center", gap: 20, boxSizing: "border-box", backgroundColor: NAVY, borderLeft: `6px solid ${i % 2 ? MINT : AMBER}`, borderRadius: 14, padding: CARD_PAD }}>
+                <Backing id={`typo-badge-${i}`} style={{ flexShrink: 0, width: 64, height: 64, borderRadius: 32, backgroundColor: AMBER, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <TextField id={`typo-num-${i}`} lane="typo.content" size={40} style={{ color: NAVY, fontWeight: 800, lineHeight: "64px", whiteSpace: "nowrap" }}>{i + 1}</TextField>
+                </Backing>
+                <TextField id={`typo-line-${i}`} lane="typo.content" size={CARD_ROW_PX} style={{ whiteSpace: twoCols ? "normal" : "nowrap", minWidth: 0 }}>{line}</TextField>
               </Backing>
             ))}
           </div>
@@ -689,10 +700,11 @@ const StatRail: React.FC<{ live: LiveStat[]; t: number; fps: number }> = ({ live
   <div style={{ ...laneBox("sub"), zIndex: 40, display: "flex", alignItems: "center", gap: 14 }}>
     {live.map(({ stat, b, i }) => {
       const exit = clamp01((stat.at + stat.dur - t) * fps / 6), enter = boundedEntrance(t, stat.at, fps), c = tone(stat.tone);
+      const fade = { opacity: Number(enter.opacity) * exit, transform: enter.transform, lineHeight: "30px" }; // the box stays opaque; the text fades in and out inside it
       return (
-        <Backing key={`${b}-${i}`} id={`stat-${b}-${i}`} occluder={`chip-${b}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12, height: 56, padding: "0 16px", borderRadius: 14, backgroundColor: NAVY_3, boxShadow: `inset 0 0 0 2px ${c}`, ...enter, opacity: Number(enter.opacity) * exit }}>
-          {stat.big && <TextField id={`stat-${b}-${i}-big`} lane="sub" style={{ fontWeight: 800, color: c, whiteSpace: "nowrap" }}>{stat.big}</TextField>}
-          <TextField id={`stat-${b}-${i}-label`} role="label" lane="sub" style={{ whiteSpace: "nowrap" }}>{stat.label}</TextField>
+        <Backing key={`${b}-${i}`} id={`stat-${b}-${i}`} occluder={`chip-${b}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", borderRadius: 14, backgroundColor: NAVY_3, boxShadow: `inset 0 0 0 2px ${c}` }}>
+          {stat.big && <TextField id={`stat-big-${b}-${i}`} lane="sub" style={{ fontWeight: 800, color: c, whiteSpace: "nowrap", ...fade }}>{stat.big}</TextField>}
+          <TextField id={`stat-label-${b}-${i}`} role="label" lane="sub" style={{ whiteSpace: "nowrap", ...fade }}>{stat.label}</TextField>
         </Backing>
       );
     })}
@@ -700,24 +712,27 @@ const StatRail: React.FC<{ live: LiveStat[]; t: number; fps: number }> = ({ live
 );
 
 // Lower third: three left-aligned boxes, each hugging its own line (no empty backing over the presenter).
-const LowerThird: React.FC<{ episode: EpisodeData; lower: Lower; t: number; fps: number; startSec: number }> = ({ episode, lower, t, fps, startSec }) => (
-  <div data-qc-occluder="lower-third" style={{ ...laneBox("full.lowerThird"), zIndex: 45, display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-end", gap: 6, ...boundedEntrance(t, startSec, fps) }}>
-    <Backing id="lower-label" style={{ backgroundColor: AMBER, borderRadius: 10, padding: "0 16px" }}>
-      <TextField id="lower-label" role="label" lane="full.lowerThird" style={{ color: NAVY, fontWeight: 800, whiteSpace: "nowrap" }}>{episode.breakingLabel}</TextField>
-    </Backing>
-    <Backing id="lower-title" style={{ backgroundColor: "rgba(11,14,23,.94)", borderLeft: `6px solid ${AMBER}`, borderRadius: 16, padding: "0 24px" }}>
-      <TextField id="lower-title" lane="full.lowerThird" size={52} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{lower.title}</TextField>
-    </Backing>
-    <Backing id="lower-sub" style={{ backgroundColor: "rgba(11,14,23,.94)", borderLeft: `6px solid ${AMBER}`, borderRadius: 16, padding: "0 24px" }}>
-      <TextField id="lower-sub" lane="full.lowerThird" style={{ whiteSpace: "nowrap" }}>{lower.sub}</TextField>
-    </Backing>
-  </div>
-);
+const LowerThird: React.FC<{ episode: EpisodeData; lower: Lower; t: number; fps: number; startSec: number }> = ({ episode, lower, t, fps, startSec }) => {
+  const fade = boundedEntrance(t, startSec, fps); // the three boxes are opaque at once; only their text fades in
+  return (
+    <div data-qc-occluder="lower-third" style={{ ...laneBox("full.lowerThird"), zIndex: 45, display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-end", gap: 6 }}>
+      <Backing id="lower-label" style={{ backgroundColor: AMBER, borderRadius: 10, padding: "7px 16px" }}>
+        <TextField id="lower-label" role="label" lane="full.lowerThird" style={{ color: NAVY, fontWeight: 800, whiteSpace: "nowrap", lineHeight: "30px", ...fade }}>{episode.breakingLabel}</TextField>
+      </Backing>
+      <Backing id="lower-title" style={{ backgroundColor: "rgba(11,14,23,.94)", borderLeft: `6px solid ${AMBER}`, borderRadius: 16, padding: "8px 24px" }}>
+        <TextField id="lower-title" lane="full.lowerThird" size={52} style={{ fontWeight: 800, whiteSpace: "nowrap", lineHeight: "52px", ...fade }}>{lower.title}</TextField>
+      </Backing>
+      <Backing id="lower-sub" style={{ backgroundColor: "rgba(11,14,23,.94)", borderLeft: `6px solid ${AMBER}`, borderRadius: 16, padding: "8px 24px" }}>
+        <TextField id="lower-sub" lane="full.lowerThird" style={{ whiteSpace: "nowrap", lineHeight: "40px", ...fade }}>{lower.sub}</TextField>
+      </Backing>
+    </div>
+  );
+};
 
 const CtaChip: React.FC<{ text: string; t: number; ctaT: number; fps: number }> = ({ text, t, ctaT, fps }) => (
-  <div style={{ ...laneBox("full.cta"), zIndex: 46, display: "flex", alignItems: "center", justifyContent: "center", ...boundedEntrance(t, ctaT, fps) }}>
+  <div style={{ ...laneBox("full.cta"), zIndex: 46, display: "flex", alignItems: "center", justifyContent: "center" }}>
     <Backing id="cta" occluder="cta" style={{ backgroundColor: NAVY, boxShadow: `inset 0 0 0 2px ${AMBER}`, borderRadius: 24, padding: "16px 36px", maxWidth: 1400, boxSizing: "border-box" }}>
-      <TextField id="cta" lane="full.cta" size={40} style={{ fontWeight: 800, textAlign: "center" }}>{text}</TextField>
+      <TextField id="cta" lane="full.cta" size={40} style={{ fontWeight: 800, textAlign: "center", lineHeight: "48px", ...boundedEntrance(t, ctaT, fps) }}>{text}</TextField>
     </Backing>
   </div>
 );
@@ -727,8 +742,8 @@ const CaptionLane: React.FC<{ t: number; pages: CaptionPage[] }> = ({ t, pages }
   if (!page) return null;
   return (
     <div style={{ ...laneBox("caption"), zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <Backing id="caption" occluder="caption-pill" style={{ backgroundColor: "rgba(11,14,23,.92)", boxShadow: "inset 0 0 0 1.5px rgba(242,179,76,.30)", borderRadius: 20, padding: "6px 26px", maxWidth: LANES.caption.w, boxSizing: "border-box" }}>
-        <TextField id="caption" lane="caption" size={38} attrs={{ "data-qc-caption-display": page.displayText }} style={{ fontWeight: 800, whiteSpace: "pre" }}>
+      <Backing id="caption" occluder="caption-pill" style={{ backgroundColor: "rgba(11,14,23,.92)", boxShadow: "inset 0 0 0 1.5px rgba(242,179,76,.30)", borderRadius: 20, padding: "15px 26px", maxWidth: LANES.caption.w, boxSizing: "border-box" }}>
+        <TextField id="caption" lane="caption" size={38} attrs={{ "data-qc-caption-display": page.displayText }} style={{ fontWeight: 800, whiteSpace: "pre", lineHeight: "34px" }}>
           {page.chunks.map((chunk, i) => {
             const on = t >= chunk.displayStart && t < chunk.displayEnd;
             return <React.Fragment key={i}>{chunk.displaySpaceBefore}<span style={{ display: "inline-block", whiteSpace: "pre", color: on ? GOLD_LIGHT : CREAM, textShadow: on ? `0 0 12px ${GOLD}` : "none" }}>{chunk.text}</span></React.Fragment>;
@@ -752,146 +767,291 @@ const EndCard: React.FC<{ episode: EpisodeData }> = ({ episode: EPISODE }) => (
   </Backing>
 );
 
-// QC is observation-only: production has no layout injection or media substitution.
-const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat;episode:EpisodeData;captions:CaptionData}> = ({enabled,plan,frame,beat,episode,captions}) => {
-  const {fps}=useVideoConfig();
-  const EPISODE=episode;const BEATS=EPISODE.beats;const VO_END_SEC=EPISODE.voEndSec;const TOTAL_DURATION_SEC=EPISODE.totalDurationSec;const CTA_T=EPISODE.ctaT;const CAPTION_PAGES=captions.pages;
+// ===========================================================================
+// QC probe (observation only: production has no layout injection or media substitution).
+//   buildQcPlan(episode, captions, fps)  pure  -> the __QC_PLAN__ object (planVersion 2)
+//   measureQcFrame(root, ctx)            pure DOM function -> the __QC__ snapshot (schemaVersion 3)
+// measureQcFrame depends on nothing but its two arguments (no engine constants, no episode data), so a throwaway
+// copy of it can measure any other composition that carries the same data-qc-* attributes.
+// ===========================================================================
+export const QC_ENGINE_VERSION = "YtNewsStyle01V4/probe-3";
+export const QC_SWEEP_VERSION = "avatar-empty-backing-2";
+
+export interface QcCtx {
+  frame: number;
+  fps: number;
+  width: number;
+  height: number;
+  voEndSec: number;
+  beatIndex: number;
+  transition: boolean;
+  faceBox: NormRect;
+  faceBoxSource: "episode" | "default";
+  avatarAspect: number;
+  beat: { mode: string; media?: string; layout?: string };
+}
+export type QcRect = { x: number; y: number; width: number; height: number };
+
+export function buildQcPlan(episode: EpisodeData, captions: CaptionData, fps: number) {
+  const BEATS = episode.beats, VO_END_SEC = episode.voEndSec, TOTAL_DURATION_SEC = episode.totalDurationSec, CTA_T = episode.ctaT;
+  const durationInFrames = Math.ceil(TOTAL_DURATION_SEC * fps);
+  const times = new Set<number>([0, 9, 89, 172, VO_END_SEC, TOTAL_DURATION_SEC - 0.04]);
+  BEATS.forEach((b, i) => {
+    const end = BEATS[i + 1]?.t ?? VO_END_SEC;
+    [b.t, b.t + 0.12, b.t + 0.36, b.t + 0.56, (b.t + end) / 2, end - 0.04].forEach(t => times.add(t));
+    b.stats?.forEach(st => [st.at, st.at + 0.12, st.at + 0.32, st.at + 0.64].forEach(t => times.add(t)));
+    b.cards?.forEach(c => [c.at, c.at + 0.12, c.at + 0.36, c.at + 0.64].forEach(t => times.add(t)));
+    b.punch?.forEach(p => [p.at - 0.04, p.at, p.at + 0.04].forEach(t => times.add(t)));
+    if (b.lower) [b.lower.at, b.lower.at + 0.32, b.lower.at + b.lower.dur - 0.04].forEach(t => times.add(t));
+  });
+  captions.pages.forEach(p => times.add((p.start + p.end) / 2));
+  [CTA_T, CTA_T + 0.12, CTA_T + 0.32, CTA_T + 0.64].forEach(t => times.add(t));
+  const rectFor = (b: Beat) => (b.mode === "full" ? [0, 0, W, H, 1] : b.layout === "wide" ? [LANES.avatar.x, LANES.avatar.y, LANES.avatar.w, LANES.avatar.h, 0] : [LANES.avatar.x, LANES.avatar.y, LANES.avatar.w, LANES.avatar.h, 1]);
+  const sweepWindows = BEATS.flatMap((b, i) => (i && (sceneKind(BEATS[i - 1]) !== sceneKind(b) || JSON.stringify(rectFor(BEATS[i - 1])) !== JSON.stringify(rectFor(b))) ? [{ id: `avatar-${i}`, beatT: b.t, startFrame: Math.ceil(b.t * fps), endFrame: Math.min(durationInFrames - 1, Math.ceil(b.t * fps) + IN_F + OUT_F + 3) }] : []));
+  const frames = new Set([...times].filter(t => t >= 0 && t < TOTAL_DURATION_SEC).map(t => Math.round(t * fps)));
+  sweepWindows.forEach(w => { for (let f = w.startFrame; f <= w.endFrame; f++) frames.add(f); });
+  // Text lanes only (what a field may sit in). Layers and backings are measured per frame; the header is two lanes
+  // (header.brand / header.kicker), whose backings are reserved and checked by the reserved-intersect rule.
+  const lanes: Record<string, { x: number; y: number; width: number; height: number }> = {};
+  for (const [id, l] of Object.entries(LANES)) if (l.role === "text") lanes[id] = { x: l.x, y: l.y, width: l.w, height: l.h };
+  return {
+    planVersion: 2, engine: "YtNewsStyle01V4", engineVersion: QC_ENGINE_VERSION, fps, width: W, height: H, durationInFrames,
+    voEndFrame: Math.ceil(VO_END_SEC * fps - 1e-9),
+    frames: [...frames].sort((a, b) => a - b), sweepWindows,
+    beats: BEATS.map((b, i) => ({ index: i, t: b.t, startFrame: Math.ceil(b.t * fps), mode: b.mode, layout: b.layout ?? null, origin: b.origin ?? null, media: b.media ?? null })),
+    lanes,
+    avatarFaceBox: episode.avatarFaceBox, avatarFaceBoxSource: "episode", avatarSourceAspect: W / H,
+    sweepVersion: QC_SWEEP_VERSION,
+  };
+}
+
+export async function measureQcFrame(root: HTMLElement, ctx: QcCtx) {
+  const {frame, fps, width, height, voEndSec} = ctx;
+  const probeIssues: { id: string; field?: string; message: string }[] = [];
+  const rect = (r: DOMRect): QcRect => ({ x: r.x, y: r.y, width: r.width, height: r.height });
+  const opacityOf = (el: HTMLElement) => { let opacity = 1; for (let a: HTMLElement | null = el; a && a !== root.parentElement; a = a.parentElement) { const cs = getComputedStyle(a); opacity *= Number(cs.opacity); if (cs.visibility === "hidden" || cs.display === "none") return 0; } return opacity; };
+  const rgbaOf = (css: string) => css.match(/[\d.]+/g)?.map(Number) ?? [];
+  const alphaOf = (css: string) => { const c = rgbaOf(css); return c.length === 4 ? c[3] : c.length === 3 ? 1 : 0; };
+  const stablePath = (el: HTMLElement) => { const parts: string[] = []; for (let a: HTMLElement | null = el; a && a !== root; a = a.parentElement) { const parent = a.parentElement; if (!parent) throw Error("detached candidate"); parts.unshift(a.tagName.toLowerCase() + ":" + (Array.from(parent.children).indexOf(a) + 1)); } return parts.join("/"); };
+  const Segmenter = (Intl as unknown as { Segmenter?: new (locale: string, options: { granularity: string }) => { segment(text: string): Iterable<{ index: number; segment: string }> } }).Segmenter;
+  if (!Segmenter) throw Error("missing grapheme segmenter");
+  const canvas = document.createElement("canvas"), ctx2d = canvas.getContext("2d");
+  if (!ctx2d) throw Error("missing ink canvas");
+
+  // ---- text groups: every text node belongs to its nearest [data-qc-field]; text outside one is a probe issue ----
+  const groups = new Map<HTMLElement, Text[]>();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const n = walker.currentNode as Text;
+    if (!n.textContent?.trim()) continue;
+    const parent = n.parentElement!;
+    const tagged = parent.closest("[data-qc-field]") as HTMLElement | null;
+    if (!tagged) probeIssues.push({ id: "untagged-text", message: `text "${n.textContent.trim().slice(0, 40)}" has no data-qc-field ancestor` });
+    const el = tagged ?? parent;
+    groups.set(el, [...(groups.get(el) ?? []), n]);
+  }
+  const entries = [...groups];
+
+  // ---- fonts: every font used by a field must be loaded (reference glyphs Thai "น" and Latin "H") ----
+  const fontOf = (cs: CSSStyleDeclaration) => `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  const fontStrings = new Set<string>();
+  entries.forEach(([, nodes]) => nodes.forEach(n => fontStrings.add(fontOf(getComputedStyle(n.parentElement!)))));
+  await Promise.all([...fontStrings].map(f => document.fonts.load(f, "นH")));
+  const fontsOk = [...fontStrings].every(f => document.fonts.check(f, "นH"));
+  const inkCache = new Map<string, { thai: number; latin: number }>();
+  const referenceInk = (font: string) => {
+    let v = inkCache.get(font);
+    if (!v) { ctx2d.font = font; ctx2d.textBaseline = "alphabetic"; const n = ctx2d.measureText("น"), h = ctx2d.measureText("H"); v = { thai: n.actualBoundingBoxAscent + n.actualBoundingBoxDescent, latin: h.actualBoundingBoxAscent + h.actualBoundingBoxDescent }; inkCache.set(font, v); }
+    return v;
+  };
+
+  const fields = entries.map(([el, nodes], i) => {
+    const rects: QcRect[] = [], inkRects: QcRect[] = [], clipBoxes: QcRect[] = [];
+    nodes.forEach(n => {
+      const parent = n.parentElement!, cs = getComputedStyle(parent);
+      ctx2d.font = fontOf(cs);
+      // Measure grapheme ink rather than UTF-16 units, preserving Thai combining marks.
+      for (const segment of Array.from(new Segmenter("th", { granularity: "grapheme" }).segment(n.textContent ?? ""))) {
+        const range = document.createRange(); range.setStart(n, segment.index); range.setEnd(n, segment.index + segment.segment.length);
+        for (const r of Array.from(range.getClientRects())) {
+          if (r.width <= 0 || r.height <= 0 || !segment.segment.trim()) continue;
+          rects.push(rect(r));
+          const metrics = ctx2d.measureText(segment.segment);
+          const fa = metrics.fontBoundingBoxAscent, fd = metrics.fontBoundingBoxDescent;
+          if (![fa, fd, metrics.actualBoundingBoxAscent, metrics.actualBoundingBoxDescent].every(Number.isFinite)) throw Error("missing font ink metrics");
+          const sy = r.height / (fa + fd), baseline = r.y + fa * sy, sx = metrics.width > 0 ? r.width / metrics.width : 1;
+          inkRects.push({ x: r.x - metrics.actualBoundingBoxLeft * sx, y: baseline - metrics.actualBoundingBoxAscent * sy, width: Math.max(0.01, (metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight) * sx), height: Math.max(0.01, (metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent) * sy) });
+        }
+      }
+    });
+    for (let a: HTMLElement | null = el; a && a !== root.parentElement; a = a.parentElement) { const cs = getComputedStyle(a); if (["hidden", "clip", "scroll", "auto"].some(v => cs.overflowX === v || cs.overflowY === v)) clipBoxes.push(rect(a.getBoundingClientRect())); }
+    const cs = getComputedStyle(el), id = el.dataset.qcField ?? "auto-" + i;
+    // Hidden / collapsed field box: reported, never skipped (this guard was once lost and broken frames passed).
+    const box = rect(el.getBoundingClientRect());
+    if (![box.x, box.y, box.width, box.height].every(Number.isFinite) ||box.width<=0||box.height<=0) probeIssues.push({ id: "hidden-box", field: id, message: `field "${id}" has a zero-size or non-finite box` });
+    // Transforms on any ancestor: matrix scale folds into fontSize; the CSS `scale` / `zoom` properties are banned.
+    let scale = 1;
+    for (let a: HTMLElement | null = el; a && a !== root.parentElement; a = a.parentElement) {
+      const acs = getComputedStyle(a), tr = acs.transform;
+      if (tr !== "none") { const m = new DOMMatrixReadOnly(tr); scale *= Math.hypot(m.a, m.b); }
+      const zoom = (acs as unknown as { zoom?: string }).zoom;
+      if ((acs.scale && acs.scale !== "none") || (zoom !== undefined && zoom !== "" && Number(zoom) !== 1)) { probeIssues.push({ id: "unsupported-transform", field: id, message: `ancestor <${a.tagName.toLowerCase()}> uses CSS scale/zoom` }); break; }
+    }
+    const offsetH = el.offsetHeight, scaleY = offsetH > 0 ? el.getBoundingClientRect().height / offsetH : scale;
+    // Backing: nearest solid box around the field.
+    const backingEl = el.closest<HTMLElement>("[data-qc-backing]");
+    const bg = backingEl ? getComputedStyle(backingEl).backgroundColor : "", alpha = alphaOf(bg), backingBox = backingEl ? rect(backingEl.getBoundingClientRect()) : null, backingOpacity = backingEl ? opacityOf(backingEl) : 0;
+    const backed = !!backingEl && alpha >= 0.9 && backingOpacity > 0 && backingEl.contains(el) && !!backingBox && inkRects.length > 0 && inkRects.every(r => r.x >= backingBox.x - 0.5 && r.y >= backingBox.y - 0.5 && r.x + r.width <= backingBox.x + backingBox.width + 0.5 && r.y + r.height <= backingBox.y + backingBox.height + 0.5);
+    // Lines: rects cluster by their centre (mixed font sizes on one line, e.g. an emoji icon, still count once).
+    const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3;
+    const centres = rects.map(r => r.y + r.height / 2).sort((a, b) => a - b);
+    let lineCount = 0, lineStart = -Infinity;
+    for (const c of centres) if (c - lineStart > lh * 0.6) { lineCount++; lineStart = c; }
+    const firstTextY = Math.min(...rects.map(r => r.y));
+    const blankFirstLine = id === "caption" && firstTextY - el.getBoundingClientRect().y > parseFloat(cs.lineHeight) * 0.8;
+    // Reference-glyph ink height (Kanit "น" / "H"); the eval divides by t.rubricInkDivisor.
+    const text = el.textContent?.trim() ?? "";
+    const hasThai = /[ก-ฮ]/.test(text), hasLatin = /[A-Za-z0-9]/.test(text);
+    const parentFonts = nodes.map(n => referenceInk(fontOf(getComputedStyle(n.parentElement!))));
+    const rubric = { glyph: hasThai && hasLatin ? "mixed" : hasThai ? "thai" : hasLatin ? "latin" : "none", thaiInkPx: hasThai ? Math.min(...parentFonts.map(p => p.thai)) : null, latinInkPx: hasLatin ? Math.min(...parentFonts.map(p => p.latin)) : null, scaleY, rubricPx: null as number | null };
+    const colorAlpha = Math.min(...nodes.map(n => alphaOf(getComputedStyle(n.parentElement!).color)));
+    const tier = el.dataset.qcTier === "read" || el.dataset.qcTier === "label" ? el.dataset.qcTier : null;
+    return {
+      captionBlankFirstLine: blankFirstLine, captionLineCount: lineCount, captionExpectedText: el.dataset.qcCaptionDisplay, id, role: el.dataset.qcRole ?? "read", layer: "current", text: el.textContent?.trim(),
+      fontSize: parseFloat(cs.fontSize) * scale, opacity: opacityOf(el), rects, inkRects, box, clipBoxes, clipped: false, backed,
+      tier, lane: el.dataset.qcLane ?? null, rubric, colorAlpha, lineCount, whiteSpace: cs.whiteSpace, scrollWidth: el.scrollWidth, clientWidth: el.clientWidth,
+      backing: backingEl && backingBox ? { id: backingEl.dataset.qcBackingId ?? null, path: stablePath(backingEl), alpha, opacity: backingOpacity, sameVisibilityAncestry: backingEl.contains(el), box: backingBox } : null,
+    };
+  });
+
+  // ---- occluders (paint order via elementsFromPoint) ----
+  const tagged = Array.from(root.querySelectorAll<HTMLElement>("[data-qc-occluder]"));
+  const saved = tagged.map(el => [el, el.style.pointerEvents] as const);
+  // Geometry identifies every potential cover. Temporarily enabling pointer hit testing
+  // reveals browser paint order even for pointer-events:none image/container layers.
+  tagged.forEach(el => { el.style.pointerEvents = "auto"; });
+  const occluders = tagged.map(el => {
+    const box = rect(el.getBoundingClientRect()), frontOf: string[] = [];
+    fields.forEach((f, i) => {
+      const target = entries[i][0];
+      if (el.contains(target) || target.contains(el) || opacityOf(el) < 0.05) return;
+      for (const ink of f.inkRects) {
+        const x1 = Math.max(box.x, ink.x), y1 = Math.max(box.y, ink.y), x2 = Math.min(box.x + box.width, ink.x + ink.width), y2 = Math.min(box.y + box.height, ink.y + ink.height);
+        if (x2 <= x1 || y2 <= y1) continue;
+        const stack = document.elementsFromPoint((x1 + x2) / 2, (y1 + y2) / 2);
+        const coverIndex = stack.findIndex(x => x === el || el.contains(x)), textIndex = stack.findIndex(x => x === target || target.contains(x));
+        if (coverIndex >= 0 && textIndex >= 0 && coverIndex < textIndex) { frontOf.push(f.id); break; }
+      }
+    });
+    return { id: el.dataset.qcOccluder, kind: el.tagName.toLowerCase(), box, opacity: opacityOf(el), frontOf, pointerEvents: getComputedStyle(el).pointerEvents };
+  });
+  saved.forEach(([el, value]) => { el.style.pointerEvents = value; });
+
+  // ---- backings, content layers, presenter ----
+  // aboveAvatarAtFace: null = the backing does not reach the presenter's face; true / false = painted above / below the presenter there
+  // (a backing under the presenter does not cover the face; a window fading out beneath an opaque presenter is not a defect).
+  const backingEls = Array.from(root.querySelectorAll<HTMLElement>("[data-qc-backing]"));
+  const backings = backingEls.map(el => ({ id: el.dataset.qcBackingId ?? null, path: stablePath(el), reserved: el.dataset.qcReserved ?? null, alpha: alphaOf(getComputedStyle(el).backgroundColor), opacity: opacityOf(el), box: rect(el.getBoundingClientRect()), aboveAvatarAtFace: null as boolean | null }));
+  const layers = Array.from(root.querySelectorAll<HTMLElement>("[data-qc-layer='avatar'],[data-qc-layer='stage']")).map(el => ({ kind: el.dataset.qcLayer, id: el.dataset.qcLayerId ?? el.dataset.qcLayer, opacity: opacityOf(el), box: rect(el.getBoundingClientRect()) }));
+  const avatar = root.querySelector<HTMLElement>('[data-qc-occluder="avatar"]');
+  if (!avatar && frame / fps < voEndSec) throw Error("missing avatar measurement");
+  type MeasuredRect = QcRect;
+  const intersectRect = (a: MeasuredRect, b: MeasuredRect): MeasuredRect | null => { const x = Math.max(a.x, b.x), y = Math.max(a.y, b.y), right = Math.min(a.x + a.width, b.x + b.width), bottom = Math.min(a.y + a.height, b.y + b.height); return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null; };
+  const subtractRects = (box: MeasuredRect, protect: MeasuredRect[]) => { let regions = [box]; for (const p of protect) { const next: MeasuredRect[] = []; for (const r of regions) { const overlap = intersectRect(r, p); if (!overlap) { next.push(r); continue; } const right = overlap.x + overlap.width, bottom = overlap.y + overlap.height; for (const q of [{ x: r.x, y: r.y, width: r.width, height: overlap.y - r.y }, { x: r.x, y: bottom, width: r.width, height: r.y + r.height - bottom }, { x: r.x, y: overlap.y, width: overlap.x - r.x, height: overlap.height }, { x: right, y: overlap.y, width: r.x + r.width - right, height: overlap.height }]) if (q.width > 0 && q.height > 0) next.push(q); } regions = next; } return regions; };
+  let avatarMeasure: { opacity: number; box: QcRect; mediaBox: QcRect; faceBox: QcRect; faceBoxSource: string } | null = null;
+  if (avatar) {
+    const mediaEl = avatar.querySelector<HTMLElement>("[data-qc-avatar-media]");
+    if (!mediaEl) throw Error("missing avatar media wrapper");
+    const m = rect(mediaEl.getBoundingClientRect()), a = ctx.avatarAspect, fb = ctx.faceBox;
+    // The media is cover-fitted into its wrapper (m already includes the punch zoom).
+    const cw = m.width / m.height > a ? m.width : m.height * a, ch = m.width / m.height > a ? m.width / a : m.height;
+    const cx = m.x + (m.width - cw) / 2, cy = m.y + (m.height - ch) / 2;
+    avatarMeasure = { opacity: opacityOf(avatar), box: rect(avatar.getBoundingClientRect()), mediaBox: m, faceBox: { x: cx + fb.x * cw, y: cy + fb.y * ch, width: fb.w * cw, height: fb.h * ch }, faceBoxSource: ctx.faceBoxSource };
+  }
+
+  // ---- empty-backing sweep: every box with a background, painted above the presenter ----
+  const all = Array.from(root.querySelectorAll<HTMLElement>("*"));
+  const hitSaved = all.map(el => [el, el.style.pointerEvents] as const);
+  let avatarBacking: unknown = { applicable: false, reason: "endcard", avatar: null, candidates: [] };
+  if (avatar) {
+    try {
+      all.forEach(el => { el.style.pointerEvents = "auto"; });
+      const avatarBox = rect(avatar.getBoundingClientRect()), avatarOpacity = opacityOf(avatar);
+      const candidates = all.flatMap(el => {
+        if (el === avatar || avatar.contains(el) || el.contains(avatar)) return [];
+        const cs = getComputedStyle(el), alpha = alphaOf(cs.backgroundColor), opacity = opacityOf(el), image = cs.backgroundImage;
+        if (!(alpha > 0.05 || image !== "none") || opacity < 0.05 || avatarOpacity < 0.05) return [];
+        const box = rect(el.getBoundingClientRect());
+        if (![box.x, box.y, box.width, box.height, opacity, alpha].every(Number.isFinite) ||box.width<=0||box.height<=0) { probeIssues.push({ id: "invalid-background-geometry", message: `background element ${stablePath(el)} has a zero-size or non-finite box` }); return []; }
+        let intersection = intersectRect(box, avatarBox);
+        for (let a = el.parentElement; a && a !== root && intersection; a = a.parentElement) { const style = getComputedStyle(a); if (["hidden", "clip", "scroll", "auto"].some(v => style.overflowX === v || style.overflowY === v)) intersection = intersectRect(intersection, rect(a.getBoundingClientRect())); }
+        if (!intersection) return [];
+        const padding = { top: parseFloat(cs.paddingTop), right: parseFloat(cs.paddingRight), bottom: parseFloat(cs.paddingBottom), left: parseFloat(cs.paddingLeft) };
+        if (!Object.values(padding).every(Number.isFinite)) throw Error("missing background padding");
+        const protectedRects = fields.flatMap((f, i) => {
+          if (!el.contains(entries[i][0]) || f.opacity < 0.05) return [];
+          if (!f.inkRects.length) throw Error("missing protected glyph ink");
+          const x = Math.min(...f.inkRects.map(r => r.x)) - padding.left - 4, y = Math.min(...f.inkRects.map(r => r.y)) - padding.top - 4;
+          const right = Math.max(...f.inkRects.map(r => r.x + r.width)) + padding.right + 4, bottom = Math.max(...f.inkRects.map(r => r.y + r.height)) + padding.bottom + 4;
+          return [{ x, y, width: right - x, height: bottom - y }];
+        });
+        const emptyRegions = subtractRects(intersection, protectedRects).map(region => {
+          const points = [[0.5, 0.5], [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]].map(([fx, fy]) => {
+            const x = region.x + region.width * fx, y = region.y + region.height * fy, stack = document.elementsFromPoint(x, y);
+            const candidateIndex = stack.indexOf(el), avatarIndex = stack.findIndex(s => s === avatar || avatar.contains(s));
+            return { x, y, candidateIndex, avatarIndex, above: candidateIndex >= 0 && avatarIndex >= 0 && candidateIndex < avatarIndex };
+          });
+          return { ...region, paintOrderEvidence: { ...(points.find(p => p.above) ?? points[0]), samples: points } };
+        });
+        return [{ id: stablePath(el), box, opacity, background: { color: cs.backgroundColor, alpha, image }, padding, protectedRects, intersection, emptyRegions }];
+      });
+      avatarBacking = { avatar: { box: avatarBox, opacity: avatarOpacity }, candidates };
+      if (avatarMeasure) {
+        const P = intersectRect(avatarMeasure.mediaBox, avatarMeasure.box), F = P && intersectRect(avatarMeasure.faceBox, P);
+        backingEls.forEach((el, i) => {
+          const region = F && intersectRect(backings[i].box, F);
+          if (!region) return;
+          backings[i].aboveAvatarAtFace = [[0.5, 0.5], [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]].some(([fx, fy]) => {
+            const stack = document.elementsFromPoint(region.x + region.width * fx, region.y + region.height * fy);
+            const ci = stack.indexOf(el), ai = stack.findIndex(x => x === avatar || avatar.contains(x));
+            return ci >= 0 && (ai < 0 || ci < ai);
+          });
+        });
+      }
+    } finally { hitSaved.forEach(([el, value]) => { el.style.pointerEvents = value; }); }
+  }
+
+  // ---- footage provenance ----
+  const footageEl = root.querySelector<HTMLElement>('[data-qc-scene-role="current"] [data-qc-footage]');
+  const actualSrc = footageEl?.dataset.qcFootage, beat = ctx.beat;
+  const origin = frame / fps >= voEndSec ? "endcard" : beat.mode === "full" ? "avatar" : beat.media === "typo" ? "typo" : actualSrc?.startsWith("yt_") ? "source" : actualSrc?.startsWith("ai_") ? "ai" : "stock";
+  return {
+    schemaVersion: 3, frame, t: frame / fps, phase: frame / fps >= voEndSec ? "endcard" : "vo", beatIndex: ctx.beatIndex, width, height, fontsOk, captionLane: "bottom", transition: ctx.transition,
+    fields, occluders, backings, layers, avatar: avatarMeasure, avatarBacking, probeIssues,
+    footage: { origin, layout: beat.layout, src: actualSrc, credit: !!root.querySelector("[data-qc-credit]"), chrome: !!root.querySelector("[data-qc-chrome]") },
+  };
+}
+
+const QcProbe: React.FC<{ enabled: boolean; plan: boolean; frame: number; beat: Beat; beatIndex: number; episode: EpisodeData; captions: CaptionData }> = ({ enabled, plan, frame, beat, beatIndex, episode, captions }) => {
+  const { fps } = useVideoConfig();
   useLayoutEffect(() => {
     if (!enabled && !plan) return;
-    const handle=delayRender("V3 DOM measurement");
-    let live=true;
-    ensureFonts().then(()=>document.fonts.ready).then(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())))).then(()=>{
-      if(!live)return;
-      if(plan){
-        const times=new Set<number>([0,9,89,172,VO_END_SEC, TOTAL_DURATION_SEC-0.04]);
-        BEATS.forEach((b,i)=>{const end=BEATS[i+1]?.t??VO_END_SEC; [b.t,b.t+0.12,b.t+0.36,b.t+0.56,(b.t+end)/2,end-0.04].forEach(t=>times.add(t)); b.stats?.forEach(st=>[st.at,st.at+0.12,st.at+0.32,st.at+0.64].forEach(t=>times.add(t))); b.cards?.forEach(c=>[c.at,c.at+0.12,c.at+0.36,c.at+0.64].forEach(t=>times.add(t))); b.punch?.forEach(p=>[p.at-0.04,p.at,p.at+0.04].forEach(t=>times.add(t)));if(b.lower)[b.lower.at,b.lower.at+0.32,b.lower.at+b.lower.dur-0.04].forEach(t=>times.add(t));});
-        CAPTION_PAGES.forEach(p=>times.add((p.start+p.end)/2));
-        [CTA_T,CTA_T+0.12,CTA_T+0.32,CTA_T+0.64].forEach(t=>times.add(t));
-        const rectFor=(b:Beat)=>b.mode==="full"?[0,0,W,H,1]:b.layout==="wide"?[LANES.avatar.x,LANES.avatar.y,LANES.avatar.w,LANES.avatar.h,0]:[LANES.avatar.x,LANES.avatar.y,LANES.avatar.w,LANES.avatar.h,1];
-        const sweepWindows=BEATS.flatMap((b,i)=>i&&(sceneKind(BEATS[i-1])!==sceneKind(b)||JSON.stringify(rectFor(BEATS[i-1]))!==JSON.stringify(rectFor(b)))?[{id:`avatar-${i}`,beatT:b.t,startFrame:Math.ceil(b.t*fps),endFrame:Math.min(Math.ceil(TOTAL_DURATION_SEC*fps)-1,Math.ceil(b.t*fps)+IN_F+OUT_F+3)}]:[]);
-        const frames=new Set([...times].filter(t=>t>=0&&t<TOTAL_DURATION_SEC).map(t=>Math.round(t*fps)));
-        sweepWindows.forEach(w=>{for(let f=w.startFrame;f<=w.endFrame;f++)frames.add(f);});
-        console.log("__QC_PLAN__"+JSON.stringify({frames:[...frames].sort((a,b)=>a-b),fps,sweepWindows,sweepVersion:"avatar-empty-backing-1"}));
-      }
-      if(enabled){
-        const root=document.querySelector('[data-qc-root]') as HTMLElement;
-        if(!root)throw Error('missing QC root');
-        const groups=new Map<HTMLElement,Text[]>();
-        const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
-        while(walker.nextNode()){
-          const n=walker.currentNode as Text;if(!n.textContent?.trim())continue;
-          const parent=n.parentElement!;
-          const el=(parent.closest('[data-qc-field]')??parent) as HTMLElement;
-          groups.set(el,[...(groups.get(el)??[]),n]);
-        }
-        const rect=(r:DOMRect)=>({x:r.x,y:r.y,width:r.width,height:r.height});
-        const opacityOf=(el:HTMLElement)=>{let opacity=1;for(let a:HTMLElement|null=el;a&&a!==root.parentElement;a=a.parentElement){const cs=getComputedStyle(a);opacity*=Number(cs.opacity);if(cs.visibility==='hidden'||cs.display==='none')return 0;}return opacity;};
-        const canvas=document.createElement('canvas');const ctx=canvas.getContext('2d');if(!ctx)throw Error('missing ink canvas');
-        const entries=[...groups];
-        const fields=entries.map(([el,nodes],i)=>{
-          const rects:{x:number;y:number;width:number;height:number}[]=[];
-          const inkRects:typeof rects=[];const clipBoxes:typeof rects=[];
-          nodes.forEach(n=>{
-            const parent=n.parentElement!;const cs=getComputedStyle(parent);ctx.font=`${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-            // Measure grapheme ink rather than UTF-16 units, preserving Thai combining marks.
-            const Segmenter=(Intl as unknown as {Segmenter:new(locale:string,options:{granularity:string})=>{segment(text:string):Iterable<{index:number;segment:string}>}}).Segmenter;
-            if(!Segmenter)throw Error('missing grapheme segmenter');
-            const segments=Array.from(new Segmenter('th',{granularity:'grapheme'}).segment(n.textContent??''));
-            for(const segment of segments){
-              const range=document.createRange();range.setStart(n,segment.index);range.setEnd(n,segment.index+segment.segment.length);
-              for(const r of Array.from(range.getClientRects())){
-                if(r.width<=0||r.height<=0||!segment.segment.trim())continue;rects.push(rect(r));
-                const metrics=ctx.measureText(segment.segment);const fontPx=parseFloat(cs.fontSize);
-                const fa=metrics.fontBoundingBoxAscent,fd=metrics.fontBoundingBoxDescent;
-                if(![fa,fd,metrics.actualBoundingBoxAscent,metrics.actualBoundingBoxDescent].every(Number.isFinite))throw Error('missing font ink metrics');
-                const sy=r.height/(fa+fd);const baseline=r.y+fa*sy;
-                const sx=metrics.width>0?r.width/metrics.width:1;
-                inkRects.push({x:r.x-metrics.actualBoundingBoxLeft*sx,y:baseline-metrics.actualBoundingBoxAscent*sy,width:Math.max(.01,(metrics.actualBoundingBoxLeft+metrics.actualBoundingBoxRight)*sx),height:Math.max(.01,(metrics.actualBoundingBoxAscent+metrics.actualBoundingBoxDescent)*sy)});
-              }
-            }
-          });
-          for(let a:HTMLElement|null=el;a&&a!==root.parentElement;a=a.parentElement){const cs=getComputedStyle(a);if(['hidden','clip','scroll','auto'].some(v=>cs.overflowX===v||cs.overflowY===v))clipBoxes.push(rect(a.getBoundingClientRect()));}
-          const cs=getComputedStyle(el);let scale=1;
-          const backing=el.closest<HTMLElement>('[data-qc-backing]');const bg=backing?getComputedStyle(backing).backgroundColor:'';const rgba=bg.match(/[\d.]+/g)?.map(Number)??[];const alpha=rgba.length===4?rgba[3]:rgba.length===3?1:0;const backingBox=backing?rect(backing.getBoundingClientRect()):null;const backingOpacity=backing?opacityOf(backing):0;const backed=!!backing&&alpha>=.9&&backingOpacity>0&&backing.contains(el)&&!!backingBox&&inkRects.length>0&&inkRects.every(r=>r.x>=backingBox.x-.5&&r.y>=backingBox.y-.5&&r.x+r.width<=backingBox.x+backingBox.width+.5&&r.y+r.height<=backingBox.y+backingBox.height+.5);
-          for(let a:HTMLElement|null=el;a&&a!==root.parentElement;a=a.parentElement){const tr=getComputedStyle(a).transform;if(tr!=='none'){const m=new DOMMatrixReadOnly(tr);scale*=Math.hypot(m.a,m.b);}}
-          const lineYs=[...new Set(rects.map(r=>Math.round(r.y)))];
-          const firstTextY=Math.min(...rects.map(r=>r.y));
-          const blankFirstLine=el.dataset.qcField==='caption'&&firstTextY-el.getBoundingClientRect().y>parseFloat(cs.lineHeight)*.8;
-          return {captionBlankFirstLine:blankFirstLine,captionLineCount:lineYs.length,captionExpectedText:el.dataset.qcCaptionDisplay,id:el.dataset.qcField??'auto-'+i,role:el.dataset.qcRole??'read',layer:'current',text:el.textContent?.trim(),fontSize:parseFloat(cs.fontSize)*scale,opacity:opacityOf(el),rects,inkRects,box:rect(el.getBoundingClientRect()),clipBoxes,clipped:false,backed,backing:backingBox?{alpha,opacity:backingOpacity,sameVisibilityAncestry:backing!.contains(el),box:backingBox}:null};
-        });
-        const tagged=Array.from(root.querySelectorAll<HTMLElement>('[data-qc-occluder]'));
-        const saved=tagged.map(el=>[el,el.style.pointerEvents] as const);
-        // Geometry identifies every potential cover. Temporarily enabling pointer hit testing
-        // reveals browser paint order even for pointer-events:none image/container layers.
-        tagged.forEach(el=>el.style.pointerEvents='auto');
-        const occluders=tagged.map(el=>{
-          const box=rect(el.getBoundingClientRect());const frontOf:string[]=[];
-          fields.forEach((f,i)=>{
-            const target=entries[i][0];if(el.contains(target)||target.contains(el)||opacityOf(el)<.05)return;
-            for(const ink of f.inkRects){
-              const x1=Math.max(box.x,ink.x),y1=Math.max(box.y,ink.y),x2=Math.min(box.x+box.width,ink.x+ink.width),y2=Math.min(box.y+box.height,ink.y+ink.height);
-              if(x2<=x1||y2<=y1)continue;
-              const stack=document.elementsFromPoint((x1+x2)/2,(y1+y2)/2);
-              const coverIndex=stack.findIndex(x=>x===el||el.contains(x));const textIndex=stack.findIndex(x=>x===target||target.contains(x));
-              if(coverIndex>=0&&textIndex>=0&&coverIndex<textIndex){frontOf.push(f.id);break;}
-            }
-          });
-          return {id:el.dataset.qcOccluder,kind:el.tagName.toLowerCase(),box,opacity:opacityOf(el),frontOf,pointerEvents:getComputedStyle(el).pointerEvents};
-        });
-        saved.forEach(([el,value])=>el.style.pointerEvents=value);
-        const avatar=root.querySelector<HTMLElement>('[data-qc-occluder="avatar"]');
-        if(!avatar&&frame/fps<VO_END_SEC)throw Error('missing avatar measurement');
-        type MeasuredRect={x:number;y:number;width:number;height:number};
-        const intersectRect=(a:MeasuredRect,b:MeasuredRect):MeasuredRect|null=>{const x=Math.max(a.x,b.x),y=Math.max(a.y,b.y),right=Math.min(a.x+a.width,b.x+b.width),bottom=Math.min(a.y+a.height,b.y+b.height);return right>x&&bottom>y?{x,y,width:right-x,height:bottom-y}:null;};
-        const subtractRects=(box:MeasuredRect,protect:MeasuredRect[])=>{let regions=[box];for(const p of protect){const next:MeasuredRect[]=[];for(const r of regions){const overlap=intersectRect(r,p);if(!overlap){next.push(r);continue;}const right=overlap.x+overlap.width,bottom=overlap.y+overlap.height;for(const q of [{x:r.x,y:r.y,width:r.width,height:overlap.y-r.y},{x:r.x,y:bottom,width:r.width,height:r.y+r.height-bottom},{x:r.x,y:overlap.y,width:overlap.x-r.x,height:overlap.height},{x:right,y:overlap.y,width:r.x+r.width-right,height:overlap.height}])if(q.width>0&&q.height>0)next.push(q);}regions=next;}return regions;};
-        const stablePath=(el:HTMLElement)=>{const parts:string[]=[];for(let a:HTMLElement|null=el;a&&a!==root;a=a.parentElement){const parent=a.parentElement;if(!parent)throw Error('detached candidate');parts.unshift(a.tagName.toLowerCase()+':'+(Array.from(parent.children).indexOf(a)+1));}return parts.join('/');};
-        const all=Array.from(root.querySelectorAll<HTMLElement>('*'));
-        const hitSaved=all.map(el=>[el,el.style.pointerEvents] as const);
-        let avatarBacking:unknown={applicable:false,reason:'endcard',avatar:null,candidates:[]};
-        if(avatar){
-        try{
-          all.forEach(el=>el.style.pointerEvents='auto');
-          const avatarBox=rect(avatar.getBoundingClientRect()),avatarOpacity=opacityOf(avatar);
-          const candidates=all.flatMap(el=>{
-            if(el===avatar||avatar.contains(el)||el.contains(avatar))return [];
-            const cs=getComputedStyle(el),rgba=cs.backgroundColor.match(/[\d.]+/g)?.map(Number)??[];
-            const alpha=rgba.length===4?rgba[3]:rgba.length===3?1:0,opacity=opacityOf(el),image=cs.backgroundImage;
-            if(!(alpha>.05||image!=='none')||opacity<.05||avatarOpacity<.05)return [];
-            const box=rect(el.getBoundingClientRect());
-            if(![box.x,box.y,box.width,box.height,opacity,alpha].every(Number.isFinite)||box.width<=0||box.height<=0)throw Error('invalid background geometry');
-            let intersection=intersectRect(box,avatarBox);
-            for(let a=el.parentElement;a&&a!==root&&intersection;a=a.parentElement){const style=getComputedStyle(a);if(['hidden','clip','scroll','auto'].some(v=>style.overflowX===v||style.overflowY===v))intersection=intersectRect(intersection,rect(a.getBoundingClientRect()));}
-            if(!intersection)return [];
-            const padding={top:parseFloat(cs.paddingTop),right:parseFloat(cs.paddingRight),bottom:parseFloat(cs.paddingBottom),left:parseFloat(cs.paddingLeft)};
-            if(!Object.values(padding).every(Number.isFinite))throw Error('missing background padding');
-            const protectedRects=fields.flatMap((f,i)=>{
-              if(!el.contains(entries[i][0])||f.opacity<.05)return [];
-              if(!f.inkRects.length)throw Error('missing protected glyph ink');
-              const x=Math.min(...f.inkRects.map(r=>r.x))-padding.left-4,y=Math.min(...f.inkRects.map(r=>r.y))-padding.top-4;
-              const right=Math.max(...f.inkRects.map(r=>r.x+r.width))+padding.right+4,bottom=Math.max(...f.inkRects.map(r=>r.y+r.height))+padding.bottom+4;
-              return [{x,y,width:right-x,height:bottom-y}];
-            });
-            const emptyRegions=subtractRects(intersection,protectedRects).map(region=>{
-              const points=[[.5,.5],[.1,.1],[.9,.1],[.1,.9],[.9,.9]].map(([fx,fy])=>{
-                const x=region.x+region.width*fx,y=region.y+region.height*fy,stack=document.elementsFromPoint(x,y);
-                const candidateIndex=stack.indexOf(el),avatarIndex=stack.findIndex(x=>x===avatar||avatar.contains(x));
-                return {x,y,candidateIndex,avatarIndex,above:candidateIndex>=0&&avatarIndex>=0&&candidateIndex<avatarIndex};
-              });
-              return {...region,paintOrderEvidence:{...(points.find(p=>p.above)??points[0]),samples:points}};
-            });
-            return [{id:stablePath(el),box,opacity,background:{color:cs.backgroundColor,alpha,image},padding,protectedRects,intersection,emptyRegions}];
-          });
-          avatarBacking={avatar:{box:avatarBox,opacity:avatarOpacity},candidates};
-        }finally{hitSaved.forEach(([el,value])=>el.style.pointerEvents=value);}
-        }
-        const footageEl=root.querySelector<HTMLElement>('[data-qc-scene-role="current"] [data-qc-footage]');
-        const actualSrc=footageEl?.dataset.qcFootage;
-        console.log('__QC__'+JSON.stringify({schemaVersion:2,captionLane:'bottom',frame,width:1920,height:1080,fontsOk:document.fonts.check('800 28px KanitX')&&document.fonts.check('700 28px KanitX'),fields,occluders,avatarBacking,transition:frame/25-beat.t<MODE_BLEND_SEC,footage:{origin:frame/25>=VO_END_SEC?'endcard':beat.mode==='full'?'avatar':beat.media==='typo'?'typo':actualSrc?.startsWith('yt_')?'source':actualSrc?.startsWith('ai_')?'ai':'stock',layout:beat.layout,src:actualSrc,credit:false,chrome:false}}));
+    const handle = delayRender("V4 DOM measurement");
+    let live = true;
+    ensureFonts().then(() => document.fonts.ready).then(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))).then(async () => {
+      if (!live) return;
+      if (plan) console.log("__QC_PLAN__" + JSON.stringify(buildQcPlan(episode, captions, fps)));
+      if (enabled) {
+        const root = document.querySelector("[data-qc-root]") as HTMLElement | null;
+        if (!root) throw Error("missing QC root");
+        const snapshot = await measureQcFrame(root, { frame, fps, width: W, height: H, voEndSec: episode.voEndSec, beatIndex, transition: frame / fps - beat.t < MODE_BLEND_SEC, faceBox: episode.avatarFaceBox, faceBoxSource: "episode", avatarAspect: W / H, beat: { mode: beat.mode, media: beat.media, layout: beat.layout } });
+        if (!live) return;
+        console.log("__QC__" + JSON.stringify(snapshot));
       }
       continueRender(handle);
     }).catch(cancelRender);
-    return ()=>{live=false;continueRender(handle);};
-  },[enabled,plan,frame,beat]);
+    return () => { live = false; continueRender(handle); };
+  }, [enabled, plan, frame, beat]);
   return null;
 };
 
@@ -933,7 +1093,7 @@ export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = (props) => {
   const ctaStart=entranceStartSec(CTA_T,plan,fps);
   const layerOf=(l:SceneLayerPlan)=>{const b=BEATS[l.index],cur=l.labels;return <SceneLayer key={l.key} layer={l}>{l.kind==="S"?<MuseumScene beat={b} episode={EPISODE} statVisible={live.length>0} labels={labels} current={cur}/>:l.kind==="T"?<TypoScene beat={b} labels={labels} current={cur}/>:<WideScene beat={b} episode={EPISODE} labels={labels} current={cur}/>}</SceneLayer>;};
   return <div data-qc-root style={{width:W,height:H,position:"relative",overflow:"hidden",background:NAVY}}>
-    <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat} episode={EPISODE} captions={props.captions}/>
+    <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat} beatIndex={plan.index} episode={EPISODE} captions={props.captions}/>
     {!isEnd&&<>
       <Backdrop/>
       {plan.stage.mounted&&<StageFrame key="stage" plan={plan.stage} kind={isZ(plan.kind)?plan.kind:(plan.outgoingKind??"S")} chromeBeat={isZ(plan.kind)?beat:null} episode={EPISODE} labels={labels}>{plan.layers.filter(l=>l.frame==="stage").map(layerOf)}</StageFrame>}

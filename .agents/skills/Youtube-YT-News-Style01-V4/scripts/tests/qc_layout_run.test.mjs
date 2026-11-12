@@ -29,8 +29,8 @@ const ENGINE_PLAN_V1 = {frames: [0, 5, 9], fps: 25, sweepWindows: [], sweepVersi
 
 /** A snapshot with zero issues (schema 3), for `frame`. */
 const cleanSnapshot = frame => v3Snap([
-  v3Field('headline', {lane: 'panel-full', x: 128, y: 712, w: 800, h: 52}),
-  v3Field('kicker', {tier: 'label', lane: 'header', x: 1546, y: 66, w: 258, h: 34}),
+  v3Field('headline', {lane: 'split.headline', x: 128, y: 712, w: 800, h: 52}),
+  v3Field('kicker', {tier: 'label', lane: 'header.kicker', x: 1546, y: 66, w: 258, h: 34}),
 ], {frame});
 const schema2Snapshot = frame => ({...cleanSnapshot(frame), schemaVersion: 2});
 

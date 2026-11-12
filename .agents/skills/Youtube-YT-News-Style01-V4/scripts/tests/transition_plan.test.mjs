@@ -114,13 +114,13 @@ for (const type of TYPES) {
       const fo = at(type, XF_F + 4); assert.ok(open01(fo.layers[0].opacity) && fo.layers[1].opacity === 1, 'outgoing fades only after the incoming layer reached 1');
       assert.equal(at(type, XF_F + OUT_F - 1).outgoingCount, 1); assert.equal(at(type, XF_F + OUT_F).outgoingCount, 0);
       assert.ok(p0.avatar.opacity === 1 && !p0.avatar.interpolated && sameRect(p0.avatar.rect, CARD));
-    } else if (Z(pk) && ck === 'W') { // wide window 0->1 above the stage, which holds then fades; presenter holds then fades under the window
+    } else if (Z(pk) && ck === 'W') { // wide window 0->1 above the holding stage but BELOW the presenter, who fades out while the window arrives
       assert.deepEqual([p0.wide.mounted, p0.wide.opacity, p0.stage.mounted, p0.stage.opacity, p0.avatar.opacity], [true, 0, true, 1, 1]);
-      assert.ok(p0.wide.z > p0.stage.z && p0.wide.z > 20, 'incoming wide window is above the leaving stage and presenter');
+      assert.ok(p0.wide.z > p0.stage.z && p0.wide.z < 20, 'incoming wide window is above the leaving stage and under the presenter (no empty window painted over her)');
       assert.deepEqual(roles(p0), ['outgoing:' + pk, 'current:W']);
-      assert.ok(open01(mid.wide.opacity) && mid.stage.opacity === 1 && mid.avatar.opacity === 1);
-      const h = at(type, IN_F); assert.deepEqual([h.wide.opacity, h.stage.opacity, h.avatar.opacity], [1, 1, 1]);
-      const fo = at(type, IN_F + 4); assert.ok(open01(fo.stage.opacity) && open01(fo.avatar.opacity) && fo.wide.opacity === 1);
+      assert.ok(open01(mid.wide.opacity) && mid.stage.opacity === 1 && open01(mid.avatar.opacity), 'presenter fades while the window rises');
+      const h = at(type, IN_F); assert.deepEqual([h.wide.opacity, h.stage.opacity, h.avatar.opacity], [1, 1, 0]);
+      const fo = at(type, IN_F + 4); assert.ok(open01(fo.stage.opacity) && fo.avatar.opacity === 0 && fo.wide.opacity === 1);
       assert.ok(sameRect(fo.avatar.rect, CARD) && !fo.avatar.interpolated);
       assert.equal(at(type, IN_F + OUT_F - 1).stage.mounted, true); assert.equal(at(type, IN_F + OUT_F).stage.mounted, false);
     } else if (pk === 'W' && Z(ck)) { // stage + scene 0->1 above the wide window, presenter fades in, wide holds then fades

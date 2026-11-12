@@ -2,11 +2,11 @@ import test from 'node:test';import assert from 'node:assert/strict';import fs f
 import {evaluateAvatarBackingSweep} from '../qc_layout_eval.mjs';
 const source=fs.readFileSync(new URL('../../../../../remotion-composer/src/YtNewsStyle01V4.tsx',import.meta.url),'utf8');
 test('missing avatar is expected only after exact endcard boundary, with explicit not-applicable data',()=>{
- assert.ok(source.includes("if(!avatar&&frame/fps<VO_END_SEC)throw Error('missing avatar measurement');"));
- assert.ok(source.includes("let avatarBacking:unknown={applicable:false,reason:'endcard',avatar:null,candidates:[]};"));
- assert.ok(source.includes('if(avatar){\n        try{'));
- const condition=source.match(/if\((!avatar&&frame\/fps<VO_END_SEC)\)throw Error\('missing avatar measurement'\)/)[1];
- const missingActive=Function('avatar','frame','fps','VO_END_SEC','return '+condition);
+ assert.ok(source.includes('if (!avatar && frame / fps < voEndSec) throw Error("missing avatar measurement");'));
+ assert.ok(source.includes('let avatarBacking: unknown = { applicable: false, reason: "endcard", avatar: null, candidates: [] };'));
+ assert.ok(source.includes('if (avatar) {\n    try {'));
+ const condition=source.match(/if \((!avatar && frame \/ fps < voEndSec)\) throw Error\("missing avatar measurement"\)/)[1];
+ const missingActive=Function('avatar','frame','fps','voEndSec','return '+condition);
  assert.equal(missingActive(null,8412,25,336.5),true);
  assert.equal(missingActive(null,8413,25,336.5),false);
  assert.equal(missingActive(null,8524,25,336.5),false);
