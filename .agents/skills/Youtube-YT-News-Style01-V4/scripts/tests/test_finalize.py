@@ -2932,9 +2932,10 @@ class LockCoverageAndGitIndependenceTests(FinalizeBase):
     def test_KNOWN_LIMITATION_gate_file_tampered_lock_regenerated_and_committed_is_not_detectable_locally(self):
         """DOCUMENTED LIMITATION, not a desired pass.  An agent that edits a gate file, regenerates gates.lock.json and
         commits both leaves a tree that is internally consistent, so finalize (which only compares the tree with its own lock
-        and with git HEAD) cannot tell.  The consumer of the delivery receipt MUST compare the receipt's `lock_sha256`,
-        `finalize_sha256` and `git_head` (and `skill_tree`) with the values pinned out of band; this test asserts the
-        CURRENT behaviour so that nobody mistakes the local check for that protection."""
+        and with git HEAD) cannot tell.  The consumer of the delivery receipt MUST compare the receipt's `lock_sha256`
+        and `finalize_sha256` with the values pinned out of band (`git_head` is informational only: it moves with
+        unrelated commits, lead decision 2026-11-12); this test asserts the CURRENT behaviour so that nobody mistakes the
+        local check for that protection."""
         original = (self.skill / 'scripts' / 'lint_beats.py').read_text()
         orig_lock = sha(self.skill / 'scripts' / 'gates.lock.json')
         for d in (self.skill, self.repo / '.agents' / 'skills' / self.name):
