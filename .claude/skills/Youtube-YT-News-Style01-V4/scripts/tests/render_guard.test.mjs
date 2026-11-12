@@ -9,7 +9,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {
   RECEIPT_FIELDS, EXIT, parseArgs, checkNaming, checkGate, planSegments, nextAction, newSegmentRecords,
-  concatSegments, verifyOutput, buildReceipt, writeReceipt, validateInputs, integrityVerdict, run, UsageError,
+  concatSegments, verifyOutput, buildReceipt, writeReceipt, validateInputs, integrityVerdict, run, UsageError, renderSegment, ensureBundle, ENCODER,
 } from '../render_episode.mjs';
 import {buildManifest, manifestHash, computeSourceHashes, computeBundleCodeKey, writeJsonAtomic, sha256File} from '../qc_manifest.mjs';
 import {digestDir} from '../media_digest.mjs';
@@ -21,6 +21,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const worktree = path.resolve(here, '../../../../..');
 const realSkill = path.resolve(here, '../..');
 const reference = await fs.readFile(path.join(realSkill, 'assets/YtNewsStyle01V4.reference.tsx'), 'utf8');
+const entryReference = await fs.readFile(path.join(realSkill, 'assets/ytNewsStyle01V4.entry.reference.tsx'), 'utf8');
 const realRoot = await fs.readFile(path.join(worktree, 'remotion-composer/src/Root.tsx'), 'utf8');
 
 const tmpDir = prefix => fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -217,7 +218,7 @@ test('3 tiny segments concat frame-exactly, verify and produce a complete receip
     assert.equal((await verifyOutput(path.join(d, 'missing.mp4'), {frames: 1})).ok, false);
 
     // receipt: every contract field, nothing else
-    const sourceHashes = {'episode.json': 'e', 'captions.json': 'c', 'src/YtNewsStyle01V4.tsx': 'g', 'assets/YtNewsStyle01V4.reference.tsx': 'r', 'src/Root.tsx': 'root', 'src/index.tsx': 'idx', 'scripts/gates.lock.json': null};
+    const sourceHashes = {'episode.json': 'e', 'captions.json': 'c', 'src/YtNewsStyle01V4.tsx': 'g', 'assets/YtNewsStyle01V4.reference.tsx': 'r', 'assets/ytNewsStyle01V4.entry.reference.tsx': 'er', 'src/ytNewsStyle01V4.entry.tsx': 'entry', 'src/ytNewsStyle01V4Sample.json': 'sj', 'scripts/gates.lock.json': null};
     const renderManifest = {renderId: 'rid', draft: false, durationInFrames: total, invocations: [{startedAt: 'a', endedAt: 'b', wallSeconds: 3, segmentsRendered: 3}], segments: counts.map((n, i) => ({index: i, from: counts.slice(0, i).reduce((x, y) => x + y, 0), to: counts.slice(0, i + 1).reduce((x, y) => x + y, 0) - 1, file: `seg-${i}.mp4`, sha256: 's', frameCount: n, wallSeconds: 1}))};
     const receipt = buildReceipt({
       renderManifest, renderDir: d, outputPath: out, outputSha256: await sha256File(out), outputBytes: head.length, frameCount: total,
@@ -293,6 +294,10 @@ async function makeEnv(opts = {}) {
   const skill = path.join(d, 'skill');
   for (const dir of [path.join(composer, 'src'), path.join(composer, 'public/ep/broll'), path.join(composer, 'public/fonts'), path.join(skill, 'assets'), path.join(skill, 'scripts')]) await fs.mkdir(dir, {recursive: true});
   await fs.writeFile(path.join(composer, 'src/YtNewsStyle01V4.tsx'), reference);
+  await fs.writeFile(path.join(composer, 'src/ytNewsStyle01V4.entry.tsx'), entryReference);
+  await fs.writeFile(path.join(composer, 'src/ytNewsStyle01V4Sample.json'), '{}');
+  await fs.writeFile(path.join(composer, 'src/ytNewsStyle01V4SampleCaptions.json'), '[]');
+  // other pipelines' files: V4 must not look at them (the real Root.tsx imports dozens of files that do not exist here)
   await fs.writeFile(path.join(composer, 'src/Root.tsx'), realRoot);
   await fs.writeFile(path.join(composer, 'src/index.tsx'), 'export {};\n');
   await fs.writeFile(path.join(composer, 'package-lock.json'), '{}');
@@ -300,6 +305,7 @@ async function makeEnv(opts = {}) {
   await fs.writeFile(path.join(composer, 'public/ep/broll/a.mp4'), 'A');
   await fs.writeFile(path.join(composer, 'public/fonts/Kanit.ttf'), 'FONT');
   await fs.writeFile(path.join(skill, 'assets/YtNewsStyle01V4.reference.tsx'), reference);
+  await fs.writeFile(path.join(skill, 'assets/ytNewsStyle01V4.entry.reference.tsx'), entryReference);
   await fs.writeFile(path.join(skill, 'scripts/qc_thresholds.json'), JSON.stringify({maxSecondsDefault: 420}));
   await fs.writeFile(path.join(skill, 'scripts/qc_layout_eval.mjs'), '// eval\n');
   await fs.writeFile(path.join(skill, 'scripts/locked_gate.mjs'), LOCKED_SOURCE);
@@ -374,6 +380,13 @@ test('final render: gate passes, segments rendered, concat verified, receipt wri
     assert.equal(receipt.gatesLockSha256, await sha256File(path.join(env.skill, 'scripts/gates.lock.json')));
     assert.equal(receipt.gateReportSha256, await sha256File(gateReport));
     assert.ok(receipt.gateCheckedAtStart && receipt.gateCheckedAtConcat);
+    // CF-A66: the entry and its import closure replace the Root.tsx / index.tsx hashes
+    assert.equal('rootTsxSha256' in receipt, false);
+    assert.equal('indexTsxSha256' in receipt, false);
+    assert.equal(receipt.entrySha256, await sha256File(path.join(env.composer, 'src/ytNewsStyle01V4.entry.tsx')));
+    assert.equal(receipt.entryReferenceSha256, await sha256File(path.join(env.skill, 'assets/ytNewsStyle01V4.entry.reference.tsx')));
+    assert.deepEqual(Object.keys(receipt.entryClosure), ['src/YtNewsStyle01V4.tsx', 'src/ytNewsStyle01V4.entry.tsx', 'src/ytNewsStyle01V4Sample.json', 'src/ytNewsStyle01V4SampleCaptions.json']);
+    assert.equal(receipt.entryClosure['src/YtNewsStyle01V4.tsx'], receipt.engineSha256);
     assert.equal(receipt.segments.length, 3);
     assert.equal(receipt.segments.at(-1).toFrame, DURATION - 1);
     assert.equal(receipt.episodeJsonSha256, await sha256File(env.episodePath));
@@ -472,7 +485,8 @@ test('resume is refused (exit 4) when any source changed since the render starte
     'qc script': env => fs.appendFile(path.join(env.skill, 'scripts/qc_layout_eval.mjs'), '// edit\n'),
     'media': env => fs.writeFile(path.join(env.composer, 'public/ep/broll/a.mp4'), 'B'),
     'fonts': env => fs.writeFile(path.join(env.composer, 'public/fonts/Kanit.ttf'), 'FONT2'),
-    'root': env => fs.appendFile(path.join(env.composer, 'src/Root.tsx'), '\n// edit\n'),
+    'entry': env => fs.appendFile(path.join(env.composer, 'src/ytNewsStyle01V4.entry.tsx'), '\n// edit\n'),
+    'entry import (sample json)': env => fs.writeFile(path.join(env.composer, 'src/ytNewsStyle01V4Sample.json'), '{"x": 1}'),
   };
   for (const [name, mutate] of Object.entries(mutations)) {
     const env = await makeEnv();
@@ -492,6 +506,23 @@ test('resume is refused (exit 4) when any source changed since the render starte
     assert.equal(await run(env.draftArgs(['--max-seconds', '150']), env.deps), EXIT.INCOMPLETE);
     assert.equal(await run(env.draftArgs(['--max-seconds', '150', '--segment-frames', '30']), env.deps), EXIT.RESUME_REFUSED);
     // and a final render cannot resume a draft render with the same id, because the gate differs
+  } finally { await env.cleanup(); }
+});
+
+test('editing or breaking Root.tsx / index.tsx / another pipeline file changes nothing: same sources, gate still valid, resume allowed, receipt hashes equal', async () => {
+  const env = await makeEnv();
+  try {
+    const gateReport = await env.makeGate();
+    const args = env.argsFor(['--gate-report', gateReport, '--max-seconds', '150']);
+    assert.equal(await run(args, env.deps), EXIT.INCOMPLETE);
+    await fs.writeFile(path.join(env.composer, 'src/Root.tsx'), 'export const Root = ((( broken\nimport "./does-not-exist";\n');
+    await fs.appendFile(path.join(env.composer, 'src/index.tsx'), '\n// edit\n');
+    await fs.writeFile(path.join(env.composer, 'src/OtherPipeline.tsx'), 'export {};\n');
+    assert.equal(await run(env.argsFor(['--gate-report', gateReport, '--max-seconds', '1000']), env.deps), EXIT.COMPLETE, env.lines.join('\n'));
+    const receipt = JSON.parse(await fs.readFile(path.join(env.outDir, 'v.mp4.receipt.json'), 'utf8'));
+    const manifest = JSON.parse(await fs.readFile(path.join(env.outDir, 'v.render', 'r1', 'render-manifest.json'), 'utf8'));
+    assert.equal(Object.keys(manifest.sources.sourceHashes).some(k => /Root\.tsx|index\.tsx|OtherPipeline/.test(k)), false);
+    assert.equal(receipt.gateReportSha256, await sha256File(gateReport));
   } finally { await env.cleanup(); }
 });
 
@@ -720,12 +751,12 @@ test('DRAFT render with a good lock records no warnings and lock.status "ok"; a 
   } finally { await none.cleanup(); }
 });
 
-test('DRAFT render: root-registration still refuses (exit 3), and a lock change during the render is a changed source', async () => {
+test('DRAFT render: entry-registration still refuses (exit 3), and a lock change during the render is a changed source', async () => {
   const env = await makeEnv();
   try {
-    await fs.writeFile(path.join(env.composer, 'src/Root.tsx'), realRoot.replace('from "./YtNewsStyle01V4";', 'from "./YtNewsStyle01V4Copy";'));
+    await fs.writeFile(path.join(env.composer, 'src/ytNewsStyle01V4.entry.tsx'), entryReference.replace('id="YtNewsStyle01V4"', 'id="YtNewsStyle01V3"'));
     assert.equal(await run(env.draftArgs(), env.deps), EXIT.REFUSED);
-    assert.match(env.lines.at(-1), /^RENDER REFUSED integrity check failed: root-registration/);
+    assert.match(env.lines.at(-1), /^RENDER REFUSED integrity check failed: entry-registration/);
     assert.deepEqual(env.calls.renderSegment, []);
   } finally { await env.cleanup(); }
   const env2 = await makeEnv();
@@ -740,14 +771,54 @@ test('integrityVerdict: final refuses every issue (requireLock), draft only refu
   const seen = [];
   const check = async opts => {
     seen.push(opts.requireLock);
-    return {ok: false, issues: [{id: 'engine-drift', message: 'e'}, {id: 'gates-lock', message: 'l'}, {id: 'root-registration', message: 'r'}], warnings: [{id: 'w', message: 'w'}], lock: {status: 'mismatch', sha256: 'x', files: 1}};
+    return {ok: false, issues: [{id: 'engine-drift', message: 'e'}, {id: 'entry-drift', message: 'd'}, {id: 'gates-lock', message: 'l'}, {id: 'entry-registration', message: 'r'}, {id: 'entry-closure', message: 'c'}], warnings: [{id: 'w', message: 'w'}], lock: {status: 'mismatch', sha256: 'x', files: 1}};
   };
   const fin = await integrityVerdict({composer: 'c', skillDir: 's', draft: false, check});
-  assert.deepEqual(fin.refusals.map(i => i.id), ['engine-drift', 'gates-lock', 'root-registration']);
+  assert.deepEqual(fin.refusals.map(i => i.id), ['engine-drift', 'entry-drift', 'gates-lock', 'entry-registration', 'entry-closure']);
   const dr = await integrityVerdict({composer: 'c', skillDir: 's', draft: true, check});
-  assert.deepEqual(dr.refusals.map(i => i.id), ['root-registration']);
-  assert.deepEqual(dr.warnings.map(i => i.id), ['w', 'engine-drift', 'gates-lock']);
+  assert.deepEqual(dr.refusals.map(i => i.id), ['entry-registration', 'entry-closure']);
+  assert.deepEqual(dr.warnings.map(i => i.id), ['w', 'engine-drift', 'entry-drift', 'gates-lock']);
   assert.deepEqual(seen, [true, false]);
+});
+
+test('renderSegment hands Remotion the encoder contract: bt709 (otherwise ffmpeg writes full-range yuvj420p), muted, h264/yuv420p, the segment as frameRange', async () => {
+  // first real run of the Remotion path: the output was yuvj420p and verifyOutput refused it. Fake @remotion/renderer in a throw-away composer.
+  const d = await tmpDir('rg-remotion-');
+  try {
+    const pkg = path.join(d, 'node_modules/@remotion/renderer');
+    await fs.mkdir(pkg, {recursive: true});
+    await fs.writeFile(path.join(d, 'package.json'), '{}');
+    await fs.writeFile(path.join(pkg, 'package.json'), '{"name":"@remotion/renderer","main":"index.js"}');
+    await fs.writeFile(path.join(pkg, 'index.js'), 'exports.selectComposition = async o => ({id: o.id, durationInFrames: 9});\nexports.renderMedia = async o => { globalThis.__renderMediaOptions = o; };');
+    await renderSegment({composer: d, serveUrl: '/bundle', inputProps: {a: 1}, segment: {index: 2, from: 500, to: 634}, outputLocation: '/o.mp4', concurrency: 2});
+    const o = globalThis.__renderMediaOptions;
+    assert.equal(o.colorSpace, 'bt709');
+    assert.equal(o.pixelFormat, 'yuv420p');
+    assert.equal(o.codec, 'h264');
+    assert.equal(o.muted, true);
+    assert.deepEqual(o.frameRange, [500, 634]);
+    assert.equal(o.concurrency, 2);
+    assert.equal(ENCODER.colorSpace, 'bt709');
+  } finally { delete globalThis.__renderMediaOptions; await fs.rm(d, {recursive: true}); }
+});
+
+test('ensureBundle bundles from the V4 entry (never index.tsx / Root.tsx) and reuses the bundle for the same key', async () => {
+  const d = await tmpDir('rg-bundle-');
+  try {
+    const pkg = path.join(d, 'composer/node_modules/@remotion/bundler');
+    await fs.mkdir(pkg, {recursive: true});
+    await fs.writeFile(path.join(d, 'composer/package.json'), '{}');
+    await fs.writeFile(path.join(pkg, 'package.json'), '{"name":"@remotion/bundler","main":"index.js"}');
+    await fs.writeFile(path.join(pkg, 'index.js'), "exports.bundle = async o => { (globalThis.__bundleCalls ??= []).push(o); await require('fs').promises.mkdir(o.outDir, {recursive: true}); return o.outDir; };");
+    const renderDir = path.join(d, 'render');
+    await fs.mkdir(renderDir);
+    const options = {composer: path.join(d, 'composer'), renderDir, publicDir: '/pub', key: {codeKey: 'k', media: 'm', fonts: 'f'}};
+    assert.equal((await ensureBundle(options)).reused, false);
+    assert.equal(globalThis.__bundleCalls.length, 1);
+    assert.equal(globalThis.__bundleCalls[0].entryPoint, path.join(d, 'composer/src/ytNewsStyle01V4.entry.tsx'));
+    assert.equal((await ensureBundle(options)).reused, true);
+    assert.equal(globalThis.__bundleCalls.length, 1);
+  } finally { delete globalThis.__bundleCalls; await fs.rm(d, {recursive: true}); }
 });
 
 test('newSegmentRecords names files seg-NNN.mp4 and starts pending', () => {

@@ -2,7 +2,10 @@
 // Integrity checks that must hold before the layout gate, the stills or a final render run.
 //
 //   engine-drift       composer src/YtNewsStyle01V4.tsx must be byte-identical to the skill's reference
-//   root-registration  composer src/Root.tsx must register the engine exactly once, in the expected form
+//   entry-drift        composer src/ytNewsStyle01V4.entry.tsx must be byte-identical to assets/ytNewsStyle01V4.entry.reference.tsx
+//   entry-registration the entry registers exactly one composition (id "YtNewsStyle01V4", the engine and its metadata function)
+//   entry-closure      the entry's import closure (relative imports, transitively) contains only V4-owned files (V4_OWNED_FILES)
+//   (Root.tsx / index.tsx are not looked at: V4 bundles from its own entry, so other pipelines' edits cannot change a V4 render.)
 //   gates-lock-format  <skill>/scripts/gates.lock.json has the one accepted shape (see LOCK SHAPE below) or it is invalid
 //   gates-lock         every file listed in the lock must exist and match its recorded sha256
 //   gates-lock-missing no lock file: only a warning (lock.status "missing"), an issue with requireLock / --require-lock
@@ -25,55 +28,73 @@
 // checkIntegrity() returns {ok, issues, warnings, lock: {status: "ok"|"missing"|"invalid"|"mismatch", sha256, files}}.
 //
 // CLI: node gate_integrity.mjs <composer-dir> [--json] [--skill-dir <dir>] [--require-lock]
+//      node gate_integrity.mjs --list-external      prints EXTERNAL_LOCK_FILES, one repo-relative path per line (for the lock writer)
 //   exit 0 ok, 3 failed, 2 usage error
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {sha256File, sha256Hex} from './qc_manifest.mjs';
+import {
+  ENGINE_REFERENCE_FILE, ENGINE_REL, ENTRY_REFERENCE_FILE, ENTRY_REL, COMPOSITION_ID, computeImportClosure, sha256File, sha256Hex,
+} from './qc_manifest.mjs';
 
-const ENGINE_FILE = 'YtNewsStyle01V4.tsx';
-const REFERENCE_FILE = 'YtNewsStyle01V4.reference.tsx';
-const ROOT_IMPORT_LINE = 'import { YtNewsStyle01V4, calculateYtNewsStyle01V4Metadata } from "./YtNewsStyle01V4";';
-const COMPOSITION_RE = /<Composition\s+id="YtNewsStyle01V4"\s+component=\{YtNewsStyle01V4\}[^>]*calculateMetadata=\{calculateYtNewsStyle01V4Metadata\}[^>]*\/>/g;
-const COMPOSITION_ID_RE = /\bid\s*=\s*\{?\s*["'`]YtNewsStyle01V4["'`]/g;
-const ENGINE_SPECIFIER_RE = /["']\.\/YtNewsStyle01V4[^"']*["']/g;
+const ENGINE_FILE = path.posix.basename(ENGINE_REL);
+
+/** Composer-relative files the entry's import closure may contain: the engine, the entry itself and the two sample JSONs (its default props). */
+export const V4_OWNED_FILES = Object.freeze([
+  ENGINE_REL, ENTRY_REL, 'src/ytNewsStyle01V4Sample.json', 'src/ytNewsStyle01V4SampleCaptions.json',
+]);
+
+/**
+ * Repo-relative paths (the repo root is three levels above the skill folder) that the gates lock must pin in its "external"
+ * section: exactly the composer files a V4 render is built from. The lock writer reads this list (--list-external).
+ */
+export const EXTERNAL_LOCK_FILES = Object.freeze(V4_OWNED_FILES.map(rel => `remotion-composer/${rel}`));
 
 const count = (text, regex) => (text.match(regex) ?? []).length;
 
-async function checkEngine({composerDir, skillDir}) {
-  const engine = path.join(composerDir, 'src', ENGINE_FILE);
-  const reference = path.join(skillDir, 'assets', REFERENCE_FILE);
+async function checkCopy({id, label, file, reference}) {
   const hashes = [];
-  for (const file of [engine, reference]) {
-    try { hashes.push(await sha256File(file)); } catch (error) {
-      return [{id: 'engine-drift', message: `cannot read ${file}: ${error.code ?? error.message}`}];
+  for (const f of [file, reference]) {
+    try { hashes.push(await sha256File(f)); } catch (error) {
+      return [{id, message: `cannot read ${f}: ${error.code ?? error.message}`}];
     }
   }
   if (hashes[0] === hashes[1]) return [];
-  return [{id: 'engine-drift', message: `${engine} differs from ${reference} (sha256 ${hashes[0].slice(0, 12)} vs ${hashes[1].slice(0, 12)})`}];
+  return [{id, message: `${label} ${file} differs from ${reference} (sha256 ${hashes[0].slice(0, 12)} vs ${hashes[1].slice(0, 12)})`}];
 }
 
-async function checkRoot({composerDir}) {
-  const file = path.join(composerDir, 'src', 'Root.tsx');
+const checkEngine = ({composerDir, skillDir}) => checkCopy({
+  id: 'engine-drift', label: 'engine', file: path.join(composerDir, 'src', ENGINE_FILE), reference: path.join(skillDir, 'assets', ENGINE_REFERENCE_FILE),
+});
+
+async function checkEntry({composerDir, skillDir}) {
+  const file = path.join(composerDir, ...ENTRY_REL.split('/'));
+  const drift = await checkCopy({id: 'entry-drift', label: 'entry', file, reference: path.join(skillDir, 'assets', ENTRY_REFERENCE_FILE)});
+  const issues = [...drift];
   let text;
   try { text = await fs.readFile(file, 'utf8'); } catch (error) {
-    return [{id: 'root-registration', message: `cannot read ${file}: ${error.code ?? error.message}`}];
+    return drift.length ? issues : [{id: 'entry-drift', message: `cannot read ${file}: ${error.code ?? error.message}`}];
   }
-  const issues = [];
-  const problem = message => issues.push({id: 'root-registration', message});
+  // Registration: strip whole-line comments, then count.
+  const code = text.split('\n').filter(line => !/^\s*(?:\/\/|\/\*|\*)/.test(line)).join('\n');
+  const problem = message => issues.push({id: 'entry-registration', message});
+  const registerRoots = count(code, /\bregisterRoot\s*\(/g);
+  if (registerRoots !== 1) problem(`the entry must call registerRoot exactly once (found ${registerRoots})`);
+  const compositions = count(code, /<Composition\b/g);
+  if (compositions !== 1) problem(`the entry must register exactly one <Composition> (found ${compositions})`);
+  const ids = [...code.matchAll(/<Composition\b[^>]*?\bid\s*=\s*\{?\s*["'`]([^"'`]*)["'`]/g)].map(m => m[1]);
+  if (ids.length !== 1 || ids[0] !== COMPOSITION_ID) problem(`the entry's only composition id must be "${COMPOSITION_ID}" (found ${ids.length ? ids.map(i => `"${i}"`).join(', ') : 'none'})`);
+  if (count(code, /\bcomponent=\{YtNewsStyle01V4\}/g) !== 1) problem('the composition must use component={YtNewsStyle01V4}');
+  if (count(code, /\bcalculateMetadata=\{calculateYtNewsStyle01V4Metadata\}/g) !== 1) problem('the composition must use calculateMetadata={calculateYtNewsStyle01V4Metadata}');
 
-  const importLines = text.split('\n').filter(line => line.trim() === ROOT_IMPORT_LINE).length;
-  if (importLines !== 1) problem(`Root.tsx must contain the engine import line exactly once (found ${importLines})`);
-
-  // Any other mention of "./YtNewsStyle01V4*" (second import, alias, copy module, re-export, dynamic import).
-  const specifiers = count(text, ENGINE_SPECIFIER_RE);
-  if (specifiers !== 1) problem(`Root.tsx must reference "./YtNewsStyle01V4*" exactly once (found ${specifiers})`);
-
-  const compositions = count(text, COMPOSITION_RE);
-  if (compositions !== 1) problem(`Root.tsx must contain exactly one <Composition id="YtNewsStyle01V4" component={YtNewsStyle01V4} ... calculateMetadata={calculateYtNewsStyle01V4Metadata} /> (found ${compositions})`);
-
-  const ids = count(text, COMPOSITION_ID_RE);
-  if (ids !== 1) problem(`Root.tsx must use the id "YtNewsStyle01V4" exactly once (found ${ids})`);
+  // Closure: only V4-owned files.
+  let closure;
+  try { closure = await computeImportClosure({composerDir}); } catch (error) {
+    issues.push({id: 'entry-closure', message: `cannot compute the entry's import closure: ${error.message}`});
+    return issues;
+  }
+  const foreign = closure.filter(rel => !V4_OWNED_FILES.includes(rel));
+  if (foreign.length) issues.push({id: 'entry-closure', message: `the entry imports files that are not V4-owned: ${listPaths(foreign, 'file(s)')} (allowed: ${V4_OWNED_FILES.join(', ')})`});
   return issues;
 }
 
@@ -196,13 +217,13 @@ export async function checkIntegrity({composerDir, skillDir, requireLock = false
   const lock = await checkGatesLock({skillDir: skill, requireLock});
   const issues = [
     ...await checkEngine({composerDir: composer, skillDir: skill}),
-    ...await checkRoot({composerDir: composer}),
+    ...await checkEntry({composerDir: composer, skillDir: skill}),
     ...lock.issues,
   ];
   return {ok: issues.length === 0, issues, warnings: lock.warnings, lock: lock.lock};
 }
 
-const USAGE = 'usage: node gate_integrity.mjs <composer-dir> [--json] [--skill-dir <dir>] [--require-lock]';
+const USAGE = 'usage: node gate_integrity.mjs <composer-dir> [--json] [--skill-dir <dir>] [--require-lock]\n       node gate_integrity.mjs --list-external';
 
 export async function main(argv) {
   let composer;
@@ -210,7 +231,8 @@ export async function main(argv) {
   let requireLock = false;
   let skillDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--json') json = true;
+    if (argv[i] === '--list-external') { console.log(EXTERNAL_LOCK_FILES.join('\n')); return 0; }
+    else if (argv[i] === '--json') json = true;
     else if (argv[i] === '--require-lock') requireLock = true;
     else if (argv[i] === '--skill-dir') skillDir = path.resolve(argv[++i] ?? '');
     else if (!argv[i].startsWith('--') && !composer) composer = argv[i];

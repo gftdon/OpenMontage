@@ -6,7 +6,7 @@
 //     segments and one invocation never runs longer than --max-seconds (default 420). Exit 75 means
 //     "call me again with the same --render-id";
 //   - a final (non-draft) render is only allowed when the layout gate passed for exactly these sources
-//     (episode, captions, engine, root, qc scripts, media, fonts), checked at start and again before concat;
+//     (episode, captions, engine, entry + its import closure, qc scripts, media, fonts), checked at start and again before concat;
 //   - nothing is renamed silently: a `.draft.` file name is a draft, a draft is never a final.
 //
 // Usage:
@@ -27,7 +27,7 @@ import {promisify} from 'node:util';
 import {randomUUID} from 'node:crypto';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {
-  COMPOSITION_ID, MANIFEST_SCHEMA, canonicalJSON, computeBundleCodeKey, computeSourceHashes, diffManifests,
+  COMPOSITION_ID, MANIFEST_SCHEMA, canonicalJSON, computeBundleCodeKey, computeSourceHashes, diffManifests, entryPointOf, ENTRY_REL,
   manifestHash as hashManifest, readJson, readRemotionVersion, sha256File, writeJsonAtomic,
 } from './qc_manifest.mjs';
 import {digestDir, stagePublicDir} from './media_digest.mjs';
@@ -41,16 +41,22 @@ export const HEIGHT = 1080;
 export const EXIT = {COMPLETE: 0, CRASH: 2, REFUSED: 3, RESUME_REFUSED: 4, INCOMPLETE: 75};
 export const RENDER_MANIFEST_SCHEMA = 'yt-news-v4-render-manifest';
 export const RECEIPT_SCHEMA = 'yt-news-v4-render-receipt';
-export const ENCODER = Object.freeze({codec: 'h264', crf: 20, pixelFormat: 'yuv420p', x264Preset: 'medium', muted: true});
+// colorSpace 'bt709': with Remotion's default colour space the encoder is not told the range and ffmpeg writes a full-range
+// "yuvj420p" file from the JPEG frames, which is not the yuv420p this contract (and every player/uploader) expects.
+export const ENCODER = Object.freeze({codec: 'h264', crf: 20, pixelFormat: 'yuv420p', x264Preset: 'medium', colorSpace: 'bt709', muted: true});
 export const DEFAULTS = Object.freeze({maxSeconds: 420, segmentFrames: 750, concurrency: 4, renderSafetyFactor: 1.5});
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
-/** The receipt field names are a contract with the team that consumes receipts. Do not rename. */
+/**
+ * The receipt field names are a contract with the team that consumes receipts. Do not rename.
+ * CF-A66: V4 bundles from its own entry, so rootTsxSha256 / indexTsxSha256 (hashes of Root.tsx / index.tsx) are gone and
+ * entrySha256 (the entry file), entryReferenceSha256 and entryClosure ({"src/<file>": sha256} of the entry and every file it imports) took their place.
+ */
 export const RECEIPT_FIELDS = Object.freeze([
   'schema', 'schemaVersion', 'compositionId',
   'renderId', 'draft', 'outputPath', 'outputFileName', 'outputSha256', 'outputBytes',
   'frameCount', 'durationInFrames', 'fps', 'width', 'height', 'codec', 'pixelFormat', 'hasAudio',
-  'episodeJsonSha256', 'captionsJsonSha256', 'engineSha256', 'engineReferenceSha256', 'rootTsxSha256', 'indexTsxSha256',
+  'episodeJsonSha256', 'captionsJsonSha256', 'engineSha256', 'engineReferenceSha256', 'entrySha256', 'entryReferenceSha256', 'entryClosure',
   'fontsDigest', 'mediaDigest', 'mediaDigestMethod', 'gatesLockSha256',
   'gateReportPath', 'gateReportSha256', 'gateRunId', 'gateManifestHash', 'gateCheckedAtStart', 'gateCheckedAtConcat',
   'segments', 'tools', 'startedAt', 'finishedAt', 'wallSecondsTotal', 'invocations',
@@ -62,7 +68,7 @@ export const USAGE = `usage: render_episode.mjs --episode <episode.json> --capti
   final render : --gate-report is required, the file name must not contain ".draft.", and scripts/gates.lock.json must exist,
                  be valid and match (checked at start and before the concat)
   draft render : --draft is required, the file name must contain ".draft.", the gate is skipped; engine drift and gates-lock
-                 problems are only warnings (recorded in render-manifest.json), root-registration still refuses
+                 problems are only warnings (recorded in render-manifest.json), entry registration / closure problems still refuse
   exit codes   : 0 complete | 75 incomplete (re-run with the same --render-id) | 3 refused | 4 resume refused | 2 crash/usage`;
 
 export class UsageError extends Error {}
@@ -168,13 +174,13 @@ export async function validateInputs({episodePath, captionsPath, skillDir, compo
 // integrity (engine copy, Root registration, gates lock)
 // ---------------------------------------------------------------------------------------------
 
-/** Issues a DRAFT render tolerates (recorded as warnings): the engine and the lock are still being developed. */
-export const DRAFT_TOLERATED = Object.freeze(['engine-drift', 'gates-lock', 'gates-lock-format', 'gates-lock-missing']);
+/** Issues a DRAFT render tolerates (recorded as warnings): the engine, its entry and the lock are still being developed. */
+export const DRAFT_TOLERATED = Object.freeze(['engine-drift', 'entry-drift', 'gates-lock', 'gates-lock-format', 'gates-lock-missing']);
 
 /**
  * Integrity verdict for a render.
  *   final : requireLock, every issue refuses.
- *   draft : engine drift and every lock problem become warnings; anything else (root-registration) refuses.
+ *   draft : engine drift and every lock problem become warnings; anything else (entry-registration, entry-closure) refuses.
  * @returns {Promise<{refusals: object[], warnings: object[], lock: object}>}
  */
 export async function integrityVerdict({composer, skillDir, draft, check = checkIntegrity}) {
@@ -357,7 +363,8 @@ export function buildReceipt({renderManifest, renderDir, outputPath, outputSha25
     codec: ENCODER.codec, pixelFormat: ENCODER.pixelFormat, hasAudio: false,
     episodeJsonSha256: sourceHashes['episode.json'], captionsJsonSha256: sourceHashes['captions.json'],
     engineSha256: sourceHashes['src/YtNewsStyle01V4.tsx'], engineReferenceSha256: sourceHashes['assets/YtNewsStyle01V4.reference.tsx'],
-    rootTsxSha256: sourceHashes['src/Root.tsx'], indexTsxSha256: sourceHashes['src/index.tsx'],
+    entrySha256: sourceHashes[ENTRY_REL], entryReferenceSha256: sourceHashes['assets/ytNewsStyle01V4.entry.reference.tsx'],
+    entryClosure: Object.fromEntries(Object.entries(sourceHashes).filter(([key]) => key.startsWith('src/'))),
     fontsDigest: fontsDigest.digest, mediaDigest: mediaDigest.digest, mediaDigestMethod: mediaDigest.method,
     gatesLockSha256: sourceHashes['scripts/gates.lock.json'] ?? null,
     gateReportPath: draft ? null : gate.reportPath, gateReportSha256: draft ? null : gate.reportSha256,
@@ -422,7 +429,7 @@ export async function ensureBundle({composer, renderDir, publicDir, key}) {
   await fs.rm(tmpDir, {recursive: true, force: true});
   await fs.rm(outDir, {recursive: true, force: true});
   await fs.rm(metaFile, {force: true});
-  await bundle({entryPoint: path.join(composer, 'src', 'index.tsx'), publicDir, outDir: tmpDir});
+  await bundle({entryPoint: entryPointOf(composer), publicDir, outDir: tmpDir});
   await fs.rename(tmpDir, outDir);
   await fs.writeFile(metaFile, wanted);
   return {serveUrl: outDir, reused: false};
@@ -441,7 +448,7 @@ export async function renderSegment({composer, serveUrl, inputProps, segment, ou
   const composition = await selectComposition({serveUrl, id: COMPOSITION_ID, inputProps, browserExecutable: browserExecutable()});
   await renderMedia({
     composition, serveUrl, inputProps, browserExecutable: browserExecutable(),
-    codec: encoder.codec, crf: encoder.crf, pixelFormat: encoder.pixelFormat, x264Preset: encoder.x264Preset, muted: encoder.muted,
+    codec: encoder.codec, crf: encoder.crf, pixelFormat: encoder.pixelFormat, x264Preset: encoder.x264Preset, colorSpace: encoder.colorSpace, muted: encoder.muted,
     concurrency, frameRange: [segment.from, segment.to], outputLocation, overwrite: true, onProgress,
   });
 }

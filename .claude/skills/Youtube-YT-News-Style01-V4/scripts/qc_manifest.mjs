@@ -14,6 +14,16 @@ import path from 'node:path';
 import {createHash, randomBytes} from 'node:crypto';
 
 export const COMPOSITION_ID = 'YtNewsStyle01V4';
+
+// The V4 Remotion entry point. EVERY V4 tool (gate, render, stills) bundles from this file, never from Root.tsx / index.tsx.
+// Paths use "/" and are relative to the composer directory.
+export const ENTRY_FILE = 'ytNewsStyle01V4.entry.tsx';
+export const ENTRY_REL = `src/${ENTRY_FILE}`;
+export const ENTRY_REFERENCE_FILE = 'ytNewsStyle01V4.entry.reference.tsx';
+export const ENGINE_REL = 'src/YtNewsStyle01V4.tsx';
+export const ENGINE_REFERENCE_FILE = 'YtNewsStyle01V4.reference.tsx';
+/** Absolute path of the entry point for Remotion bundle(). */
+export const entryPointOf = composerDir => path.join(composerDir, ...ENTRY_REL.split('/'));
 export const MANIFEST_SCHEMA = 'yt-news-v4-run-manifest';
 export const MANIFEST_VERSION = 1;
 
@@ -67,8 +77,9 @@ async function exists(file) {
 /**
  * Hash every input that can change a gate verdict or a render. Keys follow gate-spec section 5:
  *   episode.json, captions.json                      the two data inputs
- *   src/YtNewsStyle01V4.tsx, src/Root.tsx, src/index.tsx   (relative to the composer)
- *   assets/YtNewsStyle01V4.reference.tsx             (relative to the skill)
+ *   src/ytNewsStyle01V4.entry.tsx and every file it imports (transitively, relative imports only, see computeImportClosure;
+ *   today: src/YtNewsStyle01V4.tsx + the two sample JSONs)   (relative to the composer; Root.tsx / index.tsx are NOT hashed)
+ *   assets/YtNewsStyle01V4.reference.tsx, assets/ytNewsStyle01V4.entry.reference.tsx   (relative to the skill)
  *   scripts/qc_*.mjs|json, scripts/media_digest.mjs, scripts/gate_integrity.mjs,
  *   scripts/episode_schema.mjs (when present), scripts/gates.lock.json (null when absent)
  *   remotion-composer/package-lock.json
@@ -82,11 +93,10 @@ export async function computeSourceHashes({composerDir, skillDir, episodePath, c
 
   await hashRequired('episode.json', episodePath);
   await hashRequired('captions.json', captionsPath);
-  await hashRequired('src/YtNewsStyle01V4.tsx', path.join(composerDir, 'src', 'YtNewsStyle01V4.tsx'));
-  await hashRequired('src/Root.tsx', path.join(composerDir, 'src', 'Root.tsx'));
-  await hashRequired('src/index.tsx', path.join(composerDir, 'src', 'index.tsx'));
+  for (const rel of await computeImportClosure({composerDir})) await hashRequired(rel, path.join(composerDir, ...rel.split('/')));
   await hashRequired('remotion-composer/package-lock.json', path.join(composerDir, 'package-lock.json'));
-  await hashRequired('assets/YtNewsStyle01V4.reference.tsx', path.join(skillDir, 'assets', 'YtNewsStyle01V4.reference.tsx'));
+  await hashRequired('assets/YtNewsStyle01V4.reference.tsx', path.join(skillDir, 'assets', ENGINE_REFERENCE_FILE));
+  await hashRequired('assets/ytNewsStyle01V4.entry.reference.tsx', path.join(skillDir, 'assets', ENTRY_REFERENCE_FILE));
 
   const scriptsDir = path.join(skillDir, 'scripts');
   const names = (await fs.readdir(scriptsDir)).filter(f => f.startsWith('qc_') && (f.endsWith('.mjs') || f.endsWith('.json')));
@@ -97,25 +107,73 @@ export async function computeSourceHashes({composerDir, skillDir, episodePath, c
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
-async function walkFiles(dir, prefix = '') {
+// ---------------------------------------------------------------------------------------------
+// import closure of the entry
+// ---------------------------------------------------------------------------------------------
+
+const RESOLVE_EXTENSIONS = ['', '.tsx', '.ts', '.jsx', '.js', '.mjs', '.json', '.css'];
+const CODE_EXTENSIONS = new Set(['.tsx', '.ts', '.jsx', '.js', '.mjs']);
+// import x from "./a" | import {x} from "./a" | import "./a" | export {x} from "./a" | export * from "./a"  (also across lines)
+const STATIC_IMPORT_RE = /(?:^|[\n;])\s*(?:import|export)\b[^;'"`]*?\bfrom\s*(['"])(\.{1,2}\/[^'"\n]*|\.{1,2})\1|(?:^|[\n;])\s*import\s*(['"])(\.{1,2}\/[^'"\n]*)\3/g;
+// import("./a") and require("./a")
+const CALL_IMPORT_RE = /\b(?:import|require)\s*\(\s*(['"])(\.{1,2}\/[^'"\n]*|\.{1,2})\1\s*\)/g;
+
+/** Relative module specifiers of one source text, in order of appearance. Lines that are only a comment are ignored. */
+export function relativeSpecifiers(text) {
+  const code = text.split('\n').filter(line => !/^\s*(?:\/\/|\/\*|\*)/.test(line)).join('\n');
   const found = [];
-  for (const entry of await fs.readdir(dir, {withFileTypes: true})) {
-    const rel = prefix ? prefix + '/' + entry.name : entry.name;
-    if (entry.isDirectory()) found.push(...await walkFiles(path.join(dir, entry.name), rel));
-    else if (entry.isFile()) found.push(rel);
+  for (const m of code.matchAll(STATIC_IMPORT_RE)) found.push(m[2] ?? m[4]);
+  for (const m of code.matchAll(CALL_IMPORT_RE)) found.push(m[2]);
+  return found;
+}
+
+async function resolveSpecifier(fromAbs, specifier, srcDir) {
+  const base = path.resolve(path.dirname(fromAbs), specifier);
+  const candidates = [];
+  for (const ext of RESOLVE_EXTENSIONS) candidates.push(base + ext);
+  for (const ext of RESOLVE_EXTENSIONS.slice(1)) candidates.push(path.join(base, 'index' + ext));
+  for (const candidate of candidates) {
+    const stat = await fs.stat(candidate).catch(() => null);
+    if (!stat || !stat.isFile()) continue;
+    if (!candidate.startsWith(srcDir + path.sep)) throw new Error(`import "${specifier}" in ${path.relative(srcDir, fromAbs)} resolves outside the composer src folder: ${candidate}`);
+    return candidate;
   }
-  return found.sort();
+  throw new Error(`import "${specifier}" in ${path.relative(srcDir, fromAbs)} cannot be resolved to a file`);
 }
 
 /**
- * Code part of the bundle key: sha256 over every file under composer/src (relpath + hash),
- * the package-lock hash and the installed remotion version. Root.tsx imports every composition in
- * src, so any file in src can change the bundle.
+ * Every file under composer/src that the V4 entry transitively imports, plus the entry itself, as sorted
+ * composer-relative paths ("src/..."). Only relative specifiers are followed (node_modules packages are covered by the
+ * package-lock hash and the remotion version). A specifier that cannot be resolved, or resolves outside src/, throws:
+ * the closure must never silently miss a file.
+ * @returns {Promise<string[]>}
+ */
+export async function computeImportClosure({composerDir, entryRel = ENTRY_REL}) {
+  const root = path.resolve(composerDir);
+  const srcDir = path.join(root, 'src');
+  const seen = new Set();
+  const queue = [path.join(root, ...entryRel.split('/'))];
+  while (queue.length) {
+    const file = queue.pop();
+    if (seen.has(file)) continue;
+    let text;
+    try { text = await fs.readFile(file, 'utf8'); } catch (error) { throw new Error(`cannot read ${path.relative(root, file)}: ${error.code ?? error.message}`); }
+    seen.add(file);
+    if (!CODE_EXTENSIONS.has(path.extname(file))) continue;
+    for (const specifier of relativeSpecifiers(text)) queue.push(await resolveSpecifier(file, specifier, srcDir));
+  }
+  return [...seen].map(f => path.relative(root, f).split(path.sep).join('/')).sort();
+}
+
+/**
+ * Code part of the bundle key: sha256 over every file of the entry's import closure (relpath + hash),
+ * the package-lock hash and the installed remotion version. Files of other pipelines under src/ (Root.tsx, other
+ * compositions) are not part of the V4 bundle and therefore not part of the key.
  */
 export async function computeBundleCodeKey({composerDir}) {
   const parts = [];
-  for (const rel of await walkFiles(path.join(composerDir, 'src'))) {
-    parts.push(`src/${rel}\t${await sha256File(path.join(composerDir, 'src', rel))}`);
+  for (const rel of await computeImportClosure({composerDir})) {
+    parts.push(`${rel}\t${await sha256File(path.join(composerDir, ...rel.split('/')))}`);
   }
   const lock = path.join(composerDir, 'package-lock.json');
   parts.push(`package-lock.json\t${(await exists(lock)) ? await sha256File(lock) : 'none'}`);
@@ -148,7 +206,7 @@ export function buildManifest({
 
 /**
  * Compare two manifests (or any two JSON values) key by key, in sorted key order, and return the
- * path of the first mismatch ("sourceHashes.src/Root.tsx", "mediaDigest.digest", "frames", ...) or
+ * path of the first mismatch ("sourceHashes.src/YtNewsStyle01V4.tsx", "mediaDigest.digest", "frames", ...) or
  * null when they are identical. A key present on one side only is a mismatch. Arrays are compared
  * whole (by canonical JSON) and reported at the array's own path.
  */

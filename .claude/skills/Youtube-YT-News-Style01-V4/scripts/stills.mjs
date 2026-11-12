@@ -4,10 +4,12 @@
 //
 // --episode/--captions (both or neither) are passed as inputProps = { episode, captions }; without them the
 // composition's defaultProps (the sample) are used.
+// Bundles from the V4 entry (src/ytNewsStyle01V4.entry.tsx), never from Root.tsx / index.tsx.
 // e.g. node .claude/skills/Youtube-YT-News-Style01-V4/scripts/stills.mjs YtNewsStyle01V4 75,388,1320 remotion-composer/out/qa remotion-composer
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
+import { entryPointOf } from './qc_manifest.mjs';
 const rawArgs = process.argv.slice(2);
 const flagValue = (name) => { const i = rawArgs.indexOf(name); if (i < 0) return undefined; const v = rawArgs[i + 1]; if (!v || v.startsWith('--')) { console.error(`${name} needs a file path`); process.exit(1); } return v; };
 const episodeFile = flagValue('--episode');
@@ -24,7 +26,7 @@ const inputProps = episodeFile ? { episode: JSON.parse(fs.readFileSync(episodeFi
 const require = createRequire(path.join(root, 'package.json'));
 const { bundle } = require('@remotion/bundler');
 const { renderStill, selectComposition } = require('@remotion/renderer');
-const serveUrl = await bundle({ entryPoint: path.join(root, 'src/index.tsx'), onProgress: () => {} });
+const serveUrl = await bundle({ entryPoint: entryPointOf(root), onProgress: () => {} });
 const composition = await selectComposition({ serveUrl, id: comp, inputProps });
 for (const f of frames) {
   const out = path.join(outDir, `f${String(f).padStart(5, '0')}.png`);

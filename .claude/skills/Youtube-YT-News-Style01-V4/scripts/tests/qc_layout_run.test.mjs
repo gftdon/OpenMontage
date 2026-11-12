@@ -47,7 +47,7 @@ const readFixture = rel => fs.readFile(path.join(FIXTURES, rel), 'utf8').then(JS
 const NO_LOCK = {status: 'missing', sha256: null, files: null, external: null};
 const LOCKED_SOURCE = 'export const locked = 1;\n';
 const lockOf = (files = {'scripts/locked_gate.mjs': sha256Hex(LOCKED_SOURCE)}) => ({schema: 'yt-news-v4-gates-lock', version: 1, skill: 'Youtube-YT-News-Style01-V4', files});
-/** The real lock check on the world's skill dir, minus the engine/Root checks (the world's engine is a placeholder). */
+/** The real lock check on the world's skill dir, minus the engine/entry checks (the world's engine is a placeholder). */
 const lockOnlyIntegrity = async options => {
   const r = await realCheckIntegrity(options);
   const issues = r.issues.filter(i => i.id.startsWith('gates-lock'));
@@ -66,11 +66,14 @@ async function makeWorld(opts = {}) {
   await fs.mkdir(path.join(skillDir, 'assets'), {recursive: true});
   for (const name of ['qc_thresholds.json', 'qc_field_rules.json']) await fs.copyFile(path.join(realScripts, name), path.join(skillDir, 'scripts', name));
   await fs.writeFile(path.join(skillDir, 'assets', 'YtNewsStyle01V4.reference.tsx'), '// reference\n');
+  await fs.writeFile(path.join(skillDir, 'assets', 'ytNewsStyle01V4.entry.reference.tsx'), '// entry reference\n');
   await fs.mkdir(path.join(composer, 'src'), {recursive: true});
   await fs.mkdir(path.join(composer, 'public', 'fonts'), {recursive: true});
   await fs.mkdir(path.join(composer, 'public', 'ep', 'broll'), {recursive: true});
   await fs.mkdir(path.join(composer, 'public', 'other-episode'), {recursive: true});
   for (const f of ['YtNewsStyle01V4.tsx', 'Root.tsx', 'index.tsx']) await fs.writeFile(path.join(composer, 'src', f), `// ${f}\n`);
+  await fs.writeFile(path.join(composer, 'src', 'ytNewsStyle01V4.entry.tsx'), 'import "./YtNewsStyle01V4";\nimport "./ytNewsStyle01V4Sample.json";\n');
+  await fs.writeFile(path.join(composer, 'src', 'ytNewsStyle01V4Sample.json'), '{}');
   await fs.writeFile(path.join(composer, 'package-lock.json'), '{}');
   await fs.writeFile(path.join(composer, 'public', 'fonts', 'kanit.ttf'), 'font');
   await fs.writeFile(path.join(composer, 'public', 'ep', 'broll', 'a.mp4'), 'video-a');

@@ -6,7 +6,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {checkIntegrity} from '../gate_integrity.mjs';
+import {checkIntegrity, EXTERNAL_LOCK_FILES, V4_OWNED_FILES} from '../gate_integrity.mjs';
 import {sha256Hex} from '../qc_manifest.mjs';
 
 const execFileP = promisify(execFile);
@@ -17,9 +17,11 @@ const GUARD = '||box.width<=0||box.height<=0';
 
 const realRoot = await fs.readFile(path.join(worktree, 'remotion-composer/src/Root.tsx'), 'utf8');
 const reference = await fs.readFile(path.join(realSkill, 'assets/YtNewsStyle01V4.reference.tsx'), 'utf8');
+const entryReference = await fs.readFile(path.join(realSkill, 'assets/ytNewsStyle01V4.entry.reference.tsx'), 'utf8');
+const ENTRY_PATH = 'src/ytNewsStyle01V4.entry.tsx';
 
-/** Temp composer + skill: engine identical to the reference, Root copied from the real worktree. */
-async function setup({engine = reference, root = realRoot, lock, repoLayout = false} = {}) {
+/** Temp composer + skill: engine and entry identical to their references, the two sample JSONs, and a Root.tsx copied from the real worktree (V4 must not care about it). */
+async function setup({engine = reference, entry = entryReference, root = realRoot, lock, repoLayout = false} = {}) {
   const d = await fs.mkdtemp(path.join(os.tmpdir(), 'integrity-'));
   // repoLayout: <d>/repo/.agents/skills/<skill> + <d>/repo/remotion-composer, so the repo root (3 levels above the skill) is <d>/repo
   const composerDir = repoLayout ? path.join(d, 'repo', 'remotion-composer') : path.join(d, 'composer');
@@ -29,18 +31,23 @@ async function setup({engine = reference, root = realRoot, lock, repoLayout = fa
   await fs.mkdir(path.join(skillDir, 'scripts'), {recursive: true});
   await fs.writeFile(path.join(composerDir, 'src/YtNewsStyle01V4.tsx'), engine);
   await fs.writeFile(path.join(composerDir, 'src/Root.tsx'), root);
+  await fs.writeFile(path.join(composerDir, ENTRY_PATH), entry);
+  await fs.writeFile(path.join(composerDir, 'src/ytNewsStyle01V4Sample.json'), '{}');
+  await fs.writeFile(path.join(composerDir, 'src/ytNewsStyle01V4SampleCaptions.json'), '[]');
   await fs.writeFile(path.join(skillDir, 'assets/YtNewsStyle01V4.reference.tsx'), reference);
+  await fs.writeFile(path.join(skillDir, 'assets/ytNewsStyle01V4.entry.reference.tsx'), entryReference);
   await fs.writeFile(path.join(skillDir, 'scripts/locked.mjs'), 'export const locked = 1;\n');
   if (lock) await fs.writeFile(path.join(skillDir, 'scripts/gates.lock.json'), JSON.stringify(lock));
   return {d, composerDir, skillDir, repoRoot: path.join(d, 'repo')};
 }
 const ids = r => r.issues.map(i => i.id);
+const uniqueIdsOf = r => [...new Set(ids(r))];
 
 test('the engine guard that went missing in the V3 incident exists in the reference engine', () => {
   assert.ok(reference.includes(GUARD), 'reference engine has the box.width/height guard');
 });
 
-test('identical engine and the real Root pass; missing lock is only a warning and lock.status "missing"', async () => {
+test('identical engine and entry pass (Root.tsx is not looked at); missing lock is only a warning and lock.status "missing"', async () => {
   const {d, composerDir, skillDir} = await setup();
   try {
     const r = await checkIntegrity({composerDir, skillDir});
@@ -65,36 +72,89 @@ test('a one-character engine change is engine-drift; a missing engine too', asyn
   try {
     assert.deepEqual(ids(await checkIntegrity({composerDir, skillDir})), ['engine-drift']);
     await fs.rm(path.join(composerDir, 'src/YtNewsStyle01V4.tsx'));
-    assert.deepEqual(ids(await checkIntegrity({composerDir, skillDir})), ['engine-drift']);
+    // the entry cannot resolve its engine import either
+    assert.deepEqual(uniqueIdsOf(await checkIntegrity({composerDir, skillDir})), ['engine-drift', 'entry-closure']);
   } finally { await fs.rm(d, {recursive: true}); }
 });
 
-test('Root importing the engine from a copy module is root-registration', async () => {
-  const root = realRoot.replace('from "./YtNewsStyle01V4";', 'from "./YtNewsStyle01V4Copy";');
-  assert.notEqual(root, realRoot);
-  const {d, composerDir, skillDir} = await setup({root});
+test('a broken, empty or missing Root.tsx / index.tsx does not matter to the integrity check', async () => {
+  const {d, composerDir, skillDir} = await setup({root: 'export const Root = ((( broken\nimport "./does-not-exist";\n'});
   try {
-    const r = await checkIntegrity({composerDir, skillDir});
-    assert.ok(ids(r).includes('root-registration'));
-    // even when the legit import is kept and a second one from the copy is added
-    const both = realRoot.replace('\n', '\nimport { YtNewsStyle01V4 as Copy } from "./YtNewsStyle01V4Copy";\n');
-    await fs.writeFile(path.join(composerDir, 'src/Root.tsx'), both);
-    assert.ok(ids(await checkIntegrity({composerDir, skillDir})).includes('root-registration'));
+    assert.deepEqual(ids(await checkIntegrity({composerDir, skillDir})), []);
+    await fs.rm(path.join(composerDir, 'src/Root.tsx'));
+    assert.deepEqual(ids(await checkIntegrity({composerDir, skillDir})), []);
   } finally { await fs.rm(d, {recursive: true}); }
 });
 
-test('Root with two compositions using the engine id, or none, is root-registration', async () => {
-  const line = realRoot.split('\n').find(l => l.includes('<Composition id="YtNewsStyle01V4"'));
+test('entry differing from its reference copy (or missing) is entry-drift', async () => {
+  const {d, composerDir, skillDir} = await setup({entry: entryReference.replace('fps={25}', 'fps={30}')});
+  try {
+    assert.ok(ids(await checkIntegrity({composerDir, skillDir})).includes('entry-drift'));
+    await fs.rm(path.join(composerDir, ENTRY_PATH));
+    assert.deepEqual(ids(await checkIntegrity({composerDir, skillDir})), ['entry-drift']);
+  } finally { await fs.rm(d, {recursive: true}); }
+});
+
+/** An entry that is changed together with its reference copy (so there is no drift): only the structural checks can catch it. */
+async function withEntry(entry, fn) {
+  const {d, composerDir, skillDir} = await setup({entry});
+  try {
+    await fs.writeFile(path.join(skillDir, 'assets/ytNewsStyle01V4.entry.reference.tsx'), entry);
+    return await fn({composerDir, skillDir});
+  } finally { await fs.rm(d, {recursive: true}); }
+}
+const uniqueIds = r => [...new Set(ids(r))];
+
+test('entry registering two compositions, none, another id, or a second registerRoot is entry-registration', async () => {
+  const line = entryReference.split('\n').find(l => l.includes('<Composition id="YtNewsStyle01V4"'));
   assert.ok(line);
-  const {d, composerDir, skillDir} = await setup({root: realRoot.replace(line, line + '\n' + line)});
+  await withEntry(entryReference.replace(line, line + '\n' + line), async env => assert.deepEqual(uniqueIds(await checkIntegrity(env)), ['entry-registration']));
+  await withEntry(entryReference.replace(line, ''), async env => assert.deepEqual(uniqueIds(await checkIntegrity(env)), ['entry-registration']));
+  await withEntry(entryReference.replace('id="YtNewsStyle01V4"', 'id="YtNewsStyle01V3"'), async env => assert.deepEqual(uniqueIds(await checkIntegrity(env)), ['entry-registration']));
+  await withEntry(entryReference.replace('calculateMetadata={calculateYtNewsStyle01V4Metadata}', ''), async env => assert.deepEqual(uniqueIds(await checkIntegrity(env)), ['entry-registration']));
+  await withEntry(entryReference + '\nregisterRoot(YtNewsStyle01V4Root);\n', async env => assert.deepEqual(uniqueIds(await checkIntegrity(env)), ['entry-registration']));
+  // a mention in a comment does not count
+  await withEntry(entryReference + '\n// <Composition id="Other" registerRoot(x)\n', async env => assert.deepEqual((await checkIntegrity(env)).issues, []));
+});
+
+test('entry importing Root.tsx, index.tsx or any other pipeline file is entry-closure; an unresolvable import too', async () => {
+  for (const specifier of ['./Root', './index', './YtNewsStyle01V3']) {
+    const {d, composerDir, skillDir} = await setup({entry: entryReference + `\nimport "${specifier}";\n`});
+    try {
+      await fs.writeFile(path.join(composerDir, 'src/Root.tsx'), 'export const Root = null;\n');   // small enough to resolve
+      await fs.writeFile(path.join(composerDir, 'src/index.tsx'), 'export {};\n');
+      await fs.writeFile(path.join(composerDir, 'src/YtNewsStyle01V3.tsx'), 'export {};\n');
+      await fs.writeFile(path.join(skillDir, 'assets/ytNewsStyle01V4.entry.reference.tsx'), entryReference + `\nimport "${specifier}";\n`);
+      const r = await checkIntegrity({composerDir, skillDir});
+      assert.deepEqual(uniqueIds(r), ['entry-closure'], specifier);
+      assert.match(r.issues[0].message, /not V4-owned/);
+    } finally { await fs.rm(d, {recursive: true}); }
+  }
+  await withEntry(entryReference + '\nimport "./nope";\n', async env => {
+    const r = await checkIntegrity(env);
+    assert.deepEqual(uniqueIds(r), ['entry-closure']);
+    assert.match(r.issues[0].message, /cannot be resolved/);
+  });
+});
+
+test('an import that the engine would pull in from another pipeline file is entry-closure (transitive)', async () => {
+  const {d, composerDir, skillDir} = await setup({engine: reference + '\nimport "./other";\n'});
   try {
-    assert.deepEqual([...new Set(ids(await checkIntegrity({composerDir, skillDir})))], ['root-registration']);
-    await fs.writeFile(path.join(composerDir, 'src/Root.tsx'), realRoot.replace(line, ''));
-    assert.deepEqual([...new Set(ids(await checkIntegrity({composerDir, skillDir})))], ['root-registration']);
-    // registered without calculateMetadata
-    await fs.writeFile(path.join(composerDir, 'src/Root.tsx'), realRoot.replace('calculateMetadata={calculateYtNewsStyle01V4Metadata}', ''));
-    assert.ok(ids(await checkIntegrity({composerDir, skillDir})).includes('root-registration'));
+    await fs.writeFile(path.join(composerDir, 'src/other.ts'), 'export {};\n');
+    await fs.writeFile(path.join(skillDir, 'assets/YtNewsStyle01V4.reference.tsx'), reference + '\nimport "./other";\n');
+    const r = await checkIntegrity({composerDir, skillDir});
+    assert.deepEqual(uniqueIds(r), ['entry-closure']);
+    assert.match(r.issues[0].message, /src\/other\.ts/);
   } finally { await fs.rm(d, {recursive: true}); }
+});
+
+test('EXTERNAL_LOCK_FILES = the V4-owned composer files, repo-relative; --list-external prints them one per line', async () => {
+  assert.deepEqual([...EXTERNAL_LOCK_FILES], V4_OWNED_FILES.map(f => `remotion-composer/${f}`));
+  assert.ok(EXTERNAL_LOCK_FILES.includes('remotion-composer/src/ytNewsStyle01V4.entry.tsx'));
+  assert.ok(!EXTERNAL_LOCK_FILES.some(f => /Root\.tsx|index\.tsx/.test(f)));
+  const {stdout} = await execFileP(process.execPath, [path.join(realSkill, 'scripts/gate_integrity.mjs'), '--list-external']);
+  assert.equal(stdout, EXTERNAL_LOCK_FILES.join('\n') + '\n');
+  for (const rel of EXTERNAL_LOCK_FILES) await fs.access(path.join(worktree, rel));
 });
 
 const LOCKED = 'export const locked = 1;\n';

@@ -11,6 +11,19 @@ const same=(a,b)=>Buffer.compare(fs.readFileSync(a),fs.readFileSync(b))===0;
 test('engine in remotion-composer/src is byte-identical to the skill reference copy',()=>{
  assert.ok(same(src('YtNewsStyle01V4.tsx'),asset('YtNewsStyle01V4.reference.tsx')),'YtNewsStyle01V4.tsx differs from assets/YtNewsStyle01V4.reference.tsx');
 });
+test('V4 entry in remotion-composer/src is byte-identical to the skill reference copy',()=>{
+ assert.ok(same(src('ytNewsStyle01V4.entry.tsx'),asset('ytNewsStyle01V4.entry.reference.tsx')),'ytNewsStyle01V4.entry.tsx differs from assets/ytNewsStyle01V4.entry.reference.tsx');
+});
+test('the real entry registers only YtNewsStyle01V4 and imports nothing outside the V4 files (no Root / index)',()=>{
+ const text=fs.readFileSync(src('ytNewsStyle01V4.entry.tsx'),'utf8');
+ const code=text.split('\n').filter(l=>!/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
+ assert.equal((code.match(/<Composition\b/g)||[]).length,1);
+ assert.equal((code.match(/registerRoot\(/g)||[]).length,1);
+ assert.match(code,/<Composition id="YtNewsStyle01V4" component=\{YtNewsStyle01V4\} width=\{1920\} height=\{1080\} fps=\{25\}/);
+ const specifiers=[...code.matchAll(/from\s+["']([^"']+)["']/g)].map(m=>m[1]).sort();
+ assert.deepEqual(specifiers,['./YtNewsStyle01V4','./ytNewsStyle01V4Sample.json','./ytNewsStyle01V4SampleCaptions.json','remotion']);
+ assert.match(text,/npx remotion studio src\/ytNewsStyle01V4\.entry\.tsx/);
+});
 test('sample episode and sample captions are byte-identical to their reference twins',()=>{
  assert.ok(same(src('ytNewsStyle01V4Sample.json'),asset('ytNewsStyle01V4Episode.reference.json')),'sample episode differs from its reference twin');
  assert.ok(same(src('ytNewsStyle01V4SampleCaptions.json'),asset('ytNewsStyle01V4Captions.reference.json')),'sample captions differ from their reference twin');

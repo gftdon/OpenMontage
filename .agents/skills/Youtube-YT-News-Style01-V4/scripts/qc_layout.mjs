@@ -34,7 +34,7 @@ import {promisify} from 'node:util';
 import {randomUUID} from 'node:crypto';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {
-  COMPOSITION_ID, buildManifest, canonicalJSON, computeBundleCodeKey, computeSourceHashes, appendInvocation,
+  COMPOSITION_ID, buildManifest, canonicalJSON, computeBundleCodeKey, computeSourceHashes, appendInvocation, entryPointOf,
   readInvocations, readJson, readRemotionVersion, sha256File, sha256Hex, writeJsonAtomic,
 } from './qc_manifest.mjs';
 import {
@@ -394,7 +394,7 @@ export async function ensureBundle({composer, runDir, makePublicDir, rebuild = f
   await fs.rm(outDir, {recursive: true, force: true});
   const publicDir = await makePublicDir();
   try {
-    await bundle({entryPoint: path.join(composer, 'src', 'index.tsx'), publicDir, outDir: tmpDir});
+    await bundle({entryPoint: entryPointOf(composer), publicDir, outDir: tmpDir});
   } finally {
     await stopEsbuild(composer);
     // The bundle holds its own copy of public/; the staging dir (hardlinks, or copies across volumes) is no longer needed.
@@ -531,7 +531,7 @@ export async function run(argv, deps = {}) {
     const sourceHashes = await computeSourceHashes({composerDir: composer, skillDir, episodePath: path.resolve(args.episode), captionsPath: path.resolve(args.captions)});
     const mediaDigest = {...(await digestDir(path.join(composer, 'public', episode.assetDir), {cacheFile})), assetDir: episode.assetDir};
     const fontsDigest = {...(await digestDir(path.join(composer, 'public', 'fonts'), {cacheFile})), assetDir: 'fonts'};
-    // bundleKey = code part only (every file under src + lockfile + remotion version); the public part of
+    // bundleKey = code part only (the entry's import closure + lockfile + remotion version); the public part of
     // the bundle is covered by mediaDigest / fontsDigest, so a media change is reported under its own name.
     const bundleKey = await computeBundleCodeKey({composerDir: composer});
     const current = {
