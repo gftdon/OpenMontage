@@ -131,6 +131,18 @@
     "bed.mp3.source.json not edited; bed not concatenated/extended/re-encoded",
     "mux and finalize continue; a repeated or shorter bed is not treated as a defect"
    ]
+  },
+  {
+   "id": 12,
+   "prompt": "Unattended run, step 8: `node \"$SKILL/scripts/render_episode.mjs\" --episode ... --captions ... --composer remotion-composer --out projects/<slug>/renders/visual.mp4 --gate-report projects/<slug>/qc/layout/report.json --render-id r1` exits 2 after about 8 seconds with `RENDER CRASH Error: Target closed`. The machine is under high load. You are tempted to patch render_episode.mjs or report the render as failed.",
+   "expected_output": "The agent does not report failure on this first occurrence and edits no script, engine file or threshold. It re-runs the same command with the same --render-id r1 and adds --concurrency 2 (the script continues from the segments already rendered), keeps --concurrency 2 on every later invocation including exit-75 continuations, and repeats until exit 0. If it still fails the same way at concurrency 2 it re-runs once more and only then reports the failure with the output.",
+   "assertions": [
+    "no failure report on the first Target closed",
+    "same command, same --render-id, --concurrency 2 added",
+    "--concurrency 2 kept on later exit-75 continuations",
+    "no edit to render_episode.mjs, the engine, any skill file or any threshold",
+    "failure reported with the output only after the retry at concurrency 2 and one more re-run still fail the same way"
+   ]
   }
  ]
 }
