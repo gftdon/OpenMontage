@@ -5,7 +5,7 @@ import path from 'node:path';
 const root=path.resolve(new URL('../../../../..',import.meta.url).pathname);
 const source=fs.readFileSync(path.join(root,'remotion-composer/src/YtNewsStyle01V4.tsx'),'utf8');
 const lines=source.split('\n');
-const beats=JSON.parse(source.match(/const BEATS[^=]*=\s*(\[.*?\n\]);/s)[1]);
+const beats=JSON.parse(fs.readFileSync(path.join(root,'remotion-composer/src/ytNewsStyle01V4Sample.json'),'utf8')).beats;
 test('headline backing and text share bounded entrance only for full-to-pip morph',()=>{
  assert.match(lines.find(l=>l.includes('const panelEntranceStart'))??'',/const panelEntranceStart=beat\.t\+\(delayPanelEntrance\?MODE_BLEND_SEC:0\)/);
  const panel=lines.find(l=>l.includes('gap:6,background:full?'))??'';

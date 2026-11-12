@@ -1,6 +1,8 @@
 import React,{useLayoutEffect} from 'react';
 import {Composition,registerRoot} from 'remotion';
 import {YtNewsStyle01V4} from '../../../../../../remotion-composer/src/YtNewsStyle01V4';
+import sampleEpisode from '../../../../../../remotion-composer/src/ytNewsStyle01V4Sample.json';
+import sampleCaptions from '../../../../../../remotion-composer/src/ytNewsStyle01V4SampleCaptions.json';
 // Negative fixture only. No test injection interface exists in the production composition.
 const Fixture:React.FC<{scenario?:string}>=({scenario='opaque'})=>{
  useLayoutEffect(()=>{
@@ -29,6 +31,6 @@ const Fixture:React.FC<{scenario?:string}>=({scenario='opaque'})=>{
   }
   root.append(el);return()=>el.remove();
  },[scenario]);
- return <YtNewsStyle01V4 qcMeasure qcPlan/>;
+ return <YtNewsStyle01V4 qcMeasure qcPlan episode={sampleEpisode as never} captions={sampleCaptions as never}/>;
 };
 registerRoot(()=> <Composition id="NegativeDom" component={Fixture} width={1920} height={1080} fps={25} durationInFrames={8525} defaultProps={{scenario:'opaque'}}/>);

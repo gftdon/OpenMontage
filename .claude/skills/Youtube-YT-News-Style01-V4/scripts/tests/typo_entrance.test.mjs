@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 const root=path.resolve(new URL('../../../../..',import.meta.url).pathname);
 const source=fs.readFileSync(path.join(root,'remotion-composer/src/YtNewsStyle01V4.tsx'),'utf8');
+const sampleBeats=JSON.parse(fs.readFileSync(path.join(root,'remotion-composer/src/ytNewsStyle01V4Sample.json'),'utf8')).beats;
 test('primary typography waits for full-avatar morph, then keeps bounded entrance',()=>{
  assert.match(source.split("\n").find(line=>line.includes("const typoEntranceStart"))??"",/const typoEntranceStart=Math\.max\(typoCard\?\.t\?\?beat\.t,beat\.t\+\(previous\.mode==="full"\?MODE_BLEND_SEC:0\)\)/);
  assert.match(source.split("\n").find(line=>line.includes("beat.media===\"typo\"&&<div"))??"",/beat\.media==="typo"[^\n]+boundedEntrance\(t,typoEntranceStart,fps\)/);
@@ -12,8 +13,7 @@ test('primary typography waits for full-avatar morph, then keeps bounded entranc
 });
 test('actual failing frames precede morph completion, later cards do not replay initial delay',()=>{
  const duration=Number(source.match(/const MODE_BLEND_SEC = ([\d.]+);/)[1]);
- const start=source.indexOf('const BEATS');
- const beats=JSON.parse(source.slice(source.indexOf('[',source.indexOf('=',start)),source.indexOf('\n];',start)+2));
+ const beats=sampleBeats;
  for(const frame of [1870,2870,3594]){
   const index=beats.findLastIndex(b=>frame/25>=b.t);const beat=beats[index];
   assert.equal(beat.media,'typo');assert.equal(beats[index-1].mode,'full');

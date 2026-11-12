@@ -13,8 +13,7 @@ import {
   useVideoConfig,
   CalculateMetadataFunction,
 } from "remotion";
-import { CAPTION_PAGES } from "./ytNewsStyle01V4Captions";
-type WebRect = {x:number;y:number;w:number;h:number};
+export type WebRect = {x:number;y:number;w:number;h:number};
 
 // ===========================================================================
 // YtNewsStyle01V4 — 16:9 AI-news report (1920x1080@25)
@@ -42,62 +41,18 @@ const FONT = '"KanitX", "Kanit", system-ui, -apple-system, sans-serif';
 const MONO = '"SF Mono", "JetBrains Mono", Menlo, monospace';
 
 // ---- Timing ---------------------------------------------------------------
-const VO_END_SEC = 336.5;
-const TOTAL_DURATION_SEC = 341.0; // + 4.5 s endcard
 const MODE_BLEND_SEC = 0.55;
-
-// ---- Episode config (swap per episode — every on-screen string lives here) --
-const EPISODE = {
-  assetDir: "REPLACE_MEDIA_DIR", // public/<assetDir>/{avatar_source.mp4, broll/, web/}
-  brand: "AI TECH NEWS",
-  dateLabel: "7 พ.ย. 2026",
-  page: { domain: "youtube.com", path: "/watch?v=9ZxCOHkfn_8" },
-  officialTag: "SOURCE · OPENAI",
-  breakingLabel: "BREAKING NEWS",
-  cta: "คุณจะนำ AI ไปใช้งานอะไร?",
-  endcard: {
-    eyebrow: "AI TECH NEWS · NOVEMBER 2026",
-    titleA: "GPT-Image-2.6",
-    titleB: "Faster with Flare & Sunburst",
-    cta: "คุณจะนำ AI ไปใช้งานอะไร?",
-  },
-};
 
 // ---- Stage geometry (locked) ----------------------------------------------
 const W = 1920;
 const H = 1080;
-// ---- B-roll durations (public/<assetDir>/broll, 1080p25) -------------------
-const BROLL_DUR: Record<string, number> = {
-  "ai_layout_draft_final": 9.2,
-  "artist_drawing_notebook": 15.04,
-  "boutique_customer_sale": 19.44,
-  "coding_developer_illustration": 10.0,
-  "content_editor_workflow": 26.32,
-  "developer_api_integration": 12.32,
-  "developer_new_function": 30.0,
-  "drinking_water_glass": 30.0,
-  "hourglass_waiting": 14.88,
-  "painter_detail_brush": 9.0,
-  "photographer_for_images": 10.04,
-  "printing_posters_press": 11.44,
-  "product_shot_milk": 27.48,
-  "rough_layout_pencil": 17.48,
-  "tablet_photo_editing": 12.4,
-  "team_brainstorming_board": 14.48,
-  "yt_complexity_variants": 7.68,
-  "yt_intro_title": 4.52,
-  "yt_markup_experiment": 6.6,
-  "yt_prompt_create": 5.52,
-  "yt_prompt_iteration": 5.68,
-  "yt_table_texture": 3.2
-};
 
 // ---- Beat model -----------------------------------------------------------
-interface CamKey { t: number; fy: number; z: number; fx?: number }
-interface Highlight { t: number; key?: string; rect?: WebRect; pad?: number }
-interface Stat { t: number; big?: string; label: string; tone?: "amber" | "mint" | "clay" }
+export interface CamKey { t: number; fy: number; z: number; fx?: number }
+export interface Highlight { t: number; key?: string; rect?: WebRect; pad?: number }
+export interface Stat { t: number; big?: string; label: string; tone?: "amber" | "mint" | "clay" }
 
-interface Beat {
+export interface Beat {
   captionLane?: "top" | "bottom";
   cards?: {t:number;lines:string[]}[];
   origin?: "source" | "stock" | "ai";
@@ -124,535 +79,58 @@ interface Beat {
   lower?: { title: string; sub: string; t?: number; dur?: number };
 }
 
-// ---- BEATS (Every footage file appears in AT MOST ONE BEAT) ---------------
-const BEATS: Beat[] = [
-  {
-    "t": 0.0,
-    "mode": "full",
-    "lower": {
-      "title": "GPT-IMAGE-2.6 IS HERE",
-      "sub": "GPT-Image-2.6",
-      "t": 1.0,
-      "dur": 5.5
-    }
-  },
-  {
-    "t": 6.84,
-    "mode": "pip",
-    "media": "broll",
-    "src": "photographer_for_images",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "หารูปภาพไปประกอบงาน",
-    "sub": "เลือกรูปให้เหมาะกับงานที่ต้องการสื่อ"
-  },
-  {
-    "t": 14.34,
-    "mode": "pip",
-    "media": "broll",
-    "src": "artist_drawing_notebook",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "งานวาดภาพด้วยมือ",
-    "sub": "เริ่มลงมือวาดภาพด้วยดินสอ"
-  },
-  {
-    "t": 17.98,
-    "mode": "full"
-  },
-  {
-    "t": 23.48,
-    "mode": "pip",
-    "media": "clip",
-    "src": "yt_prompt_create",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "captionLane": "top",
-    "kicker": "SOURCE DEMO",
-    "headline": "จากข้อความสู่ภาพ",
-    "sub": "พิมพ์สิ่งที่อยากเห็น แล้วดูภาพที่ได้"
-  },
-  {
-    "t": 28.76,
-    "mode": "pip",
-    "media": "broll",
-    "src": "hourglass_waiting",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "ช่วงเวลาที่ต้องรอภาพ",
-    "sub": "การรอภาพเป็นส่วนหนึ่งของการทำงาน"
-  },
-  {
-    "t": 36.76,
-    "mode": "full",
-    "punch": [
-      {
-        "t": 44.76,
-        "z": 1.2,
-        "fx": 0.5,
-        "fy": 0.5
-      }
-    ]
-  },
-  {
-    "t": 47.82,
-    "mode": "pip",
-    "media": "clip",
-    "src": "yt_intro_title",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "captionLane": "top",
-    "kicker": "SOURCE DEMO",
-    "headline": "GPT-Image-2.6",
-    "sub": "ทำความรู้จัก Flare และ Sunburst"
-  },
-  {
-    "t": 52.14,
-    "mode": "pip",
-    "media": "broll",
-    "src": "developer_api_integration",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "API และเครื่องมือเขียนโปรแกรม",
-    "sub": "เชื่อมงานภาพเข้ากับเครื่องมือพัฒนา"
-  },
-  {
-    "t": 59.78,
-    "mode": "pip",
-    "media": "typo",
-    "src": "speed_overview",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "IDEA TO IMAGE",
-    "headline": "จากไอเดียสู่ภาพ",
-    "sub": "ลองเปลี่ยนความคิดให้เป็นภาพ",
-    "cards": [
-      {
-        "t": 59.78,
-        "lines": [
-          "พิมพ์สิ่งที่อยากเห็น",
-          "ดูภาพ แล้วทดลองต่อ"
-        ]
-      }
-    ]
-  },
-  {
-    "t": 65.2,
-    "mode": "full",
-    "punch": [
-      {
-        "t": 73.2,
-        "z": 1.2,
-        "fx": 0.65,
-        "fy": 0.5
-      }
-    ]
-  },
-  {
-    "t": 74.68,
-    "mode": "pip",
-    "media": "typo",
-    "src": "model_names",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "IDEA TO IMAGE",
-    "headline": "Flare และ Sunburst",
-    "sub": "ระบบสร้างภาพในตระกูล GPT-Image",
-    "cards": [
-      {
-        "t": 74.68,
-        "lines": [
-          "GPT-Image-2.6",
-          "Flare · Sunburst"
-        ]
-      }
-    ]
-  },
-  {
-    "t": 82.2,
-    "mode": "full"
-  },
-  {
-    "t": 88.62,
-    "mode": "pip",
-    "media": "broll",
-    "src": "rough_layout_pencil",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "เริ่มจากภาพร่างและองค์ประกอบ",
-    "sub": "ลองตำแหน่งและองค์ประกอบก่อนลงรายละเอียด"
-  },
-  {
-    "t": 96.62,
-    "mode": "full"
-  },
-  {
-    "t": 104.68,
-    "mode": "pip",
-    "media": "broll",
-    "src": "painter_detail_brush",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "รายละเอียดในงานภาพ",
-    "sub": "ค่อยๆ เติมสีและเก็บรายละเอียดของภาพ"
-  },
-  {
-    "t": 108.64,
-    "mode": "pip",
-    "media": "clip",
-    "src": "yt_table_texture",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "captionLane": "top",
-    "kicker": "SOURCE DEMO",
-    "headline": "พื้นผิว แสง และองค์ประกอบ",
-    "sub": "มองแสงเงาและพื้นผิวในภาพให้ชัดขึ้น"
-  },
-  {
-    "t": 111.64,
-    "mode": "full"
-  },
-  {
-    "t": 114.66,
-    "mode": "pip",
-    "media": "typo",
-    "typo": "vs",
-    "src": "workflow_cards",
-    "kicker": "WORKFLOW COMPARISON",
-    "headline": "มองภาพรวม แล้วพิจารณารายละเอียด",
-    "sub": "เริ่มจากภาพรวม แล้วค่อยปรับส่วนต่างๆ",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "cards": [
-      {
-        "t": 114.66,
-        "lines": [
-          "ภาพร่างและองค์ประกอบ",
-          "เริ่มจากสิ่งที่อยากสื่อ"
-        ]
-      },
-      {
-        "t": 122,
-        "lines": [
-          "พื้นผิวและแสงเงา",
-          "พิจารณารายละเอียดของภาพ"
-        ]
-      },
-      {
-        "t": 129,
-        "lines": [
-          "ทดลอง แล้วปรับไอเดีย",
-          "เลือกภาพที่สื่อสารงานได้"
-        ]
-      }
-    ]
-  },
-  {
-    "t": 136.86,
-    "mode": "full"
-  },
-  {
-    "t": 143.62,
-    "mode": "pip",
-    "media": "typo",
-    "src": "speed_neutral",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "IDEA TO IMAGE",
-    "headline": "จากไอเดียสู่ภาพได้เร็วขึ้น",
-    "sub": "ทดลองภาพ แล้วปรับไอเดียต่อ",
-    "cards": [
-      {
-        "t": 143.62,
-        "lines": [
-          "ทดลองภาพจากข้อความ",
-          "ปรับไอเดียแล้วดูผล"
-        ]
-      }
-    ]
-  },
-  {
-    "t": 153.02,
-    "mode": "full"
-  },
-  {
-    "t": 156.84,
-    "mode": "pip",
-    "media": "clip",
-    "src": "yt_prompt_iteration",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "captionLane": "top",
-    "kicker": "SOURCE DEMO",
-    "headline": "ลองสร้างภาพจาก prompt",
-    "sub": "พิมพ์คำอธิบายเพื่อทดลองภาพที่ต้องการ"
-  },
-  {
-    "t": 162.34,
-    "mode": "full"
-  },
-  {
-    "t": 166.26,
-    "mode": "pip",
-    "media": "broll",
-    "src": "drinking_water_glass",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "ภาพเปรียบในชีวิตประจำวัน",
-    "sub": "นึกถึงจังหวะสั้นๆ ในชีวิตประจำวัน"
-  },
-  {
-    "t": 171.8,
-    "mode": "pip",
-    "media": "clip",
-    "src": "yt_markup_experiment",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "captionLane": "top",
-    "kicker": "SOURCE DEMO",
-    "headline": "ทดลองปรับภาพด้วย markup",
-    "sub": "เลือกจุดที่ต้องการแก้ แล้วดูผลลัพธ์"
-  },
-  {
-    "t": 178.2,
-    "mode": "full",
-    "punch": [
-      {
-        "t": 186.2,
-        "z": 1.2,
-        "fx": 0.5,
-        "fy": 0.5
-      },
-      {
-        "t": 194.2,
-        "z": 1,
-        "fx": 0.5,
-        "fy": 0.5
-      }
-    ]
-  },
-  {
-    "t": 197.12,
-    "mode": "pip",
-    "media": "clip",
-    "src": "yt_complexity_variants",
-    "origin": "source",
-    "layout": "full",
-    "chrome": true,
-    "captionLane": "top",
-    "kicker": "SOURCE DEMO",
-    "headline": "ลองตัวเลือกภาพหลายแบบ",
-    "sub": "เปรียบเทียบภาพจากตัวเลือกที่ต่างกัน"
-  },
-  {
-    "t": 204.6,
-    "mode": "full",
-    "punch": [
-      {
-        "t": 212.6,
-        "z": 1.2,
-        "fx": 0.5,
-        "fy": 0.5
-      },
-      {
-        "t": 220.6,
-        "z": 1,
-        "fx": 0.5,
-        "fy": 0.5
-      }
-    ]
-  },
-  {
-    "t": 222.76,
-    "mode": "pip",
-    "media": "broll",
-    "src": "product_shot_milk",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "ภาพสินค้าและการจัดฉาก",
-    "sub": "ลองคิดฉากและองค์ประกอบสำหรับสินค้า"
-  },
-  {
-    "t": 230.76,
-    "mode": "full",
-    "punch": [
-      {
-        "t": 238.76,
-        "z": 1.2,
-        "fx": 0.5,
-        "fy": 0.5
-      }
-    ]
-  },
-  {
-    "t": 243.52,
-    "mode": "pip",
-    "media": "broll",
-    "src": "printing_posters_press",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "งานพิมพ์และสื่อประชาสัมพันธ์",
-    "sub": "เตรียมภาพไปใช้กับสื่อสิ่งพิมพ์"
-  },
-  {
-    "t": 250.96,
-    "mode": "pip",
-    "media": "broll",
-    "src": "ai_layout_draft_final",
-    "origin": "ai",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE CONCEPT",
-    "headline": "ภาพร่างสำหรับจัดวางข้อความ",
-    "sub": "เห็นพื้นที่ว่างสำหรับเติมข้อความ"
-  },
-  {
-    "t": 259.4,
-    "mode": "pip",
-    "media": "broll",
-    "src": "team_brainstorming_board",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "นำภาพมาคุยร่วมกันในทีม",
-    "sub": "ใช้ภาพช่วยแลกเปลี่ยนไอเดียในทีม"
-  },
-  {
-    "t": 267.4,
-    "mode": "full"
-  },
-  {
-    "t": 277.1,
-    "mode": "pip",
-    "media": "broll",
-    "src": "coding_developer_illustration",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "นำระบบภาพไปใช้ในงานพัฒนา",
-    "sub": "ต่อยอดระบบภาพในงานเขียนโปรแกรม"
-  },
-  {
-    "t": 285.86,
-    "mode": "pip",
-    "media": "broll",
-    "src": "developer_new_function",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "พัฒนาฟังก์ชันเกี่ยวกับภาพ",
-    "sub": "สร้างเครื่องมือให้ทำงานกับภาพได้"
-  },
-  {
-    "t": 294.66,
-    "mode": "pip",
-    "media": "broll",
-    "src": "tablet_photo_editing",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "งานปรับแต่งภาพในแอป",
-    "sub": "ปรับส่วนต่างๆ ของภาพบนหน้าจอ"
-  },
-  {
-    "t": 303.3,
-    "mode": "full"
-  },
-  {
-    "t": 306.46,
-    "mode": "pip",
-    "media": "broll",
-    "src": "content_editor_workflow",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "เวิร์กโฟลว์ของคนทำคอนเทนต์",
-    "sub": "เตรียมสื่อสำหรับงานคอนเทนต์"
-  },
-  {
-    "t": 311.92,
-    "mode": "full"
-  },
-  {
-    "t": 316.54,
-    "mode": "pip",
-    "media": "broll",
-    "src": "boutique_customer_sale",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "kicker": "ILLUSTRATIVE FOOTAGE",
-    "headline": "งานขายและการดูแลร้าน",
-    "sub": "แบ่งเวลาไปดูแลงานขายและร้านค้า"
-  },
-  {
-    "t": 322.68,
-    "mode": "pip",
-    "media": "typo",
-    "typo": "summary3",
-    "src": "summary_cards",
-    "kicker": "FINAL RECAP",
-    "headline": "GPT-Image-2.6 กับงานภาพ",
-    "sub": "ทดลองไอเดียและสร้างสื่อประกอบ",
-    "origin": "stock",
-    "layout": "stage",
-    "chrome": false,
-    "cards": [
-      {
-        "t": 322.68,
-        "lines": [
-          "Flare · Sunburst",
-          "ชื่อโมเดลจากต้นทาง"
-        ]
-      },
-      {
-        "t": 329.5,
-        "lines": [
-          "ภาพประกอบในงานประจำวัน",
-          "ทดลองไอเดียและสื่อสารร่วมกัน"
-        ]
-      }
-    ]
-  },
-  {
-    "t": 334.14,
-    "mode": "full"
-  }
-];
+// ---- Episode data (passed in as Remotion props; the engine holds NO episode data) ----
+// Transitional shape (step 1): the V3 field names 1:1. The v1 schema comes in a later step.
+export interface EpisodeData {
+  schema: "yt-news-v4-episode/0";
+  assetDir: string; // public/<assetDir>/{avatar_source.mp4, broll/, web/}
+  brand: string;
+  dateLabel: string;
+  page: { domain: string; path: string };
+  officialTag: string;
+  breakingLabel: string;
+  cta: string;
+  endcard: { eyebrow: string; titleA: string; titleB: string; cta: string };
+  brollDur: Record<string, number>; // seconds, public/<assetDir>/broll, 1080p25
+  voEndSec: number;
+  totalDurationSec: number; // voEndSec + endcard
+  ctaT: number;
+  beats: Beat[]; // every footage file appears in AT MOST ONE BEAT
+}
 
-const CTA_T = 334.5;
+export interface CaptionWord { w: string; s: number; e: number }
+export interface CaptionChunk { text: string; spaceBefore: string; displaySpaceBefore: string; tokens: CaptionWord[]; sourceTokens?: CaptionWord[]; merged_from: number[]; scriptStart: number; scriptEnd: number; displayStart: number; displayEnd: number; displayBoundReason: string }
+export interface CaptionPage { start: number; end: number; text: string; leadingWhitespace: string; displayText: string; boundReason: string; chunks: CaptionChunk[]; words: CaptionWord[] }
+export interface CaptionData { schema: number; algorithm: string; inputSha256: string; pages: CaptionPage[] }
+
+// Minimal fail-closed guard (the full schema validator comes in a later step).
+export function checkEpisodeMinimal(ep: unknown, cap: unknown): string[] {
+  const errs: string[] = [];
+  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  const fin = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  if (!isObj(ep)) errs.push("episode must be an object");
+  else {
+    if (ep.schema !== "yt-news-v4-episode/0") errs.push("episode.schema must be \"yt-news-v4-episode/0\"");
+    if (typeof ep.assetDir !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(ep.assetDir)) errs.push("episode.assetDir must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    if (!Array.isArray(ep.beats) || ep.beats.length === 0) errs.push("episode.beats must be a non-empty array");
+    else {
+      let prev = -Infinity;
+      ep.beats.forEach((b: unknown, i: number) => {
+        const t = isObj(b) ? b.t : undefined;
+        if (!fin(t)) errs.push(`episode.beats[${i}].t must be a finite number`);
+        else {
+          if ((t as number) <= prev) errs.push(`episode.beats[${i}].t must be strictly greater than the previous beat`);
+          prev = t as number;
+        }
+      });
+    }
+    for (const k of ["voEndSec", "totalDurationSec", "ctaT"]) if (!fin(ep[k])) errs.push(`episode.${k} must be a finite number`);
+  }
+  if (!isObj(cap)) errs.push("captions must be an object");
+  else if (!Array.isArray(cap.pages)) errs.push("captions.pages must be an array");
+  return errs;
+}
+
 
 // ---- Fonts ----------------------------------------------------------------
 let fontReady: Promise<void> | null = null;
@@ -695,7 +173,7 @@ const tone = (k?: string) => (k === "mint" ? MINT : k === "clay" ? CLAY : AMBER)
 
 // ---- V3 presentation: explicit, non-overlapping text lanes -----------------
 const TextField: React.FC<{id:string;role?:"read"|"label";style?:React.CSSProperties;children:React.ReactNode}> = ({id,role="read",style,children}) => <div data-qc-field={id} data-qc-role={role} style={{fontFamily:FONT,fontSize:role==="label"?24:30,fontWeight:700,lineHeight:1.55,color:CREAM,...style}}>{children}</div>;
-const CaptionLane: React.FC<{t:number;lane:"top"|"bottom"}> = ({t,lane}) => {
+const CaptionLane: React.FC<{t:number;lane:"top"|"bottom";pages:CaptionPage[]}> = ({t,lane,pages:CAPTION_PAGES}) => {
   const page=CAPTION_PAGES.find(p=>t>=p.start&&t<p.end);
   if(!page)return null;
   return <div style={{position:"absolute",left:116,right:lane==="top"?undefined:116,width:lane==="top"?650:undefined,bottom:lane==="bottom"?66:undefined,top:lane==="top"?248:undefined,display:"flex",justifyContent:lane==="top"?"flex-start":"center",zIndex:60}}>
@@ -704,7 +182,7 @@ const CaptionLane: React.FC<{t:number;lane:"top"|"bottom"}> = ({t,lane}) => {
     </div>
   </div>;
 };
-const EndCard: React.FC = () => <div style={{position:"absolute",inset:0,background:NAVY,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24,zIndex:90}}>
+const EndCard: React.FC<{episode:EpisodeData}> = ({episode:EPISODE}) => <div style={{position:"absolute",inset:0,background:NAVY,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24,zIndex:90}}>
   <TextField id="end-label" role="label" style={{color:AMBER}}>{EPISODE.endcard.eyebrow}</TextField>
   <TextField id="end-title" style={{fontSize:64}}>{EPISODE.endcard.titleA}</TextField>
   <TextField id="end-sub" style={{fontSize:36,color:AMBER}}>{EPISODE.endcard.titleB}</TextField>
@@ -712,8 +190,9 @@ const EndCard: React.FC = () => <div style={{position:"absolute",inset:0,backgro
 </div>;
 
 // QC is observation-only: production has no layout injection or media substitution.
-const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat}> = ({enabled,plan,frame,beat}) => {
+const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat;episode:EpisodeData;captions:CaptionData}> = ({enabled,plan,frame,beat,episode,captions}) => {
   const {fps}=useVideoConfig();
+  const EPISODE=episode;const BEATS=EPISODE.beats;const VO_END_SEC=EPISODE.voEndSec;const TOTAL_DURATION_SEC=EPISODE.totalDurationSec;const CTA_T=EPISODE.ctaT;const CAPTION_PAGES=captions.pages;
   useLayoutEffect(() => {
     if (!enabled && !plan) return;
     const handle=delayRender("V3 DOM measurement");
@@ -858,19 +337,28 @@ const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat}> =
 // ===========================================================================
 
 export type YtNewsStyle01V4Props = {
-  durationSec?: number;
+  episode: EpisodeData;
+  captions: CaptionData;
   qcPlan?: boolean;
   qcMeasure?: boolean;
 };
 
-export const calculateYtNewsStyle01V4Metadata: CalculateMetadataFunction<YtNewsStyle01V4Props> = async () => ({
-  durationInFrames: Math.ceil(TOTAL_DURATION_SEC * 25),
-  fps: 25,
-  width: W,
-  height: H,
-});
+export const calculateYtNewsStyle01V4Metadata: CalculateMetadataFunction<YtNewsStyle01V4Props> = async ({props}) => {
+  const errs = checkEpisodeMinimal(props.episode, props.captions);
+  if (errs.length) throw new Error("YtNewsStyle01V4 props invalid: " + errs.join("; "));
+  return {
+    durationInFrames: Math.ceil(props.episode.totalDurationSec * 25),
+    fps: 25,
+    width: W,
+    height: H,
+  };
+};
 
-export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = ({qcPlan=false,qcMeasure=false}) => {
+export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = (props) => {
+  const errs = checkEpisodeMinimal(props.episode, props.captions);
+  if (errs.length) throw new Error("YtNewsStyle01V4 props invalid: " + errs.join("; "));
+  const {qcPlan=false,qcMeasure=false}=props;
+  const EPISODE=props.episode;const BEATS=EPISODE.beats;const BROLL_DUR=EPISODE.brollDur;const VO_END_SEC=EPISODE.voEndSec;const TOTAL_DURATION_SEC=EPISODE.totalDurationSec;const CTA_T=EPISODE.ctaT;const CAPTION_PAGES=props.captions.pages;
   useThaiFonts();
   const frame=useCurrentFrame();const {fps}=useVideoConfig();const t=frame/fps;
   let index=0;BEATS.forEach((b,i)=>{if(t>=b.t)index=i;});const beat=BEATS[index];
@@ -893,7 +381,7 @@ export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = ({qcPlan=false,qc
   const panelEntranceStart=beat.t+(delayPanelEntrance?MODE_BLEND_SEC:0);
   const stageMotion={opacity:clamp01((t-beat.t)/.35),transform:`translateX(${(1-blend)*8}px)`};
   return <div data-qc-root style={{width:W,height:H,position:"relative",overflow:"hidden",background:NAVY}}>
-    <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat}/>
+    <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat} episode={EPISODE} captions={props.captions}/>
     {!isEnd&&<>
       <div data-qc-backing="solid" data-qc-occluder="topbar-backing" style={{background:full?"rgba(11,14,23,.9)":undefined,borderRadius:8,position:"absolute",zIndex:30,left:116,right:116,top:58,display:"flex",justifyContent:"space-between",alignItems:"center",height:48}}>
         <TextField id="brand" role="label" style={{color:AMBER}}>{EPISODE.brand} · {EPISODE.dateLabel}</TextField>
@@ -926,8 +414,8 @@ export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = ({qcPlan=false,qc
         <TextField id="lower-sub" style={{fontSize:28}}>{beat.lower.sub}</TextField>
       </div>}
       {t>=CTA_T&&<div style={{position:"absolute",zIndex:40,top:812,left:116,right:116,textAlign:"center",...boundedEntrance(t,CTA_T,fps)}}><TextField id="cta" style={{color:AMBER}}>{EPISODE.cta}</TextField></div>}
-      <CaptionLane t={t} lane={beat.captionLane??"bottom"}/>
+      <CaptionLane t={t} lane={beat.captionLane??"bottom"} pages={CAPTION_PAGES}/>
     </>}
-    {isEnd&&<EndCard/>}
+    {isEnd&&<EndCard episode={EPISODE}/>}
   </div>;
 };

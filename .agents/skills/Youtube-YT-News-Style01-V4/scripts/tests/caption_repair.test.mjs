@@ -53,7 +53,8 @@ test('real episode caption output exactly reproduces helper and has no leading d
  if(!fs.existsSync(artifact))return;
  const r=JSON.parse(fs.readFileSync(artifact));
  const {generateCaptionModule}=await import('../caption_join.mjs');
- assert.equal(fs.readFileSync(path.join(root,'remotion-composer/src/ytNewsStyle01V4Captions.ts'),'utf8'),generateCaptionModule(r));
+ const sample=JSON.parse(fs.readFileSync(path.join(root,'remotion-composer/src/ytNewsStyle01V4SampleCaptions.json'),'utf8'));
+ assert.deepEqual(sample,{schema:r.schema,algorithm:r.algorithm,inputSha256:r.inputSha256,pages:r.pages});
  assert.ok(r.pages.every(p=>!/^\s/u.test(p.displayText)&&!/^\s*[ๆฯ]/u.test(p.displayText)));
  assert.equal(r.diagnostics.unmatchedCharacters,0);
  assert.ok(r.pages.some(p=>p.displayText.includes('ลื่นไหล')));

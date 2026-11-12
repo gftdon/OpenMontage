@@ -1,5 +1,7 @@
 import { YtNewsStyle01V3, calculateYtNewsStyle01V3Metadata } from "./YtNewsStyle01V3";
 import { YtNewsStyle01V4, calculateYtNewsStyle01V4Metadata } from "./YtNewsStyle01V4";
+import ytNewsStyle01V4Sample from "./ytNewsStyle01V4Sample.json";
+import ytNewsStyle01V4SampleCaptions from "./ytNewsStyle01V4SampleCaptions.json";
 import { Composition, CalculateMetadataFunction } from "remotion";
 import { Explainer, ExplainerProps } from "./Explainer";
 import {
@@ -798,7 +800,7 @@ export const Root: React.FC = () => {
         } as EndTagProps}
       />
       <Composition id="YtNewsStyle01V3" component={YtNewsStyle01V3} width={1920} height={1080} fps={25} durationInFrames={8525} defaultProps={{}} calculateMetadata={calculateYtNewsStyle01V3Metadata} />
-      <Composition id="YtNewsStyle01V4" component={YtNewsStyle01V4} width={1920} height={1080} fps={25} durationInFrames={8525} defaultProps={{}} calculateMetadata={calculateYtNewsStyle01V4Metadata} />
+      <Composition id="YtNewsStyle01V4" component={YtNewsStyle01V4} width={1920} height={1080} fps={25} defaultProps={{ episode: ytNewsStyle01V4Sample, captions: ytNewsStyle01V4SampleCaptions } as never} calculateMetadata={calculateYtNewsStyle01V4Metadata} />
     </>
   );
 };
