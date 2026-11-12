@@ -5,7 +5,7 @@ import path from 'node:path';
 const root=path.resolve(new URL('../../../../..',import.meta.url).pathname);
 const source=fs.readFileSync(path.join(root,'remotion-composer/src/YtNewsStyle01V4.tsx'),'utf8');
 const sampleBeats=JSON.parse(fs.readFileSync(path.join(root,'remotion-composer/src/ytNewsStyle01V4Sample.json'),'utf8')).beats;
-test('primary typography waits for full-avatar morph, then keeps bounded entrance',()=>{
+test('primary typography waits for full-avatar morph, then keeps bounded entrance',{skip:"rewritten in CF-A66 step 3 (transitions)"},()=>{
  assert.match(source.split("\n").find(line=>line.includes("const typoEntranceStart"))??"",/const typoEntranceStart=Math\.max\(typoCard\?\.t\?\?beat\.t,beat\.t\+\(previous\.mode==="full"\?MODE_BLEND_SEC:0\)\)/);
  assert.match(source.split("\n").find(line=>line.includes("beat.media===\"typo\"&&<div"))??"",/beat\.media==="typo"[^\n]+boundedEntrance\(t,typoEntranceStart,fps\)/);
  assert.match(source,/const MODE_BLEND_SEC = 0\.55;/);

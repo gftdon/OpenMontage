@@ -3,7 +3,6 @@ import {
   OffthreadVideo,
   Loop,
   Sequence,
-  interpolate,
   spring,
   staticFile,
   continueRender,
@@ -13,124 +12,273 @@ import {
   useVideoConfig,
   CalculateMetadataFunction,
 } from "remotion";
-export type WebRect = {x:number;y:number;w:number;h:number};
 
 // ===========================================================================
-// YtNewsStyle01V4 — 16:9 AI-news report (1920x1080@25)
+// YtNewsStyle01V4 — 16:9 AI-news report (1920x1080@25), data-driven by episode schema v1
 // Format "Youtube-YT-News-Style01-V4":
-// Report subject: YOUTUBE VIDEO ("GPT-Image-2.6: Faster image generation with Flare and Sunburst")
-// Left stage: YouTube cuts in museum cards / full-bleed + fresh stock b-roll + typography scenes
-// Right stage: Continuous avatar morphing between full-frame and 9:16 vertical card
-// Timing spine: Whisper word-level timestamps + SRT calibrated
-// Regression media is reused; production freshness is NOT asserted.
+//   P = presenter full-bleed          S = browser-window stage + museum-card picture + presenter card
+//   T = browser-window stage + text card (card | summary3 | final4 | vs) + presenter card
+//   W = wide 16:9 source window, presenter hidden        E = end card
+// The engine holds NO episode data: `episode` and `captions` arrive as Remotion props.
+// Scene changes are plain cuts at the beat boundary (cross-fades come in a later step).
 // ===========================================================================
 
 // ---- Design tokens --------------------------------------------------------
 const NAVY = "#0B0E17";
 const NAVY_2 = "#141A2B";
+const NAVY_3 = "#0E1322";
 const CREAM = "#F5F1E8";
-const CREAM_DIM = "rgba(245,241,232,0.62)";
-const INK = "#1A1714";
+const CREAM_DIM = "#CFC9BE";
 const AMBER = "#F2B34C";
-const AMBER_DEEP = "#D98E1F";
 const CLAY = "#D97757";
 const MINT = "#8FD6B4";
 const GOLD = "#F59E0B"; // karaoke locked style
 const GOLD_LIGHT = "#FDE68A";
 const FONT = '"KanitX", "Kanit", system-ui, -apple-system, sans-serif';
-const MONO = '"SF Mono", "JetBrains Mono", Menlo, monospace';
 
 // ---- Timing ---------------------------------------------------------------
 const MODE_BLEND_SEC = 0.55;
 
-// ---- Stage geometry (locked) ----------------------------------------------
+// ---- Frame geometry (locked) ----------------------------------------------
 const W = 1920;
 const H = 1080;
 
-// ---- Beat model -----------------------------------------------------------
-export interface CamKey { t: number; fy: number; z: number; fx?: number }
-export interface Highlight { t: number; key?: string; rect?: WebRect; pad?: number }
-export interface Stat { t: number; big?: string; label: string; tone?: "amber" | "mint" | "clay" }
+// ===========================================================================
+// Episode schema v1 (types) — one definition shared with assets/episode.schema.json
+// ===========================================================================
+export type NormRect = { x: number; y: number; w: number; h: number };
+export type SrcCrop = { x: number; y: number; w: number; h: number }; // integer source px of the 1920x1080 frame
+export type Rect = { w: number; h: number };
+export type Tone = "amber" | "mint" | "clay";
+export interface Stat { at: number; dur: number; big?: string; label: string; tone?: Tone }
+export interface Punch { at: number; z: number; fx?: number; fy?: number }
+export interface Card { at: number; lines: string[] }
+export interface Item { at: number; text: string; icon?: string }
+export interface VsSide { title: string; badge: string; lines: string[] }
+export interface Vs { left: VsSide; right: VsSide; conclusion: string }
+export interface Lower { at: number; dur: number; title: string; sub: string }
 
 export interface Beat {
-  captionLane?: "top" | "bottom";
-  cards?: {t:number;lines:string[]}[];
-  origin?: "source" | "stock" | "ai";
-  layout?: "stage" | "full";
-  chrome?: boolean;
-  punch?: {t:number;z:number;fx?:number;fy?:number}[];
-  t: number;
-  mode: "full" | "pip";
-  media?: "broll" | "clip" | "typo";
-  kicker?: string;
-  file?: string;
-  cssH?: number;
-  cam?: CamKey[];
-  hl?: Highlight[];
+  t: number; // absolute seconds, beat start
+  mode: "full" | "pip"; // full = presenter full-bleed
+  media?: "broll" | "clip" | "typo"; // pip only
+  layout?: "stage" | "wide"; // pip only; wide = source clip only
   src?: string;
-  from?: number;
+  from?: number; // seconds into the public cut file (not into the original video)
+  origin?: "source" | "stock" | "ai";
+  srcCrop?: SrcCrop;
+  kicker?: string;
   headline?: string;
   sub?: string;
-  subT?: number;
-  idx?: string;
-  clipFit?: "cover" | "contain";
-  typo?: "summary3" | "vs" | "final4";
   stats?: Stat[];
-  lower?: { title: string; sub: string; t?: number; dur?: number };
+  punch?: Punch[]; // presenter-full beats only
+  typo?: "card" | "summary3" | "final4" | "vs";
+  cards?: Card[];
+  items?: Item[];
+  vs?: Vs;
+  lower?: Lower; // full beats only
 }
 
-// ---- Episode data (passed in as Remotion props; the engine holds NO episode data) ----
-// Transitional shape (step 1): the V3 field names 1:1. The v1 schema comes in a later step.
 export interface EpisodeData {
-  schema: "yt-news-v4-episode/0";
-  assetDir: string; // public/<assetDir>/{avatar_source.mp4, broll/, web/}
+  schema: "yt-news-v4-episode/1";
+  assetDir: string; // public/<assetDir>/
+  avatarFile: string; // public/<assetDir>/<avatarFile>
+  avatarFaceBox: NormRect; // face + hair box, normalised to the 1920x1080 avatar frame
+  fps: 25;
+  voEndSec: number; // narration end; the end card starts here
+  totalDurationSec: number; // voEndSec + 3..5
+  ctaT: number; // closing question appears (absolute s)
+  captionsInputSha256: string; // must equal captions.inputSha256
   brand: string;
   dateLabel: string;
-  page: { domain: string; path: string };
-  officialTag: string;
   breakingLabel: string;
+  officialTag: string;
+  page: { domain: string; path: string };
   cta: string;
   endcard: { eyebrow: string; titleA: string; titleB: string; cta: string };
-  brollDur: Record<string, number>; // seconds, public/<assetDir>/broll, 1080p25
-  voEndSec: number;
-  totalDurationSec: number; // voEndSec + endcard
-  ctaT: number;
-  beats: Beat[]; // every footage file appears in AT MOST ONE BEAT
+  brollDur: Record<string, number>; // src -> public mp4 duration in seconds (±1 frame)
+  beats: Beat[];
 }
 
 export interface CaptionWord { w: string; s: number; e: number }
-export interface CaptionChunk { text: string; spaceBefore: string; displaySpaceBefore: string; tokens: CaptionWord[]; sourceTokens?: CaptionWord[]; merged_from: number[]; scriptStart: number; scriptEnd: number; displayStart: number; displayEnd: number; displayBoundReason: string }
-export interface CaptionPage { start: number; end: number; text: string; leadingWhitespace: string; displayText: string; boundReason: string; chunks: CaptionChunk[]; words: CaptionWord[] }
-export interface CaptionData { schema: number; algorithm: string; inputSha256: string; pages: CaptionPage[] }
+export interface CaptionChunk { text: string; displaySpaceBefore: string; displayStart: number; displayEnd: number; spaceBefore?: string; tokens?: CaptionWord[]; sourceTokens?: CaptionWord[]; merged_from?: number[]; scriptStart?: number; scriptEnd?: number; displayBoundReason?: string }
+export interface CaptionPage { start: number; end: number; displayText: string; chunks: CaptionChunk[]; text?: string; leadingWhitespace?: string; boundReason?: string; words?: CaptionWord[] }
+export interface CaptionData { schema: number; algorithm: string; inputSha256: string; pages: CaptionPage[]; trailingSpace?: string; diagnostics?: unknown }
 
-// Minimal fail-closed guard (the full schema validator comes in a later step).
+export const V4_EPISODE_KEYS = ["schema", "assetDir", "avatarFile", "avatarFaceBox", "fps", "voEndSec", "totalDurationSec", "ctaT", "captionsInputSha256", "brand", "dateLabel", "breakingLabel", "officialTag", "page", "cta", "endcard", "brollDur", "beats"] as const;
+export const V4_BEAT_KEYS = ["t", "mode", "media", "layout", "src", "from", "origin", "srcCrop", "kicker", "headline", "sub", "stats", "punch", "typo", "cards", "items", "vs", "lower"] as const;
+
+// ===========================================================================
+// Engine-side check (fail-closed). Covers exactly what the renderer dereferences;
+// it is never stricter than scripts/episode_schema.mjs (agreement test proves it).
+// ===========================================================================
+const SRC_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+const DIR_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const MP4_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.mp4$/;
+const ICONS = ["✍️", "📊", "💻", "💡", "📄", "📝", "🧾", "🗣️", "🔎", "🤖", "🌅", "⚠️", "🧪", "⏱️", "🗒️", "▶️", "🌍", "🔓", "🛡️", "🧬", "🎭", "🚫", "🧠", "🚀", "💸", "✨"];
+
 export function checkEpisodeMinimal(ep: unknown, cap: unknown): string[] {
   const errs: string[] = [];
   const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-  const fin = (v: unknown) => typeof v === "number" && Number.isFinite(v);
-  if (!isObj(ep)) errs.push("episode must be an object");
+  const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  const str = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+  const keys = (o: Record<string, unknown>, allowed: readonly string[], where: string) => { for (const k of Object.keys(o)) if (!allowed.includes(k)) errs.push(`${where}.${k} is not a known key`); };
+  const finAt = (o: unknown, k: string, where: string) => { if (!isObj(o) || !fin(o[k])) errs.push(`${where}.${k} must be a finite number`); };
+  const strAt = (o: unknown, k: string, where: string) => { if (!isObj(o) || !str(o[k])) errs.push(`${where}.${k} must be a non-empty string`); };
+  const lines = (v: unknown, where: string) => { if (!Array.isArray(v) || v.length < 1 || v.length > 3 || !v.every(str)) errs.push(`${where} must be 1..3 non-empty strings`); };
+  if (!isObj(ep)) { errs.push("episode must be an object"); }
   else {
-    if (ep.schema !== "yt-news-v4-episode/0") errs.push("episode.schema must be \"yt-news-v4-episode/0\"");
-    if (typeof ep.assetDir !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(ep.assetDir)) errs.push("episode.assetDir must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    keys(ep, V4_EPISODE_KEYS, "episode");
+    if (ep.schema !== "yt-news-v4-episode/1") errs.push('episode.schema must be "yt-news-v4-episode/1"');
+    if (typeof ep.assetDir !== "string" || !DIR_RE.test(ep.assetDir)) errs.push("episode.assetDir must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    if (typeof ep.avatarFile !== "string" || !MP4_RE.test(ep.avatarFile)) errs.push("episode.avatarFile must be a plain .mp4 file name");
+    const fb = ep.avatarFaceBox;
+    if (!isObj(fb)) errs.push("episode.avatarFaceBox must be an object");
+    else for (const k of ["x", "y", "w", "h"]) if (!fin(fb[k]) || (fb[k] as number) < 0 || (fb[k] as number) > 1) errs.push(`episode.avatarFaceBox.${k} must be a number in 0..1`);
+    if (ep.fps !== 25) errs.push("episode.fps must be 25");
+    for (const k of ["voEndSec", "totalDurationSec", "ctaT"]) finAt(ep, k, "episode");
+    for (const k of ["brand", "dateLabel", "breakingLabel", "officialTag", "cta"]) strAt(ep, k, "episode");
+    if (!isObj(ep.page)) errs.push("episode.page must be an object"); else { strAt(ep.page, "domain", "episode.page"); strAt(ep.page, "path", "episode.page"); }
+    if (!isObj(ep.endcard)) errs.push("episode.endcard must be an object"); else for (const k of ["eyebrow", "titleA", "titleB", "cta"]) strAt(ep.endcard, k, "episode.endcard");
+    const bd = ep.brollDur;
+    if (!isObj(bd)) errs.push("episode.brollDur must be an object");
+    else for (const [k, v] of Object.entries(bd)) { if (!SRC_RE.test(k)) errs.push(`episode.brollDur key "${k}" must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`); if (!fin(v) || v <= 0) errs.push(`episode.brollDur.${k} must be a positive finite number`); }
     if (!Array.isArray(ep.beats) || ep.beats.length === 0) errs.push("episode.beats must be a non-empty array");
     else {
       let prev = -Infinity;
       ep.beats.forEach((b: unknown, i: number) => {
-        const t = isObj(b) ? b.t : undefined;
-        if (!fin(t)) errs.push(`episode.beats[${i}].t must be a finite number`);
-        else {
-          if ((t as number) <= prev) errs.push(`episode.beats[${i}].t must be strictly greater than the previous beat`);
-          prev = t as number;
+        const w = `episode.beats[${i}]`;
+        if (!isObj(b)) { errs.push(`${w} must be an object`); return; }
+        keys(b, V4_BEAT_KEYS, w);
+        if (!fin(b.t)) errs.push(`${w}.t must be a finite number`);
+        else { if (b.t <= prev) errs.push(`${w}.t must be strictly greater than the previous beat`); prev = b.t; }
+        if (b.mode !== "full" && b.mode !== "pip") errs.push(`${w}.mode must be "full" or "pip"`);
+        if (b.kicker !== undefined && !str(b.kicker)) errs.push(`${w}.kicker must be a non-empty string`);
+        if (b.sub !== undefined && !str(b.sub)) errs.push(`${w}.sub must be a non-empty string`);
+        if (b.mode === "full") {
+          if (b.punch !== undefined) { if (!Array.isArray(b.punch)) errs.push(`${w}.punch must be an array`); else b.punch.forEach((p: unknown, j: number) => { finAt(p, "at", `${w}.punch[${j}]`); finAt(p, "z", `${w}.punch[${j}]`); if (isObj(p)) for (const k of ["fx", "fy"]) if (p[k] !== undefined && !fin(p[k])) errs.push(`${w}.punch[${j}].${k} must be a finite number`); }); }
+          if (b.lower !== undefined) { const lw = `${w}.lower`; if (!isObj(b.lower)) errs.push(`${lw} must be an object`); else { finAt(b.lower, "at", lw); finAt(b.lower, "dur", lw); strAt(b.lower, "title", lw); strAt(b.lower, "sub", lw); } }
+        }
+        if (b.stats !== undefined) {
+          if (!Array.isArray(b.stats)) errs.push(`${w}.stats must be an array`);
+          else b.stats.forEach((s: unknown, j: number) => { const sw = `${w}.stats[${j}]`; finAt(s, "at", sw); finAt(s, "dur", sw); strAt(s, "label", sw); if (isObj(s)) { if (s.big !== undefined && !str(s.big)) errs.push(`${sw}.big must be a non-empty string`); if (s.tone !== undefined && s.tone !== "amber" && s.tone !== "mint" && s.tone !== "clay") errs.push(`${sw}.tone must be amber, mint or clay`); } });
+        }
+        if (b.mode !== "pip") return;
+        if (b.media !== "broll" && b.media !== "clip" && b.media !== "typo") errs.push(`${w}.media must be broll, clip or typo`);
+        if (b.layout !== "stage" && b.layout !== "wide") errs.push(`${w}.layout must be stage or wide`);
+        strAt(b, "headline", w);
+        if (b.media === "broll" || b.media === "clip") {
+          if (typeof b.src !== "string" || !SRC_RE.test(b.src)) errs.push(`${w}.src must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`);
+          else if (!isObj(bd) || !Object.prototype.hasOwnProperty.call(bd, b.src)) errs.push(`${w}.src "${b.src}" is not a key of brollDur`);
+          if (b.origin !== "source" && b.origin !== "stock" && b.origin !== "ai") errs.push(`${w}.origin must be source, stock or ai`);
+          if (b.from !== undefined && (!fin(b.from) || b.from < 0)) errs.push(`${w}.from must be a finite number >= 0`);
+          if (b.srcCrop !== undefined) {
+            const c = b.srcCrop;
+            if (!isObj(c) || !["x", "y", "w", "h"].every(k => Number.isInteger(c[k]))) errs.push(`${w}.srcCrop must have integer x, y, w, h`);
+            else {
+              const [x, y, cw, ch] = [c.x, c.y, c.w, c.h] as number[];
+              if (x < 0 || x > 1280 || y < 0 || y > 720 || cw < 640 || cw > 1920 || ch < 360 || ch > 1080) errs.push(`${w}.srcCrop is outside the allowed ranges`);
+              if (x + cw > 1920 || y + ch > 1080) errs.push(`${w}.srcCrop must stay inside the 1920x1080 frame`);
+            }
+          }
+        }
+        if (b.media === "typo") {
+          const n = (v: unknown) => (Array.isArray(v) ? v.length : -1);
+          const items = (cnt: number) => {
+            if (n(b.items) !== cnt) errs.push(`${w}.items must have exactly ${cnt} entries`);
+            else (b.items as unknown[]).forEach((it, j) => { finAt(it, "at", `${w}.items[${j}]`); strAt(it, "text", `${w}.items[${j}]`); if (isObj(it) && it.icon !== undefined && (typeof it.icon !== "string" || !ICONS.includes(it.icon))) errs.push(`${w}.items[${j}].icon is not in the allowed list`); });
+          };
+          if (b.typo === "card") {
+            if (!Array.isArray(b.cards) || b.cards.length < 1 || b.cards.length > 4) errs.push(`${w}.cards must have 1..4 entries`);
+            else b.cards.forEach((c: unknown, j: number) => { finAt(c, "at", `${w}.cards[${j}]`); lines(isObj(c) ? c.lines : undefined, `${w}.cards[${j}].lines`); });
+          } else if (b.typo === "summary3") items(3);
+          else if (b.typo === "final4") items(4);
+          else if (b.typo === "vs") {
+            const v = b.vs;
+            if (!isObj(v)) errs.push(`${w}.vs must be an object`);
+            else {
+              strAt(v, "conclusion", `${w}.vs`);
+              for (const side of ["left", "right"]) { const s = v[side]; if (!isObj(s)) errs.push(`${w}.vs.${side} must be an object`); else { strAt(s, "title", `${w}.vs.${side}`); strAt(s, "badge", `${w}.vs.${side}`); lines(s.lines, `${w}.vs.${side}.lines`); } }
+            }
+          } else errs.push(`${w}.typo must be card, summary3, final4 or vs`);
         }
       });
     }
-    for (const k of ["voEndSec", "totalDurationSec", "ctaT"]) if (!fin(ep[k])) errs.push(`episode.${k} must be a finite number`);
   }
   if (!isObj(cap)) errs.push("captions must be an object");
-  else if (!Array.isArray(cap.pages)) errs.push("captions.pages must be an array");
+  else {
+    if (!Array.isArray(cap.pages)) errs.push("captions.pages must be an array");
+    else cap.pages.forEach((p: unknown, i: number) => {
+      const w = `captions.pages[${i}]`;
+      if (!isObj(p)) { errs.push(`${w} must be an object`); return; }
+      if (!fin(p.start) || !fin(p.end) || p.start >= p.end) errs.push(`${w}.start/end must be finite with start < end`);
+      if (typeof p.displayText !== "string") errs.push(`${w}.displayText must be a string`);
+      if (!Array.isArray(p.chunks)) errs.push(`${w}.chunks must be an array`);
+      else p.chunks.forEach((c: unknown, j: number) => { const cw = `${w}.chunks[${j}]`; if (!isObj(c)) { errs.push(`${cw} must be an object`); return; } if (typeof c.text !== "string" || typeof c.displaySpaceBefore !== "string") errs.push(`${cw}.text and displaySpaceBefore must be strings`); if (!fin(c.displayStart) || !fin(c.displayEnd) || c.displayStart >= c.displayEnd) errs.push(`${cw}.displayStart/displayEnd must be finite with displayStart < displayEnd`); });
+    });
+    if (isObj(ep) && ep.captionsInputSha256 !== cap.inputSha256) errs.push("episode.captionsInputSha256 does not equal captions.inputSha256");
+  }
   return errs;
 }
 
+// ===========================================================================
+// LANES — single source of truth for every text lane, backing and layer rect.
+// Every rect is {x,y,w,h} px on the 1920x1080 frame (r = corner radius).
+// `scenes` lists the scene kinds a lane exists in (E = end card).
+// ===========================================================================
+export type SceneKind = "P" | "S" | "T" | "W";
+export type LaneScene = SceneKind | "E";
+export type LaneRole = "text" | "backing" | "layer";
+export interface Lane { x: number; y: number; w: number; h: number; r: number; scenes: LaneScene[]; role: LaneRole }
+const lane = (x: number, y: number, w: number, h: number, role: LaneRole, scenes: LaneScene[], r = 0): Lane => ({ x, y, w, h, r, scenes, role });
+const ALL: LaneScene[] = ["P", "S", "T", "W"];
+export const LANES = {
+  "header.brand": lane(96, 54, 480, 44, "text", ALL, 12),
+  "header.kicker": lane(1344, 54, 480, 44, "text", ALL, 12),
+  "avatar": lane(1362, 100, 478, 850, "layer", ["S", "T", "W"], 26), // presenter card (hidden in W)
+  "avatar.full": lane(0, 0, 1920, 1080, "layer", ["P"]),
+  "stage": lane(80, 100, 1210, 840, "layer", ["S", "T"], 22),
+  "split.chrome": lane(80, 100, 1210, 52, "backing", ["S", "T"]),
+  "split.chrome.url": lane(164, 104, 700, 44, "text", ["S"], 10),
+  "split.chrome.label": lane(872, 104, 400, 44, "text", ["S"]),
+  "split.picture": lane(116, 172, 1138, 640, "layer", ["S"], 16),
+  "split.lower": lane(80, 812, 1210, 128, "backing", ["S"]),
+  "split.headline": lane(116, 820, 1138, 56, "text", ["S"]),
+  "typo.backing": lane(80, 152, 1210, 716, "backing", ["T"]),
+  "typo.content": lane(120, 172, 1130, 676, "text", ["T"]),
+  "sub": lane(116, 878, 1138, 56, "text", ["P", "S", "T"]), // description, or the stat rail
+  "full.lowerThird": lane(96, 520, 960, 196, "text", ["P"]),
+  "full.cta": lane(260, 722, 1400, 150, "text", ["P"]),
+  "wide.window": lane(320, 100, 1280, 844, "layer", ["W"], 22),
+  "wide.chrome": lane(320, 100, 1280, 52, "backing", ["W"]),
+  "wide.chrome.url": lane(404, 104, 640, 44, "text", ["W"], 10),
+  "wide.chrome.label": lane(1182, 104, 400, 44, "text", ["W"]),
+  "wide.picture": lane(320, 152, 1280, 720, "layer", ["W"]),
+  "wide.bar": lane(320, 872, 1280, 72, "backing", ["W"]),
+  "wide.headline": lane(344, 880, 1232, 56, "text", ["W"]),
+  "caption": lane(96, 954, 1728, 72, "text", ALL),
+  "end.eyebrow": lane(360, 300, 1200, 44, "text", ["E"]),
+  "end.title": lane(160, 360, 1600, 94, "text", ["E"]),
+  "end.sub": lane(260, 470, 1400, 60, "text", ["E"]),
+  "end.cta": lane(260, 560, 1400, 144, "text", ["E"]),
+};
+export type LaneId = keyof typeof LANES;
+
+export function sceneKind(b: Beat): SceneKind {
+  if (b.mode === "full") return "P";
+  if (b.media === "typo") return "T";
+  return b.layout === "wide" ? "W" : "S";
+}
+
+// ---- Source crop maths (spec §6): crop = region of the 1920x1080 source that is cover-fitted into the box ----
+export function srcCropStyle(crop: SrcCrop | undefined, box: Rect): React.CSSProperties {
+  if (!crop) {
+    const s = Math.min(box.w / W, box.h / H);
+    return { position: "absolute", width: W * s, height: H * s, left: (box.w - W * s) / 2, top: (box.h - H * s) / 2, objectFit: "contain" };
+  }
+  const s = Math.max(box.w / crop.w, box.h / crop.h);
+  return { position: "absolute", width: W * s, height: H * s, left: -crop.x * s + (box.w - crop.w * s) / 2, top: -crop.y * s + (box.h - crop.h * s) / 2, objectFit: "fill" };
+}
 
 // ---- Fonts ----------------------------------------------------------------
 let fontReady: Promise<void> | null = null;
@@ -159,35 +307,304 @@ const useThaiFonts = () => {
 
 // ---- Helpers --------------------------------------------------------------
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
-const easeInOutCos = (p: number) => (1 - Math.cos(Math.PI * clamp01(p))) / 2;
-const easeOutCubic = (p: number) => 1 - Math.pow(1 - clamp01(p), 3);
 const springIn = (frame: number, fps: number, damping = 16, stiffness = 130) =>
   spring({ frame: Math.max(0, frame), fps, config: { damping, stiffness } });
 
-const boundedEntrance = (t:number,start:number,fps:number):React.CSSProperties => {
-  const p=clamp01(springIn(Math.round((t-start)*fps),fps,18,130));
-  return {opacity:p,transform:`translateY(${(1-p)*6}px)`};
+const boundedEntrance = (t: number, start: number, fps: number): React.CSSProperties => {
+  const p = clamp01(springIn(Math.round((t - start) * fps), fps, 18, 130));
+  return { opacity: p, transform: `translateY(${(1 - p) * 6}px)` };
 };
 
 const tone = (k?: string) => (k === "mint" ? MINT : k === "clay" ? CLAY : AMBER);
 
-// ---- V3 presentation: explicit, non-overlapping text lanes -----------------
-const TextField: React.FC<{id:string;role?:"read"|"label";style?:React.CSSProperties;children:React.ReactNode}> = ({id,role="read",style,children}) => <div data-qc-field={id} data-qc-role={role} style={{fontFamily:FONT,fontSize:role==="label"?24:30,fontWeight:700,lineHeight:1.55,color:CREAM,...style}}>{children}</div>;
-const CaptionLane: React.FC<{t:number;lane:"top"|"bottom";pages:CaptionPage[]}> = ({t,lane,pages:CAPTION_PAGES}) => {
-  const page=CAPTION_PAGES.find(p=>t>=p.start&&t<p.end);
-  if(!page)return null;
-  return <div style={{position:"absolute",left:116,right:lane==="top"?undefined:116,width:lane==="top"?650:undefined,bottom:lane==="bottom"?66:undefined,top:lane==="top"?248:undefined,display:"flex",justifyContent:lane==="top"?"flex-start":"center",zIndex:60}}>
-    <div data-qc-backing="solid" data-qc-occluder="caption-pill" data-qc-field="caption" data-qc-role="read" data-qc-caption-display={page.displayText} style={{fontFamily:FONT,fontSize:32,fontWeight:800,lineHeight:1.65,background:"rgba(11,14,23,.92)",padding:"6px 26px",borderRadius:18,maxWidth:lane==="top"?598:1500,textAlign:lane==="top"?"left":"center",whiteSpace:"pre-wrap",overflowWrap:"normal"}}>
-      {page.chunks.map((chunk,i)=><React.Fragment key={i}>{chunk.displaySpaceBefore}<span style={{display:"inline-block",whiteSpace:"pre",color:t>=chunk.displayStart&&t<chunk.displayEnd?GOLD_LIGHT:CREAM,textShadow:t>=chunk.displayStart&&t<chunk.displayEnd?`0 0 12px ${GOLD}`:"none"}}>{chunk.text}</span></React.Fragment>)}
-    </div>
-  </div>;
+// Position a lane container from the LANES table (optionally relative to a parent lane).
+const laneBox = (id: LaneId, origin?: LaneId): React.CSSProperties => {
+  const l = LANES[id], o = origin ? LANES[origin] : { x: 0, y: 0 };
+  return { position: "absolute", left: l.x - o.x, top: l.y - o.y, width: l.w, height: l.h, boxSizing: "border-box" };
 };
-const EndCard: React.FC<{episode:EpisodeData}> = ({episode:EPISODE}) => <div style={{position:"absolute",inset:0,background:NAVY,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24,zIndex:90}}>
-  <TextField id="end-label" role="label" style={{color:AMBER}}>{EPISODE.endcard.eyebrow}</TextField>
-  <TextField id="end-title" style={{fontSize:64}}>{EPISODE.endcard.titleA}</TextField>
-  <TextField id="end-sub" style={{fontSize:36,color:AMBER}}>{EPISODE.endcard.titleB}</TextField>
-  <TextField id="end-cta" style={{marginTop:30}}>{EPISODE.endcard.cta}</TextField>
-</div>;
+
+// ---- Text -----------------------------------------------------------------
+// Minimum sizes: label 30 px / read 38 px. Text never shrinks; overflow is a layout bug to fix.
+const MIN_PX = { label: 30, read: 38 } as const;
+const LH: Record<number, number> = { 30: 44, 38: 56, 40: 56, 44: 62, 48: 66, 52: 68, 56: 76, 72: 94 };
+const lhFor = (px: number) => LH[px] ?? Math.round(px * 1.4);
+type Tier = "read" | "label";
+const TextField: React.FC<{ id: string; role?: Tier; lane: LaneId; size?: number; style?: React.CSSProperties; attrs?: Record<string, string>; children: React.ReactNode }> = ({ id, role = "read", lane: laneId, size, style, attrs, children }) => {
+  const px = Math.max(size ?? MIN_PX[role], MIN_PX[role]);
+  return <div {...attrs} data-qc-field={id} data-qc-role={role} data-qc-tier={role} data-qc-lane={laneId} style={{ fontFamily: FONT, fontSize: px, fontWeight: 700, lineHeight: `${lhFor(px)}px`, color: CREAM, ...style }}>{children}</div>;
+};
+
+// A box behind text: solid colour (alpha >= .9), registered with the gate.
+const Backing: React.FC<{ id: string; reserved?: "header" | "chrome"; occluder?: string; style: React.CSSProperties; children?: React.ReactNode; attrs?: Record<string, string | boolean> }> = ({ id, reserved, occluder, style, children, attrs }) => (
+  <div {...attrs} data-qc-backing="solid" data-qc-backing-id={id} data-qc-reserved={reserved} data-qc-occluder={occluder} style={style}>{children}</div>
+);
+
+// ===========================================================================
+// Scene pieces
+// ===========================================================================
+const Backdrop: React.FC = () => (
+  <div data-qc-backdrop style={{ position: "absolute", inset: 0, zIndex: 0, backgroundColor: NAVY, backgroundImage: `radial-gradient(rgba(245,241,232,0.075) 1.2px, transparent 1.2px), linear-gradient(180deg, ${NAVY_2} 0%, ${NAVY} 100%)`, backgroundSize: "28px 28px, auto" }}>
+    <div style={{ position: "absolute", left: -200, top: -260, width: 900, height: 900, borderRadius: "50%", background: "radial-gradient(circle, rgba(242,179,76,0.16), transparent 62%)" }} />
+    <div style={{ position: "absolute", right: -260, bottom: -380, width: 1000, height: 1000, borderRadius: "50%", background: "radial-gradient(circle, rgba(217,119,87,0.16), transparent 62%)" }} />
+  </div>
+);
+
+const Header: React.FC<{ episode: EpisodeData; beat: Beat }> = ({ episode, beat }) => (
+  <>
+    <div style={{ ...laneBox("header.brand"), zIndex: 30, display: "flex", alignItems: "center", justifyContent: "flex-start" }}>
+      <Backing id="header.brand" reserved="header" occluder="header-brand" style={{ backgroundColor: "rgba(11,14,23,.92)", borderRadius: LANES["header.brand"].r, padding: "0 14px", height: 44 }}>
+        <TextField id="brand" role="label" lane="header.brand" style={{ color: AMBER, whiteSpace: "nowrap" }}>{episode.brand} · {episode.dateLabel}</TextField>
+      </Backing>
+    </div>
+    <div style={{ ...laneBox("header.kicker"), zIndex: 30, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+      <Backing id="header.kicker" reserved="header" occluder="header-kicker" style={{ backgroundColor: AMBER, borderRadius: LANES["header.kicker"].r, padding: "0 14px", height: 44 }}>
+        <TextField id="kicker" role="label" lane="header.kicker" style={{ color: NAVY, whiteSpace: "nowrap" }}>{beat.kicker ?? "AI NEWS"}</TextField>
+      </Backing>
+    </div>
+  </>
+);
+
+// Presenter: uniform-scale crop. P = whole frame; S/T = portrait card cropped around the face centre; W = card, hidden.
+const Avatar: React.FC<{ episode: EpisodeData; kind: SceneKind; punch?: Punch }> = ({ episode: EPISODE, kind, punch }) => {
+  const rect = LANES[kind === "P" ? "avatar.full" : "avatar"];
+  const s = rect.h / H, mw = W * s, mh = H * s;
+  const cx = (EPISODE.avatarFaceBox.x + EPISODE.avatarFaceBox.w / 2) * mw;
+  const left = -Math.min(Math.max(cx - rect.w / 2, 0), Math.max(0, mw - rect.w));
+  const z = kind === "P" ? punch?.z ?? 1 : 1;
+  return (
+    <div data-qc-layer="avatar" data-qc-occluder="avatar" style={{ position: "absolute", left: rect.x, top: rect.y, width: rect.w, height: rect.h, borderRadius: rect.r, overflow: "hidden", zIndex: 20, opacity: kind === "W" ? 0 : 1, backgroundColor: NAVY, boxShadow: kind === "P" ? "none" : "0 30px 80px rgba(0,0,0,0.6), 0 0 40px rgba(242,179,76,0.18), 0 0 0 2px rgba(245,241,232,0.16)" }}>
+      <div data-qc-avatar-media style={{ position: "absolute", left, top: (rect.h - mh) / 2, width: mw, height: mh, transform: `scale(${z})`, transformOrigin: `${(punch?.fx ?? 0.5) * 100}% ${(punch?.fy ?? 0.5) * 100}%` }}>
+        <OffthreadVideo muted src={staticFile(`${EPISODE.assetDir}/${EPISODE.avatarFile}`)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      </div>
+    </div>
+  );
+};
+
+// Footage: starts at the first selected frame of its own beat; loops from `from`, never past the file end.
+const Footage: React.FC<{ beat: Beat; episode: EpisodeData; box: Rect }> = ({ beat, episode: EPISODE, box }) => {
+  const { fps } = useVideoConfig();
+  const src = beat.src as string;
+  const layerStartFrame = Math.ceil(beat.t * fps);
+  const from = beat.from ?? 0;
+  const L = Math.max(1, Math.floor((EPISODE.brollDur[src] - from) * fps) - 2);
+  return <Sequence from={layerStartFrame} layout="none"><Loop durationInFrames={L} layout="none"><OffthreadVideo muted src={staticFile(`${EPISODE.assetDir}/broll/${src}.mp4`)} trimBefore={Math.round(from * fps)} style={srcCropStyle(beat.srcCrop, box)} /></Loop></Sequence>;
+};
+
+// Browser chrome: 52 px bar; URL pill + right-hand label only where the beat has a source / AI image.
+const BrowserChrome: React.FC<{ prefix: "split" | "wide"; origin: LaneId; beat: Beat; episode: EpisodeData }> = ({ prefix, origin, beat, episode }) => {
+  const chromeId = `${prefix}.chrome` as LaneId, urlId = `${prefix}.chrome.url` as LaneId, labelId = `${prefix}.chrome.label` as LaneId;
+  const source = beat.media !== "typo" && beat.origin === "source", ai = beat.media !== "typo" && beat.origin === "ai";
+  return (
+    <Backing id={chromeId} reserved="chrome" occluder="chrome" attrs={{ "data-qc-chrome": true }} style={{ ...laneBox(chromeId, origin), zIndex: 2, backgroundColor: "#1A2033", borderBottom: "1px solid rgba(245,241,232,0.08)" }}>
+      {[0, 1, 2].map(i => <div key={i} style={{ position: "absolute", left: 18 + i * 18, top: 20, width: 12, height: 12, borderRadius: 6, background: ["#FF5F56", "#FFBD2E", "#27C93F"][i] }} />)}
+      {source && <Backing id={urlId} style={{ ...laneBox(urlId, chromeId), backgroundColor: NAVY_3, borderRadius: LANES[urlId].r, padding: "0 14px" }}>
+        <TextField id="source-url" role="label" lane={urlId} style={{ whiteSpace: "nowrap" }}>{episode.page.domain}{episode.page.path}</TextField>
+      </Backing>}
+      {(source || ai) && <div data-qc-credit={source ? true : undefined} style={{ ...laneBox(labelId, chromeId), textAlign: "right" }}>
+        <TextField id={source ? "source-credit" : "ai-label"} role="label" lane={labelId} style={{ color: AMBER, whiteSpace: "nowrap" }}>{source ? episode.officialTag : "ภาพประกอบ AI"}</TextField>
+      </div>}
+    </Backing>
+  );
+};
+
+// Stage window (S and T): frame + chrome; children are positioned relative to the stage lane.
+const StageFrame: React.FC<{ beat: Beat; episode: EpisodeData; kind: SceneKind; children: React.ReactNode }> = ({ beat, episode, kind, children }) => (
+  <div data-qc-layer="stage" data-qc-scene={kind} style={{ ...laneBox("stage"), zIndex: 10, borderRadius: LANES.stage.r, overflow: "hidden", backgroundColor: NAVY_2, boxShadow: "0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(245,241,232,0.14)" }}>
+    <div data-qc-scene-role="current" style={{ position: "absolute", inset: 0 }}>
+      {children}
+      <BrowserChrome prefix="split" origin="stage" beat={beat} episode={episode} />
+    </div>
+  </div>
+);
+
+// Museum card (S): picture + headline + description (the description yields to the stat rail).
+const MuseumScene: React.FC<{ beat: Beat; episode: EpisodeData; statVisible: boolean }> = ({ beat, episode, statVisible }) => {
+  const pic = LANES["split.picture"];
+  return (
+    <>
+      <div data-qc-layer="picture" data-qc-footage={beat.src} style={{ ...laneBox("split.picture", "stage"), borderRadius: pic.r, overflow: "hidden", backgroundColor: "#000", boxShadow: "0 14px 40px rgba(0,0,0,0.65), 0 0 0 1px rgba(245,241,232,0.1)" }}>
+        <Footage beat={beat} episode={episode} box={{ w: pic.w, h: pic.h }} />
+      </div>
+      <Backing id="stage.lower" style={{ ...laneBox("split.lower", "stage"), backgroundColor: NAVY_2 }}>
+        <div style={laneBox("split.headline", "split.lower")}>
+          <TextField id="headline" lane="split.headline" size={40} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
+        </div>
+        {beat.sub && !statVisible && <div style={laneBox("sub", "split.lower")}>
+          <TextField id="description" lane="sub" style={{ color: CREAM_DIM, whiteSpace: "nowrap" }}>{beat.sub}</TextField>
+        </div>}
+      </Backing>
+    </>
+  );
+};
+
+// Wide window (W): chrome + 1280x720 picture + bottom bar with the headline. Presenter hidden.
+const WideScene: React.FC<{ beat: Beat; episode: EpisodeData }> = ({ beat, episode }) => {
+  const pic = LANES["wide.picture"];
+  return (
+    <div data-qc-layer="stage" data-qc-scene="wide" style={{ ...laneBox("wide.window"), zIndex: 10, borderRadius: LANES["wide.window"].r, overflow: "hidden", backgroundColor: NAVY_2, boxShadow: "0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(245,241,232,0.14)" }}>
+      <div data-qc-scene-role="current" style={{ position: "absolute", inset: 0 }}>
+        <div data-qc-layer="picture" data-qc-footage={beat.src} style={{ ...laneBox("wide.picture", "wide.window"), overflow: "hidden", backgroundColor: "#000" }}>
+          <Footage beat={beat} episode={episode} box={{ w: pic.w, h: pic.h }} />
+        </div>
+        <Backing id="wide.bar" style={{ ...laneBox("wide.bar", "wide.window"), backgroundColor: NAVY_2 }}>
+          <div style={laneBox("wide.headline", "wide.bar")}>
+            <TextField id="headline" lane="wide.headline" size={40} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
+          </div>
+        </Backing>
+        <BrowserChrome prefix="wide" origin="wide.window" beat={beat} episode={episode} />
+      </div>
+    </div>
+  );
+};
+
+// ---- Text cards (T) -----------------------------------------------------------
+const graphemeCount = (s: string) => {
+  const Seg = (Intl as unknown as { Segmenter?: new (l: string, o: { granularity: string }) => { segment(t: string): Iterable<unknown> } }).Segmenter;
+  return Seg ? Array.from(new Seg("th", { granularity: "grapheme" }).segment(s)).length : Array.from(s).length;
+};
+const chipEntrance = (t: number, at: number, fps: number): React.CSSProperties => {
+  const a = t >= at ? clamp01(springIn(Math.round((t - at) * fps), fps, 14, 140)) : 0;
+  return { opacity: a, transform: `translateY(${(1 - a) * 18}px)` };
+};
+const Chip: React.FC<{ id: string; item: Item; size: number; t: number; fps: number; padding: string; width?: number | string; i: number }> = ({ id, item, size, t, fps, padding, width, i }) => (
+  <Backing id={id} style={{ display: "flex", alignItems: "center", width, boxSizing: "border-box", padding, borderRadius: 24, backgroundColor: NAVY, boxShadow: "inset 0 0 0 2px rgba(242,179,76,0.55), 0 14px 40px rgba(0,0,0,0.45)", ...chipEntrance(t, item.at, fps) }}>
+    <TextField id={`typo-item-${i}`} lane="typo.content" size={size} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{item.icon && <span style={{ fontSize: size - 4, marginRight: 16 }}>{item.icon}</span>}{item.text}</TextField>
+  </Backing>
+);
+
+const VsCard: React.FC<{ side: VsSide; accent: string; k: "left" | "right" }> = ({ side, accent, k }) => (
+  <Backing id={`vs-${k}`} style={{ width: 500, boxSizing: "border-box", padding: "24px 32px", borderRadius: 28, backgroundColor: NAVY_3, boxShadow: `inset 0 0 0 2px ${accent}, 0 20px 60px rgba(0,0,0,0.5)` }}>
+    <TextField id={`vs-${k}-badge`} role="label" lane="typo.content" style={{ color: accent, whiteSpace: "nowrap" }}>{side.badge}</TextField>
+    <TextField id={`vs-${k}-title`} lane="typo.content" size={52} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{side.title}</TextField>
+    <div style={{ width: 90, height: 4, background: accent, borderRadius: 2, margin: "10px 0 12px" }} />
+    {side.lines.map((l, i) => <TextField key={i} id={`vs-${k}-line-${i}`} lane="typo.content" style={{ color: CREAM_DIM, whiteSpace: "nowrap" }}>{l}</TextField>)}
+  </Backing>
+);
+
+const TypoScene: React.FC<{ beat: Beat; episode: EpisodeData; t: number; fps: number }> = ({ beat, t, fps }) => {
+  const variant = beat.typo;
+  const items = beat.items ?? [];
+  const cardList = (beat.cards ?? []).filter(c => t >= c.at);
+  const cardIdx = Math.max(0, cardList.length - 1);
+  const card = cardList[cardIdx] ?? beat.cards?.[0];
+  const rowOk = items.length > 0 && items.every(it => graphemeCount(it.text) <= 8) && items.reduce((n, it) => n + 0.62 * 48 * graphemeCount(it.text) + 44 + 16 + 60, 0) + 44 <= 1130;
+  return (
+    <Backing id="typo.backing" style={{ ...laneBox("typo.backing", "stage"), backgroundColor: NAVY_2, backgroundImage: "radial-gradient(ellipse at 50% 28%, rgba(242,179,76,0.14), transparent 60%), radial-gradient(rgba(245,241,232,0.06) 1.5px, transparent 1.5px), linear-gradient(160deg, #1B2440, #0E1220)", backgroundSize: "auto, 28px 28px, auto" }}>
+      <div style={{ ...laneBox("typo.content", "typo.backing"), display: "flex", flexDirection: "column", justifyContent: "center" }}>
+        {variant === "card" && <div style={{ display: "flex", flexDirection: "column" }}>
+          <TextField id="typo-title" lane="typo.content" size={48} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
+          <div style={{ width: 120, height: 5, borderRadius: 3, background: AMBER, margin: "14px 0 28px" }} />
+          <div key={cardIdx} style={{ display: "flex", flexDirection: "column", gap: 20, ...boundedEntrance(t, card?.at ?? beat.t, fps) }}>
+            {(card?.lines ?? []).map((line, i) => (
+              <Backing key={i} id={`typo-row-${i}`} style={{ backgroundColor: NAVY, borderLeft: `6px solid ${i % 2 ? MINT : AMBER}`, borderRadius: 12, padding: "14px 28px" }}>
+                <TextField id={`typo-line-${i}`} lane="typo.content" size={44} style={{ whiteSpace: "nowrap" }}>{line}</TextField>
+              </Backing>
+            ))}
+          </div>
+        </div>}
+        {variant === "summary3" && <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 36 }}>
+          <TextField id="typo-eyebrow" role="label" lane="typo.content" style={{ color: AMBER, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
+          <div style={{ display: "flex", flexDirection: rowOk ? "row" : "column", gap: 22, alignItems: rowOk ? "center" : "stretch", justifyContent: "center", width: rowOk ? undefined : 900 }}>
+            {items.map((it, i) => <Chip key={i} id={`typo-chip-${i}`} i={i} item={it} size={48} t={t} fps={fps} padding="18px 30px" />)}
+          </div>
+        </div>}
+        {variant === "final4" && <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 30 }}>
+          <div style={{ textAlign: "center" }}>
+            <TextField id="typo-title" lane="typo.content" size={56} style={{ fontWeight: 800, whiteSpace: "nowrap", textAlign: "center" }}>{beat.headline}</TextField>
+            {beat.sub && <TextField id="typo-sub" lane="typo.content" style={{ color: AMBER, whiteSpace: "nowrap", textAlign: "center" }}>{beat.sub}</TextField>}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "545px 545px", gap: 20 }}>
+            {items.map((it, i) => <Chip key={i} id={`typo-chip-${i}`} i={i} item={it} size={40} t={t} fps={fps} padding="18px 28px" width={545} />)}
+          </div>
+        </div>}
+        {variant === "vs" && beat.vs && <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 28 }}>
+          <TextField id="typo-eyebrow" role="label" lane="typo.content" style={{ color: AMBER, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
+          <div style={{ display: "flex", gap: 26, alignItems: "stretch" }}>
+            <VsCard side={beat.vs.left} accent={AMBER} k="left" />
+            <TextField id="vs-sep" lane="typo.content" size={44} style={{ alignSelf: "center", fontWeight: 800, color: CREAM_DIM }}>vs</TextField>
+            <VsCard side={beat.vs.right} accent={CLAY} k="right" />
+          </div>
+          <Backing id="vs-conclusion" style={{ backgroundColor: NAVY, boxShadow: `inset 0 0 0 1.5px ${CLAY}`, borderRadius: 18, padding: "4px 28px" }}>
+            <TextField id="vs-conclusion" lane="typo.content" style={{ whiteSpace: "nowrap" }}>{beat.vs.conclusion}</TextField>
+          </Backing>
+        </div>}
+      </div>
+    </Backing>
+  );
+};
+
+// ---- Overlays -----------------------------------------------------------------
+// A chip is visible on [at, at+dur) regardless of beat boundaries (it may outlive its beat). Max 3.
+type LiveStat = { stat: Stat; b: number; i: number };
+const liveStats = (beats: Beat[], t: number): LiveStat[] =>
+  beats.flatMap((beat, b) => (beat.stats ?? []).map((stat, i) => ({ stat, b, i }))).filter(({ stat }) => t >= stat.at && t < stat.at + stat.dur).sort((a, b) => a.stat.at - b.stat.at).slice(0, 3);
+
+const StatRail: React.FC<{ live: LiveStat[]; t: number; fps: number }> = ({ live, t, fps }) => (
+  <div style={{ ...laneBox("sub"), zIndex: 40, display: "flex", alignItems: "center", gap: 14 }}>
+    {live.map(({ stat, b, i }) => {
+      const exit = clamp01((stat.at + stat.dur - t) * fps / 6), enter = boundedEntrance(t, stat.at, fps), c = tone(stat.tone);
+      return (
+        <Backing key={`${b}-${i}`} id={`stat-${b}-${i}`} occluder={`chip-${b}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12, height: 56, padding: "0 16px", borderRadius: 14, backgroundColor: NAVY_3, boxShadow: `inset 0 0 0 2px ${c}`, ...enter, opacity: Number(enter.opacity) * exit }}>
+          {stat.big && <TextField id={`stat-${b}-${i}-big`} lane="sub" style={{ fontWeight: 800, color: c, whiteSpace: "nowrap" }}>{stat.big}</TextField>}
+          <TextField id={`stat-${b}-${i}-label`} role="label" lane="sub" style={{ whiteSpace: "nowrap" }}>{stat.label}</TextField>
+        </Backing>
+      );
+    })}
+  </div>
+);
+
+// Lower third: three left-aligned boxes, each hugging its own line (no empty backing over the presenter).
+const LowerThird: React.FC<{ episode: EpisodeData; lower: Lower; t: number; fps: number }> = ({ episode, lower, t, fps }) => (
+  <div data-qc-occluder="lower-third" style={{ ...laneBox("full.lowerThird"), zIndex: 45, display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-end", gap: 6, ...boundedEntrance(t, lower.at, fps) }}>
+    <Backing id="lower-label" style={{ backgroundColor: AMBER, borderRadius: 10, padding: "0 16px" }}>
+      <TextField id="lower-label" role="label" lane="full.lowerThird" style={{ color: NAVY, fontWeight: 800, whiteSpace: "nowrap" }}>{episode.breakingLabel}</TextField>
+    </Backing>
+    <Backing id="lower-title" style={{ backgroundColor: "rgba(11,14,23,.94)", borderLeft: `6px solid ${AMBER}`, borderRadius: 16, padding: "0 24px" }}>
+      <TextField id="lower-title" lane="full.lowerThird" size={52} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{lower.title}</TextField>
+    </Backing>
+    <Backing id="lower-sub" style={{ backgroundColor: "rgba(11,14,23,.94)", borderLeft: `6px solid ${AMBER}`, borderRadius: 16, padding: "0 24px" }}>
+      <TextField id="lower-sub" lane="full.lowerThird" style={{ whiteSpace: "nowrap" }}>{lower.sub}</TextField>
+    </Backing>
+  </div>
+);
+
+const CtaChip: React.FC<{ text: string; t: number; ctaT: number; fps: number }> = ({ text, t, ctaT, fps }) => (
+  <div style={{ ...laneBox("full.cta"), zIndex: 46, display: "flex", alignItems: "center", justifyContent: "center", ...boundedEntrance(t, ctaT, fps) }}>
+    <Backing id="cta" occluder="cta" style={{ backgroundColor: NAVY, boxShadow: `inset 0 0 0 2px ${AMBER}`, borderRadius: 24, padding: "16px 36px", maxWidth: 1400, boxSizing: "border-box" }}>
+      <TextField id="cta" lane="full.cta" size={40} style={{ fontWeight: 800, textAlign: "center" }}>{text}</TextField>
+    </Backing>
+  </div>
+);
+
+const CaptionLane: React.FC<{ t: number; pages: CaptionPage[] }> = ({ t, pages }) => {
+  const page = pages.find(p => t >= p.start && t < p.end);
+  if (!page) return null;
+  return (
+    <div style={{ ...laneBox("caption"), zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Backing id="caption" occluder="caption-pill" style={{ backgroundColor: "rgba(11,14,23,.92)", boxShadow: "inset 0 0 0 1.5px rgba(242,179,76,.30)", borderRadius: 20, padding: "6px 26px", maxWidth: LANES.caption.w, boxSizing: "border-box" }}>
+        <TextField id="caption" lane="caption" size={38} attrs={{ "data-qc-caption-display": page.displayText }} style={{ fontWeight: 800, whiteSpace: "pre" }}>
+          {page.chunks.map((chunk, i) => {
+            const on = t >= chunk.displayStart && t < chunk.displayEnd;
+            return <React.Fragment key={i}>{chunk.displaySpaceBefore}<span style={{ display: "inline-block", whiteSpace: "pre", color: on ? GOLD_LIGHT : CREAM, textShadow: on ? `0 0 12px ${GOLD}` : "none" }}>{chunk.text}</span></React.Fragment>;
+          })}
+        </TextField>
+      </Backing>
+    </div>
+  );
+};
+
+const EndCard: React.FC<{ episode: EpisodeData }> = ({ episode: EPISODE }) => (
+  <Backing id="end.bg" style={{ position: "absolute", inset: 0, zIndex: 90, backgroundColor: NAVY, backgroundImage: "radial-gradient(ellipse at 50% 38%, rgba(242,179,76,0.14), transparent 60%), radial-gradient(rgba(245,241,232,0.06) 1.5px, transparent 1.5px)", backgroundSize: "auto, 28px 28px" }}>
+    <div style={{ ...laneBox("end.eyebrow"), textAlign: "center" }}><TextField id="end-label" role="label" lane="end.eyebrow" style={{ color: AMBER, whiteSpace: "nowrap" }}>{EPISODE.endcard.eyebrow}</TextField></div>
+    <div style={{ ...laneBox("end.title"), textAlign: "center" }}><TextField id="end-title" lane="end.title" size={72} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{EPISODE.endcard.titleA}</TextField></div>
+    <div style={{ ...laneBox("end.sub"), textAlign: "center" }}><TextField id="end-sub" lane="end.sub" size={40} style={{ color: AMBER, whiteSpace: "nowrap" }}>{EPISODE.endcard.titleB}</TextField></div>
+    <div style={{ ...laneBox("end.cta"), display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Backing id="end.cta" style={{ backgroundColor: NAVY_3, boxShadow: `inset 0 0 0 2px ${AMBER}`, borderRadius: 24, padding: "16px 36px", maxWidth: 1400, boxSizing: "border-box" }}>
+        <TextField id="end-cta" lane="end.cta" size={40} style={{ fontWeight: 800, textAlign: "center" }}>{EPISODE.endcard.cta}</TextField>
+      </Backing>
+    </div>
+  </Backing>
+);
 
 // QC is observation-only: production has no layout injection or media substitution.
 const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat;episode:EpisodeData;captions:CaptionData}> = ({enabled,plan,frame,beat,episode,captions}) => {
@@ -201,10 +618,10 @@ const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat;epi
       if(!live)return;
       if(plan){
         const times=new Set<number>([0,9,89,172,VO_END_SEC, TOTAL_DURATION_SEC-0.04]);
-        BEATS.forEach((b,i)=>{const end=BEATS[i+1]?.t??VO_END_SEC; [b.t,b.t+0.12,b.t+0.36,b.t+0.56,(b.t+end)/2,end-0.04].forEach(t=>times.add(t)); b.stats?.forEach(st=>[st.t,st.t+0.12,st.t+0.32,st.t+0.64].forEach(t=>times.add(t))); b.cards?.forEach(c=>[c.t,c.t+0.12,c.t+0.36,c.t+0.64].forEach(t=>times.add(t))); b.punch?.forEach(p=>[p.t-0.04,p.t,p.t+0.04].forEach(t=>times.add(t)));if(b.lower)[b.lower.t??b.t,(b.lower.t??b.t)+0.32,(b.lower.t??b.t)+(b.lower.dur??6)-0.04].forEach(t=>times.add(t));});
+        BEATS.forEach((b,i)=>{const end=BEATS[i+1]?.t??VO_END_SEC; [b.t,b.t+0.12,b.t+0.36,b.t+0.56,(b.t+end)/2,end-0.04].forEach(t=>times.add(t)); b.stats?.forEach(st=>[st.at,st.at+0.12,st.at+0.32,st.at+0.64].forEach(t=>times.add(t))); b.cards?.forEach(c=>[c.at,c.at+0.12,c.at+0.36,c.at+0.64].forEach(t=>times.add(t))); b.punch?.forEach(p=>[p.at-0.04,p.at,p.at+0.04].forEach(t=>times.add(t)));if(b.lower)[b.lower.at,b.lower.at+0.32,b.lower.at+b.lower.dur-0.04].forEach(t=>times.add(t));});
         CAPTION_PAGES.forEach(p=>times.add((p.start+p.end)/2));
         [CTA_T,CTA_T+0.12,CTA_T+0.32,CTA_T+0.64].forEach(t=>times.add(t));
-        const rectFor=(b:Beat)=>b.mode==="full"?[116,128,1688,744,1]:b.layout==="full"?[1340,128,464,690,0]:[1340,128,464,690,1];
+        const rectFor=(b:Beat)=>b.mode==="full"?[0,0,W,H,1]:b.layout==="wide"?[LANES.avatar.x,LANES.avatar.y,LANES.avatar.w,LANES.avatar.h,0]:[LANES.avatar.x,LANES.avatar.y,LANES.avatar.w,LANES.avatar.h,1];
         const sweepWindows=BEATS.flatMap((b,i)=>i&&JSON.stringify(rectFor(BEATS[i-1]))!==JSON.stringify(rectFor(b))?[{id:`avatar-${i}`,beatT:b.t,startFrame:Math.ceil(b.t*fps),endFrame:Math.min(Math.ceil(TOTAL_DURATION_SEC*fps)-1,Math.ceil((b.t+MODE_BLEND_SEC)*fps)+3)}]:[]);
         const frames=new Set([...times].filter(t=>t>=0&&t<TOTAL_DURATION_SEC).map(t=>Math.round(t*fps)));
         sweepWindows.forEach(w=>{for(let f=w.startFrame;f<=w.endFrame;f++)frames.add(f);});
@@ -323,7 +740,7 @@ const QcProbe: React.FC<{enabled:boolean;plan:boolean;frame:number;beat:Beat;epi
         }
         const footageEl=root.querySelector<HTMLElement>('[data-qc-footage]');
         const actualSrc=footageEl?.dataset.qcFootage;
-        console.log('__QC__'+JSON.stringify({schemaVersion:2,captionLane:beat.captionLane??'bottom',frame,width:1920,height:1080,fontsOk:document.fonts.check('800 28px KanitX')&&document.fonts.check('700 28px KanitX'),fields,occluders,avatarBacking,transition:frame/25-beat.t<MODE_BLEND_SEC,footage:{origin:frame/25>=VO_END_SEC?'endcard':beat.mode==='full'?'avatar':beat.media==='typo'?'typo':actualSrc?.startsWith('yt_')?'source':actualSrc?.startsWith('ai_')?'ai':'stock',layout:beat.layout,src:actualSrc,credit:false,chrome:false}}));
+        console.log('__QC__'+JSON.stringify({schemaVersion:2,captionLane:'bottom',frame,width:1920,height:1080,fontsOk:document.fonts.check('800 28px KanitX')&&document.fonts.check('700 28px KanitX'),fields,occluders,avatarBacking,transition:frame/25-beat.t<MODE_BLEND_SEC,footage:{origin:frame/25>=VO_END_SEC?'endcard':beat.mode==='full'?'avatar':beat.media==='typo'?'typo':actualSrc?.startsWith('yt_')?'source':actualSrc?.startsWith('ai_')?'ai':'stock',layout:beat.layout,src:actualSrc,credit:false,chrome:false}}));
       }
       continueRender(handle);
     }).catch(cancelRender);
@@ -358,63 +775,28 @@ export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = (props) => {
   const errs = checkEpisodeMinimal(props.episode, props.captions);
   if (errs.length) throw new Error("YtNewsStyle01V4 props invalid: " + errs.join("; "));
   const {qcPlan=false,qcMeasure=false}=props;
-  const EPISODE=props.episode;const BEATS=EPISODE.beats;const BROLL_DUR=EPISODE.brollDur;const VO_END_SEC=EPISODE.voEndSec;const TOTAL_DURATION_SEC=EPISODE.totalDurationSec;const CTA_T=EPISODE.ctaT;const CAPTION_PAGES=props.captions.pages;
+  const EPISODE=props.episode;const BEATS=EPISODE.beats;const VO_END_SEC=EPISODE.voEndSec;const CTA_T=EPISODE.ctaT;const CAPTION_PAGES=props.captions.pages;
   useThaiFonts();
   const frame=useCurrentFrame();const {fps}=useVideoConfig();const t=frame/fps;
   let index=0;BEATS.forEach((b,i)=>{if(t>=b.t)index=i;});const beat=BEATS[index];
-  const punches=beat.punch?.filter(p=>t>=p.t)??[];const punch=punches[punches.length-1];const z=punch?.z??1;
-  const beatStartFrame=Math.ceil(beat.t*fps); // Cutaway starts at first selected frame; avatar stays global.
-  const isEnd=t>=VO_END_SEC;const source=beat.origin==="source";const full=beat.layout==="full";
-  const showLower=beat.lower&&t>=(beat.lower.t??beat.t)&&t<(beat.lower.t??beat.t)+(beat.lower.dur??6);
-  const activeStats=beat.stats?.filter(st=>t>=st.t)??[];
-  const previous=BEATS[Math.max(0,index-1)];
-  const blend=easeInOutCos((t-beat.t)/MODE_BLEND_SEC);
-  const avatarRect=(b:Beat)=>b.mode==="full"?{x:116,y:128,w:1688,h:744,opacity:1}:b.layout==="full"?{x:1340,y:128,w:464,h:690,opacity:0}:{x:1340,y:128,w:464,h:690,opacity:1};
-  const from=avatarRect(previous),to=avatarRect(beat);
-  const card={x:interpolate(blend,[0,1],[from.x,to.x]),y:128,w:interpolate(blend,[0,1],[from.w,to.w]),h:interpolate(blend,[0,1],[from.h,to.h]),opacity:interpolate(blend,[0,1],[from.opacity,to.opacity])};
-  const cardScale=card.h/H;const avatarWidth=W*cardScale;
-  const avatarPunch=beat.mode==="full"?z:1;
-  const cardList=beat.cards?.filter(c=>t>=c.t)??[];const typoCard=cardList[cardList.length-1];
-  // Primary typography must wait until the full avatar has cleared its lane.
-  const typoEntranceStart=Math.max(typoCard?.t??beat.t,beat.t+(previous.mode==="full"?MODE_BLEND_SEC:0));
-  const delayPanelEntrance=(previous.mode==="full"&&beat.mode!=="full")||from.opacity>to.opacity;
-  const panelEntranceStart=beat.t+(delayPanelEntrance?MODE_BLEND_SEC:0);
-  const stageMotion={opacity:clamp01((t-beat.t)/.35),transform:`translateX(${(1-blend)*8}px)`};
+  const kind=sceneKind(beat);const isEnd=t>=VO_END_SEC;
+  const punches=beat.punch?.filter(p=>t>=p.at)??[];const punch=kind==="P"?punches[punches.length-1]:undefined;
+  const live=liveStats(BEATS,t);
+  const showLower=!!beat.lower&&t>=beat.lower.at&&t<beat.lower.at+beat.lower.dur;
   return <div data-qc-root style={{width:W,height:H,position:"relative",overflow:"hidden",background:NAVY}}>
     <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat} episode={EPISODE} captions={props.captions}/>
     {!isEnd&&<>
-      <div data-qc-backing="solid" data-qc-occluder="topbar-backing" style={{background:full?"rgba(11,14,23,.9)":undefined,borderRadius:8,position:"absolute",zIndex:30,left:116,right:116,top:58,display:"flex",justifyContent:"space-between",alignItems:"center",height:48}}>
-        <TextField id="brand" role="label" style={{color:AMBER}}>{EPISODE.brand} · {EPISODE.dateLabel}</TextField>
-        <TextField id="kicker" role="label">{beat.kicker??"AI NEWS"}</TextField>
-      </div>
-      {beat.mode!=="full"&&<>
-        <div style={{position:"absolute",left:full?0:116,top:full?0:128,width:full?1920:1190,height:full?1080:520,overflow:"hidden",borderRadius:full?0:18,background:NAVY_2,...(full?{opacity:stageMotion.opacity}:stageMotion)}}>
-
-          {beat.media!=="typo"&&beat.src&&<div data-qc-footage={beat.src} style={{position:"absolute",inset:0,top:!full&&source&&beat.chrome?52:0,overflow:"hidden"}}><div style={{position:"absolute",inset:0,transform:`scale(${z})`,transformOrigin:`${(punch?.fx??.5)*100}% ${(punch?.fy??.5)*100}%`}}><Sequence from={beatStartFrame} layout="none"><Loop durationInFrames={Math.max(1,Math.floor(((BROLL_DUR[beat.src]??10)-(beat.from??0))*fps)-2)} layout="none"><OffthreadVideo data-qc-footage={beat.src} muted src={staticFile(`${EPISODE.assetDir}/broll/${beat.src}.mp4`)} startFrom={Math.round((beat.from??0)*fps)} style={{width:"100%",height:"100%",objectFit:source&&!full?"contain":"cover"}}/></Loop></Sequence></div></div>}
-          {beat.media==="typo"&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",justifyContent:"center",gap:24,padding:"45px 85px",...boundedEntrance(t,typoEntranceStart,fps)}}>
-            {(typoCard?.lines??[]).map((line,i)=><TextField id={`typo-${i}`} key={i} style={{fontSize:30,color:i%2?MINT:AMBER}}>{line}</TextField>)}
-          </div>}
-        </div>
-
-          {source&&beat.chrome&&<div data-qc-chrome data-qc-backing="solid" data-qc-occluder="chrome" style={{position:"absolute",left:116,width:"max-content",maxWidth:full?1688:1190,top:full?112:128,height:52,background:NAVY_2,zIndex:32,padding:"6px 24px",...stageMotion,boxSizing:"border-box"}}><TextField id="source-url" role="label">{EPISODE.page.domain}{EPISODE.page.path}</TextField></div>}
-        {beat.origin==="ai"&&<div data-qc-backing="solid" data-qc-occluder="ai-label-backing" style={{background:"rgba(11,14,23,.92)",padding:"0 12px",borderRadius:8,position:"absolute",left:116,zIndex:35,top:full?186:658}}><TextField id="ai-label" role="label" style={{color:AMBER}}>ภาพประกอบ AI</TextField></div>}
-        {source&&<div data-qc-credit data-qc-backing="solid" data-qc-occluder="credit-backing" style={{background:full?"rgba(11,14,23,.9)":undefined,padding:full?"0 12px":undefined,borderRadius:8,position:"absolute",left:116,zIndex:35,top:full?186:658}}><TextField id="source-credit" role="label" style={{color:AMBER}}>{EPISODE.officialTag}</TextField></div>}
-        <div data-qc-backing="solid" style={{position:"absolute",zIndex:30,left:116,top:full?704:712,width:full?1688:1190,display:"flex",flexDirection:"column",gap:6,background:full?"rgba(11,14,23,.95)":"linear-gradient(0deg,rgba(11,14,23,.95),rgba(11,14,23,.6),transparent)",padding:full?"0 12px 8px":"0 0 8px",boxSizing:"border-box",...(delayPanelEntrance?boundedEntrance(t,panelEntranceStart,fps):{})}}>
-          <TextField id="headline" style={{fontSize:36,lineHeight:1.45}}>{beat.headline}</TextField>
-          {!full&&<TextField id="description" style={{fontSize:28,lineHeight:1.5,color:CREAM_DIM}}>{beat.sub}</TextField>}
-        </div>
-        {<div style={{position:"absolute",zIndex:30,left:116,top:850,width:1688,display:"flex",gap:24}}>{activeStats.map((st,i)=><div data-qc-backing="solid" data-qc-occluder={`chip-${i}`} key={i} style={{background:full?"rgba(11,14,23,.92)":undefined,borderRadius:12,...boundedEntrance(t,Math.max(st.t,panelEntranceStart),fps)}}><TextField id={`stat-${i}`} role="label" key={i} style={{fontSize:24,padding:"8px 18px",border:`1px solid ${tone(st.tone)}`,borderRadius:12,color:tone(st.tone)}}>{st.big} · {st.label}</TextField></div>)}</div>}
-      </>}
-      <div data-qc-occluder="avatar" style={{position:"absolute",left:card.x,top:card.y,width:card.w,height:card.h,opacity:card.opacity,overflow:"hidden",borderRadius:22,zIndex:20}}>
-        <OffthreadVideo muted src={staticFile(`${EPISODE.assetDir}/avatar_source.mp4`)} style={{position:"absolute",height:card.h,width:avatarWidth,left:(card.w-avatarWidth)/2,objectFit:"cover",transform:`scale(${avatarPunch})`,transformOrigin:`${(punch?.fx??.5)*100}% ${(punch?.fy??.5)*100}%`}}/>
-      </div>
-      {showLower&&beat.lower&&<div data-qc-occluder="lower-third" style={{position:"absolute",zIndex:40,left:140,top:670,background:"rgba(11,14,23,.94)",padding:"14px 24px",borderLeft:`5px solid ${AMBER}`,borderRadius:14,...boundedEntrance(t,beat.lower.t??beat.t,fps)}}>
-        <TextField id="lower-label" role="label" style={{color:AMBER}}>{EPISODE.breakingLabel}</TextField>
-        <TextField id="lower-title" style={{fontSize:36}}>{beat.lower.title}</TextField>
-        <TextField id="lower-sub" style={{fontSize:28}}>{beat.lower.sub}</TextField>
-      </div>}
-      {t>=CTA_T&&<div style={{position:"absolute",zIndex:40,top:812,left:116,right:116,textAlign:"center",...boundedEntrance(t,CTA_T,fps)}}><TextField id="cta" style={{color:AMBER}}>{EPISODE.cta}</TextField></div>}
-      <CaptionLane t={t} lane={beat.captionLane??"bottom"} pages={CAPTION_PAGES}/>
+      <Backdrop/>
+      {(kind==="S"||kind==="T")&&<StageFrame beat={beat} episode={EPISODE} kind={kind}>
+        {kind==="S"?<MuseumScene beat={beat} episode={EPISODE} statVisible={live.length>0}/>:<TypoScene beat={beat} episode={EPISODE} t={t} fps={fps}/>}
+      </StageFrame>}
+      {kind==="W"&&<WideScene beat={beat} episode={EPISODE}/>}
+      <Avatar episode={EPISODE} kind={kind} punch={punch}/>
+      <Header episode={EPISODE} beat={beat}/>
+      {live.length>0&&<StatRail live={live} t={t} fps={fps}/>}
+      {showLower&&beat.lower&&<LowerThird episode={EPISODE} lower={beat.lower} t={t} fps={fps}/>}
+      {t>=CTA_T&&<CtaChip text={EPISODE.cta} t={t} ctaT={CTA_T} fps={fps}/>}
+      <CaptionLane t={t} pages={CAPTION_PAGES}/>
     </>}
     {isEnd&&<EndCard episode={EPISODE}/>}
   </div>;

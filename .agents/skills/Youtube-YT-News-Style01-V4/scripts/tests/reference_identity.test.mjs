@@ -15,6 +15,11 @@ test('sample episode and sample captions are byte-identical to their reference t
  assert.ok(same(src('ytNewsStyle01V4Sample.json'),asset('ytNewsStyle01V4Episode.reference.json')),'sample episode differs from its reference twin');
  assert.ok(same(src('ytNewsStyle01V4SampleCaptions.json'),asset('ytNewsStyle01V4Captions.reference.json')),'sample captions differ from their reference twin');
 });
+test('the migrated sample (fixtures/episodes/valid/sample-v1.json) is byte-identical to the src sample and its reference twin',()=>{
+ const fixture=path.join(skill,'scripts/tests/fixtures/episodes/valid/sample-v1.json');
+ assert.ok(same(fixture,src('ytNewsStyle01V4Sample.json')),'fixture sample-v1.json differs from remotion-composer/src/ytNewsStyle01V4Sample.json');
+ assert.ok(same(fixture,asset('ytNewsStyle01V4Episode.reference.json')),'fixture sample-v1.json differs from assets/ytNewsStyle01V4Episode.reference.json');
+});
 test('engine keeps the measurement guard verbatim and holds no episode data literal',()=>{
  const engine=fs.readFileSync(src('YtNewsStyle01V4.tsx'),'utf8');
  assert.ok(engine.includes('||box.width<=0||box.height<=0'),'probe condition ||box.width<=0||box.height<=0 is missing');
