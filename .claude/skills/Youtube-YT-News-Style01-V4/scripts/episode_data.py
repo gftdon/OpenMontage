@@ -18,6 +18,7 @@ Timing conventions (seconds, absolute on the voice-over clock):
     lower for lower.dur (default 6 s).
 """
 import bisect
+import collections.abc
 import difflib
 import json
 import math
@@ -347,21 +348,88 @@ def _from_tsx(text, vo_end, fallback_vo_end):
 # ----------------------------- visible picture region ------------------------------
 
 SOURCE_W, SOURCE_H = 1920, 1080                       # srcCrop coordinates and the engine's video element are always 1920x1080
-PICTURE_BOX = {'stage': (1138, 640), 'wide': (1280, 720)}   # engine LANES split.picture / wide.picture
+LANES_PATH = Path(__file__).resolve().parent.parent / 'assets' / 'yt-news-v4-lanes.json'   # engine team's lane table (read-only for us)
+_LAYOUT_SCENE = {'stage': 'S', 'wide': 'W'}           # our layout names -> the engine's scene kinds in pictureLaneByScene
+
+
+class LanesFileError(ValueError):
+    """The engine lanes file is unusable (invalid JSON / schema / missing key / bad size). Callers fail closed."""
+
+
+class LanesFileMissing(LanesFileError):
+    """The engine lanes file does not exist (a config problem: frame_checks exits 4 like a missing qc_thresholds.json)."""
+
+
+_boxes_cache = {}
+
+
+def picture_boxes():
+    """{'stage': (w, h), 'wide': (w, h)}: sizes of the picture boxes, READ from assets/yt-news-v4-lanes.json
+    (pictureLaneByScene S / W -> lanes[...] w / h). Re-read when the file changes. Raises LanesFileError / LanesFileMissing."""
+    path = Path(LANES_PATH)
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError as e:
+        raise LanesFileMissing('engine lanes file not found: %s (%s)' % (path, e))
+    if key in _boxes_cache:
+        return _boxes_cache[key]
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as e:
+        raise LanesFileError('cannot read engine lanes file %s: %s' % (path, e))
+    if not isinstance(data, dict) or data.get('schema') != 'yt-news-v4-lanes' or data.get('version') != 1:
+        raise LanesFileError('%s is not a yt-news-v4-lanes v1 file' % path)
+    lanes, by_scene = data.get('lanes'), data.get('pictureLaneByScene')
+    if not isinstance(lanes, dict) or not isinstance(by_scene, dict):
+        raise LanesFileError('%s lacks `lanes` / `pictureLaneByScene`' % path)
+    out = {}
+    for layout, scene in _LAYOUT_SCENE.items():
+        name = by_scene.get(scene)
+        lane = lanes.get(name) if isinstance(name, str) else None
+        if not isinstance(lane, dict):
+            raise LanesFileError('%s: pictureLaneByScene[%s] = %r is not a lane' % (path, scene, name))
+        w, h = lane.get('w'), lane.get('h')
+        for what, v in (('w', w), ('h', h)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+                raise LanesFileError('%s: lane %s has bad %s %r' % (path, name, what, v))
+        out[layout] = (w, h)
+    _boxes_cache.clear()
+    _boxes_cache[key] = out
+    return out
+
+
+class _PictureBoxes(collections.abc.Mapping):
+    """PICTURE_BOX: {'stage': (w, h), 'wide': (w, h)} loaded lazily from the engine lanes file (see picture_boxes). Any access raises
+    LanesFileError (a ValueError) while the file is unusable, so importers such as score_relevance keep working and fail closed."""
+
+    def __getitem__(self, layout):
+        if layout not in _LAYOUT_SCENE:
+            raise KeyError(layout)
+        return picture_boxes()[layout]
+
+    def __iter__(self):
+        return iter(_LAYOUT_SCENE)
+
+    def __len__(self):
+        return len(_LAYOUT_SCENE)
+
+
+PICTURE_BOX = _PictureBoxes()
 
 
 def visible_region(layout, src_w, src_h, crop):
     """Part of a source clip that the viewer actually sees -> (x, y, w, h) in PIXELS OF THE FILE (src_w x src_h).
 
     The engine (YtNewsStyle01V4.tsx srcCropStyle) stretches the file to 1920x1080 (objectFit fill), takes `crop` (a srcCrop dict in
-    1920x1080 space; None = the whole frame) and cover-fits it into the picture box of the layout: s = max(boxW/cropW, boxH/cropH),
+    1920x1080 space; None = the whole frame) and cover-fits it into the picture box of the layout (sizes read from assets/yt-news-v4-lanes.json): s = max(boxW/cropW, boxH/cropH),
     so the visible region is (boxW/s, boxH/s), centred on the crop. Results are floats, in file pixels (for a 1920x1080 file they
     equal score_relevance.visible_region). Fails closed with ValueError: unknown layout, bad / non-positive resolution, a crop that
     is not {x,y,w,h} of finite numbers, has w/h <= 0 or leaves the 1920x1080 frame. Never falls back to the whole frame.
     """
-    box = PICTURE_BOX.get(layout) if isinstance(layout, str) else None
-    if box is None:
-        raise ValueError('unknown layout %r (expected one of %s)' % (layout, ', '.join(sorted(PICTURE_BOX))))
+    if not isinstance(layout, str) or layout not in _LAYOUT_SCENE:
+        raise ValueError('unknown layout %r (expected one of %s)' % (layout, ', '.join(sorted(_LAYOUT_SCENE))))
+    box = picture_boxes()[layout]
     for name, v in (('width', src_w), ('height', src_h)):
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
             raise ValueError('bad source %s %r' % (name, v))

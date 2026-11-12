@@ -601,6 +601,73 @@ class BlankFrameSourceTests(unittest.TestCase):
         self.assertEqual([], fc.dense_blank_issues(mk([False] * 10 + [True] * 6 + [False] * 10), 0.0, 1.0, "clipx", 7.0))    # 0.24 s flash
 
 
+class NearlyBlankMetricTests(unittest.TestCase):
+    """What the gate calls "nearly blank": a frame (area-downscaled to 160x90, full-range luma) is blank when FEWER THAN 2 % of its pixels differ
+    from the frame's MEDIAN luma by MORE THAN 40 (infoDelta, infoMinFraction). Mean and std are not used, so the engine team's "pale"
+    criterion (mean > 200 and std < 20) is neither necessary nor sufficient."""
+
+    def frames(self, make, n=30):
+        import numpy as np
+        rnd = np.random.default_rng(5)
+        return np.stack([make(rnd) for _ in range(n)]).clip(0, 255).astype(np.uint8)
+
+    def verdict(self, arr):
+        st = fc.luma_stats(arr, 0.0, 25)
+        issues = fc.dense_blank_issues(st, 0.0, arr.shape[0] / 25, "c", 1.0)
+        f = arr[0].astype("float32")
+        return {"mean": float(f.mean()), "std": float(f.std()), "info": st[0]["info"], "issues": [(i["severity"]) for i in issues]}
+
+    def test_thresholds_are_the_documented_numbers(self):
+        T = fc.THRESHOLDS
+        self.assertEqual((40, 0.02, 0.5, 1.0, (160, 90)), (T["infoDelta"], T["infoMinFraction"], T["run_min_seconds"], T["blank_error_seconds"], T["sample_size"]))
+
+    def test_pale_frame_with_small_noise_is_caught(self):
+        import numpy as np
+        v = self.verdict(self.frames(lambda r: 210 + r.normal(0, 10, (90, 160))))          # mean 210, std 10: engine "pale"
+        self.assertTrue(v["mean"] > 200 and v["std"] < 20)
+        self.assertEqual(["error"], v["issues"])                                               # 30 frames = 1.2 s
+
+    def test_pale_frame_with_a_smooth_gradient_is_caught(self):
+        import numpy as np
+        grad = np.tile(np.linspace(176, 244, 160), (90, 1))                                    # 210 +- 34: no pixel is more than 40 from the median
+        v = self.verdict(self.frames(lambda r: grad))
+        self.assertTrue(v["mean"] > 200 and v["std"] < 20)
+        self.assertEqual(["error"], v["issues"])
+
+    def test_pale_frame_with_5_percent_dark_detail_is_not_caught(self):
+        import numpy as np
+
+        def make(r):
+            a = np.full((90, 160), 210.0)
+            a[:9, :80] = 120.0                                                                 # 720 of 14,400 pixels = 5 % far from the median
+            return a
+        v = self.verdict(self.frames(make))
+        self.assertTrue(v["mean"] > 200 and v["std"] < 20, v)                                  # still "pale" by the engine criterion ...
+        self.assertAlmostEqual(0.05, v["info"], places=3)
+        self.assertEqual([], v["issues"])                                                       # ... but not blank: 5 % >= 2 %
+
+    def test_the_two_percent_edge(self):
+        import numpy as np
+
+        def make(frac):
+            def f(r):
+                a = np.full((90, 160), 210.0)
+                a.flat[:int(14400 * frac)] = 100.0
+                return a
+            return f
+        self.assertEqual(["error"], self.verdict(self.frames(make(0.019)))["issues"])
+        self.assertEqual([], self.verdict(self.frames(make(0.021)))["issues"])
+
+    def test_duration_floor_and_error_bound(self):
+        import numpy as np
+        blank = lambda r: np.full((90, 160), 210.0)
+        busy = lambda r: r.integers(0, 256, (90, 160)).astype(float)
+        for n, want in ((24, ["warn"]), (25, ["error"]), (13, ["warn"]), (12, [])):            # 0.96 s / 1.0 s / 0.52 s / 0.48 s
+            with self.subTest(frames=n):
+                arr = np.concatenate([self.frames(busy, 10), self.frames(blank, n), self.frames(busy, 10)])
+                self.assertEqual(want, self.verdict(arr)["issues"])
+
+
 class StaticHoldTests(unittest.TestCase):
     """static-hold (error): the part of a source clip the viewer sees hardly changes for longer than maxHoldSeconds (qc_thresholds.json)."""
 
@@ -703,6 +770,28 @@ class StaticHoldTests(unittest.TestCase):
         d = rep["staticHold"]["runs"][0]["longestStatic"]["duration"]
         self.assertGreater(d, 9.3)
         self.assertLess(d, 9.5)
+
+    def test_lanes_file_missing_is_tool_missing_and_invalid_is_region_unknown(self):
+        ed = fc._episode_data()
+        old = ed.LANES_PATH
+        beats = Media.dir / "static_lanes.json"
+        beats.write_text(json.dumps([clip_beat(0, "st_plain"), {"t": 3, "mode": "full"}]))
+        argv = ["cutaways", "--beats", str(beats), "--media-root", str(Media.dir), "--frames-dir", str(Media.dir / "sfr_lanes"), "--episode-end", "5"]
+        runner = lambda paths: {x: ok_lines() for x in paths}
+        try:
+            ed.LANES_PATH = Media.dir / "no_such_lanes.json"
+            self.assertEqual(4, fc.main(argv, ocr_runner=runner))
+            bad = Media.dir / "bad_lanes.json"
+            bad.write_text('{"schema": "yt-news-v4-lanes", "version": 1, "lanes": {}, "pictureLaneByScene": {}}')
+            ed.LANES_PATH = bad
+            rep = self.run_beats([clip_beat(0, "st_plain"), {"t": 3, "mode": "full"}])
+            got = self.holds(rep, "static-hold-region-unknown")
+            self.assertEqual(1, len(got), rep["issues"])
+            self.assertEqual("error", got[0]["severity"])
+            self.assertIn("lane", got[0]["detail"])
+            self.assertFalse(rep["pass"])
+        finally:
+            ed.LANES_PATH = old
 
     def test_threshold_comes_from_qc_thresholds_json(self):
         data = json.loads(fc.QC_THRESHOLDS_PATH.read_text())

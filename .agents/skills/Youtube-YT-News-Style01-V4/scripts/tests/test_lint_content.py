@@ -307,7 +307,7 @@ class TimingFarErrorTests(unittest.TestCase):
 
     def test_timed_items_spoken_only_far_away_are_errors(self):
         for name, fields in (('stat', dict(stats=[{'at': 50.0, 'dur': 5.0, 'big': '777', 'label': 'x'}])),
-                             ('card', dict(media='typo', typo='card', cards=[{'at': 50.0, 'lines': ['ใช้ 777 ครั้ง']}], src=None, origin=None)),
+                             ('card', dict(media='typo', typo='card', cards=[{'at': 50.0, 'lines': ['ก']}, {'at': 52.0, 'lines': ['ใช้ 777 ครั้ง']}], src=None, origin=None)),     # cards[0] is a label: use the 2nd card
                              ('lower', dict(lower={'at': 50.0, 'dur': 3.0, 'title': 'ใช้ 777', 'sub': 'x'}))):
             with self.subTest(name):
                 issues, m = self.lint(pip(50.0, **fields))
@@ -357,6 +357,54 @@ class TimingFarErrorTests(unittest.TestCase):
         issues, _ = self.lint(pip(50.0, stats=[{'at': 50.0, 'dur': 5.0, 'big': '777', 'label': 'x'}]), timingMaxDistanceSeconds=1e9)
         self.assertEqual([], self.far(issues))
         self.assertIn('card-timing-gone-before-spoken', codes(issues))
+
+
+class FirstCardTests(unittest.TestCase):
+    """Schema S14: a typo `card` beat's first card starts exactly at the beat start, so it cannot follow the "+-2 s of the spoken
+    word" rule. cards[0] is treated like a whole-beat label (gone-before-spoken only); cards[1..] keep early / late / far."""
+
+    def lint(self, spoken_at, first_text='ใช้ 777 ครั้ง', second_text='ก', beat_t=10.0, second_at=20.0, end=30.0, words=None):
+        inp = make_inputs(words or [at_time(0, ['a']), at_time(spoken_at, ['ใช้', '777', 'ครั้ง'])], source='777')
+        beat = dict(t=beat_t, mode='pip', media='typo', typo='card', layout='stage',
+                    cards=[{'at': beat_t, 'lines': [first_text]}, {'at': second_at, 'lines': [second_text]}])
+        return lc.lint_content(episode([dict(t=0, mode='full'), beat, dict(t=end, mode='full')], 400), inp, {})[0]
+
+    def timing(self, issues, field_prefix):
+        return [i['code'] for i in issues if i['code'].startswith('card-timing') and i['field'].startswith(field_prefix)]
+
+    def test_first_card_spoken_while_visible_is_never_early_or_late(self):
+        for spoken in (10.5, 12.0, 15.5, 19.0):          # 15.5 is 5.5 s after the card appeared: -early for any other timed item
+            with self.subTest(spoken=spoken):
+                self.assertEqual([], self.timing(self.lint(spoken), 'cards[0]'))
+
+    def test_first_card_number_spoken_before_the_beat_is_not_late(self):
+        self.assertEqual([], self.timing(self.lint(4.0), 'cards[0]'))
+
+    def test_first_card_must_still_be_on_screen_when_the_number_is_spoken(self):
+        got = self.timing(self.lint(25.0), 'cards[0]')                 # card 2 replaces card 1 at 20; spoken at 25.5
+        self.assertEqual(['card-timing-gone-before-spoken'], got)
+
+    def test_first_card_is_exempt_from_far(self):
+        words = [at_time(0, ['a']), at_time(300, ['ใช้', '777', 'ครั้ง'])]
+        self.assertEqual([], self.timing(self.lint(0, words=words), 'cards[0]'))
+
+    def test_later_cards_keep_the_two_second_rule_and_far(self):
+        # card 2 appears at 20, its number is spoken at 25.5: 5.5 s after it appeared is "early"
+        self.assertEqual(['card-timing-early'], self.timing(self.lint(25.0, first_text='ก', second_text='ใช้ 777 ครั้ง'), 'cards[1]'))
+        self.assertEqual([], self.timing(self.lint(20.5, first_text='ก', second_text='ใช้ 777 ครั้ง'), 'cards[1]'))
+        far = self.lint(0, first_text='ก', second_text='ใช้ 777 ครั้ง', words=[at_time(0, ['a']), at_time(300, ['ใช้', '777', 'ครั้ง'])])
+        self.assertEqual(['card-timing-far'], self.timing(far, 'cards[1]'))
+        late = self.lint(0, first_text='ก', second_text='ใช้ 777 ครั้ง', words=[at_time(0, ['a']), at_time(10.0, ['ใช้', '777', 'ครั้ง'])])
+        self.assertEqual(['card-timing-late'], self.timing(late, 'cards[1]'))
+
+    def test_items_and_stats_keep_the_rule(self):
+        inp = make_inputs([at_time(0, ['a']), at_time(25, ['ใช้', '777', 'ครั้ง'])], source='777')
+        stat = pip(10.0, stats=[{'at': 10.0, 'dur': 12.0, 'big': '777', 'label': 'x'}])
+        issues = lc.lint_content(episode([dict(t=0, mode='full'), stat, dict(t=30.0, mode='full')], 400), inp, {})[0]
+        self.assertIn('card-timing-gone-before-spoken', codes(issues))     # stat window 10-22, spoken at 25.5
+        stat = pip(10.0, stats=[{'at': 10.0, 'dur': 12.0, 'big': '777', 'label': 'x'}])
+        inp = make_inputs([at_time(0, ['a']), at_time(16, ['ใช้', '777', 'ครั้ง'])], source='777')
+        self.assertIn('card-timing-early', codes(lc.lint_content(episode([dict(t=0, mode='full'), stat, dict(t=30.0, mode='full')], 400), inp, {})[0]))
 
 
 class TypoFillerTests(unittest.TestCase):

@@ -60,18 +60,27 @@ RUN_LOCK_NAME = '.finalize.lock'
 RUN_LOCK_STALE_SEC = 15 * 60     # only a guard against pid reuse: a lock whose pid is dead is stale at once
 FRAME_TOLERANCE_SEC = 0.04       # final duration vs totalDurationSec
 TOOL_NAMES = ('node', 'ffmpeg', 'ffprobe', 'git', 'swift')
+REQUIRED_TOOLS = TOOL_NAMES      # all of them: swift = macOS Vision OCR of the frames gate (no OCR = no watermark/promo check)
+# composer-relative files whose current hashes the layout manifest and the render receipt must carry (CF-A66, 5fe7699)
+ENGINE_REL = 'src/YtNewsStyle01V4.tsx'
+ENTRY_REL = 'src/ytNewsStyle01V4.entry.tsx'
+EXPECTED_PIX_FMT = 'yuv420p'
 
 # =================================================================================================================
-# CONTRACT with the other team's scripts (CF-A66, commit 9b0c7f7).  EVERY field / flag name of those scripts that
+# CONTRACT with the other team's scripts (CF-A66, commit 5fe7699).  EVERY field / flag name of those scripts that
 # finalize depends on lives in this section; if their code changes, change it here only.
-# Verified against the real files at 9b0c7f7; where code and gate-spec disagreed the CODE wins (see the notes).
+# Verified against the real files at 5fe7699; where code and gate-spec disagreed the CODE wins (see the notes).
 # =================================================================================================================
 # -- qc_layout / qc_report.mjs : layout report v3 (<project>/qc/layout/report.json) -----------------------------
 #    keys used: schema, version, status ("finished"), pass, complete, requestedCount, fullPlanCount, compositionId,
 #    runId, manifestHash, manifestPath (RELATIVE to the layout --out dir, as qc_layout.mjs writes it), reusedFrames.
+#    The V4 bundle is built from its OWN entry (src/ytNewsStyle01V4.entry.tsx), never from Root.tsx / index.tsx.
 LAYOUT_REPORT_SCHEMA = 'yt-news-layout-report'
 LAYOUT_REPORT_VERSION = 3
-# -- qc_manifest.mjs : run manifest + manifestHash() (we call the JS function; canonical JSON is NOT re-implemented)
+# -- qc_manifest.mjs : run manifest + manifestHash() (we call the JS function; canonical JSON is NOT re-implemented).
+#    sourceHashes keys used: episode.json, captions.json, scripts/gates.lock.json, src/YtNewsStyle01V4.tsx (ENGINE_REL),
+#    src/ytNewsStyle01V4.entry.tsx (ENTRY_REL); the other keys (import closure files, assets references, scripts/qc_*, the
+#    package-lock) are covered by the hash itself
 RUN_MANIFEST_SCHEMA = 'yt-news-v4-run-manifest'
 QC_MANIFEST_SCRIPT = 'qc_manifest.mjs'
 MANIFEST_KEY_EPISODE = 'episode.json'            # keys of manifest.sourceHashes (computeSourceHashes)
@@ -80,8 +89,11 @@ MANIFEST_KEY_LOCK = 'scripts/gates.lock.json'
 # -- render_episode.mjs : render receipt <visual>.receipt.json (RECEIPT_FIELDS; written next to the output file as
 #    `<out>.receipt.json`).  keys used: schema, schemaVersion, compositionId, draft (must be false), hasAudio (must be
 #    false), outputSha256 (the visual), episodeJsonSha256, captionsJsonSha256, gatesLockSha256 (null without a lock),
-#    gateManifestHash, gateRunId, renderId, width, height, fps, frameCount (checked against ffprobe of the visual).
-#    The render reads public/ from <composer>/public.
+#    gateManifestHash, gateRunId, renderId, width, height, fps, frameCount (checked against ffprobe of the visual),
+#    engineSha256, entrySha256 and entryClosure ({"src/<file>": sha256} of the entry and every file it imports; each must
+#    equal the current composer file).  rootTsxSha256 / indexTsxSha256 no longer exist.  The render reads public/ from
+#    <composer>/public.  outputSha256 only binds THIS file to its receipt: two renders of the same sources are NOT
+#    byte-identical, so nothing here compares or expects equal hashes across renders.
 RENDER_RECEIPT_SUFFIX = '.receipt.json'
 RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 # -- episode.json (episode_schema.mjs): top level voEndSec, totalDurationSec, assetDir, avatarFile.  The media of an
@@ -96,9 +108,12 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 # -- gate_integrity.mjs : `<composer-dir> --json --skill-dir <dir> --require-lock` -> stdout {ok, issues[{id,message}],
 #    warnings, lock}, exit 0 / 3 refused / 2 usage.  Without --require-lock a missing lock is only a WARNING, so it is
 #    always passed.  Its lock check needs the skill dir to sit at <repo>/.claude|.agents/skills/<skill>.  Exit 3 is an
-#    INTEGRITY refusal (class 3 -> finalize exit 3).
-# -- gates_lock.py (ours) : REQUIRED_EXTERNAL lives there (ONE place); finalize imports it and refuses a lock that does
-#    not list every path ("external-not-locked", exit 3).  The final list comes from the engine team (CF-A66).
+#    INTEGRITY refusal (class 3 -> finalize exit 3).  Issue ids: engine-drift, entry-drift, entry-registration,
+#    entry-closure, gates-lock*.  `<composer> --list-external` prints the repo-relative files the lock must pin (see below).
+# -- gates_lock.py (ours) : the files the lock must pin under "external" are never typed by hand: gates_lock.py runs
+#    `node <skill>/scripts/gate_integrity.mjs <repo>/remotion-composer --list-external` (one repo-relative path per line) in
+#    write AND verify, so finalize refuses a lock that lacks one ("external-not-locked", exit 3); node / the script missing
+#    ("tool-missing", exit 4) or an empty / failing list ("required-external-unavailable", exit 3) fail closed too.
 # -- lint_content.py : --captions (same file as the schema gate) and --evidence / --frames-report / --source-timed (optional;
 #    lint itself reports evidence-missing, window-evidence-unavailable, cue-mismatch when a source beat lacks them, so passing
 #    what exists never hides an error)
@@ -114,7 +129,11 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    is the sha256 of caption_pages.json.  `key` hashes (audio sha, script sha, tool id, model, args): the audio hash alone is
 #    NOT recorded, so the audio binding is only checked statistically by the timing gate
 # -- mux_av.sh (ours) : <final>.mux.json {visual, avatar, bed, final: {path (absolute), sha256}}; the video is stream-copied
-#    (-c:v copy) so the video packets of final.mp4 must equal those of visual.mp4
+#    (-c:v copy) so the video packets of final.mp4 must equal those of visual.mp4.  The V4 render is yuv420p + bt709
+#    (ENCODER in render_episode.mjs): ffprobe pix_fmt of BOTH files must be yuv420p; pix_fmt / color_space / color_range of the
+#    final go into the delivery receipt
+# -- frame_checks.py cutaways : needs swift/swiftc (Vision OCR); without it the command exits 4 ("OCR is never skipped
+#    silently"), and finalize refuses to start without `swift` on PATH (REQUIRED_TOOLS)
 # -- fetch_broll.py --music : <bed>.source.json {schema "yt-news-v4-music-source", provider, track_id, track_title, url,
 #    query, sha256, fetched_at}; sha256 must equal the bed file's sha256
 # =================================================================================================================
@@ -1037,7 +1056,8 @@ def verify_layout(report_path, ctx, env, deadline):
         p.append('run manifest has no sourceHashes')
     else:
         for key, path in ((MANIFEST_KEY_EPISODE, ctx.paths['episode']), (MANIFEST_KEY_CAPTIONS, ctx.paths['captions']),
-                          (MANIFEST_KEY_LOCK, LOCK_FILE)):
+                          (MANIFEST_KEY_LOCK, LOCK_FILE), (ENGINE_REL, ctx.composer / ENGINE_REL),
+                          (ENTRY_REL, ctx.composer / ENTRY_REL)):
             want = hashes.get(key)
             if not valid_sha(want):
                 p.append('run manifest sourceHashes[%s] missing' % key)
@@ -1069,11 +1089,13 @@ def probe_video(ctx, path, env, deadline):
         return None, BUDGET_MSG, 4
     try:
         r = subprocess.run([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-count_packets', '-show_entries',
-                            'stream=width,height,r_frame_rate,nb_read_packets', '-of', 'json', str(path)],
+                            'stream=width,height,r_frame_rate,nb_read_packets,pix_fmt,color_space,color_range',
+                            '-of', 'json', str(path)],
                            capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
         s = json.loads(r.stdout)['streams'][0]
         info = {'width': int(s['width']), 'height': int(s['height']), 'fps': parse_fps(s['r_frame_rate']),
-                'frames': int(s['nb_read_packets'])}
+                'frames': int(s['nb_read_packets']), 'pix_fmt': s.get('pix_fmt'), 'color_space': s.get('color_space'),
+                'color_range': s.get('color_range')}
     except subprocess.TimeoutExpired:
         return None, 'ffprobe timed out on %s' % ctx.rel(path), 4
     except (OSError, ValueError, KeyError, IndexError, TypeError):
@@ -1081,6 +1103,16 @@ def probe_video(ctx, path, env, deadline):
     if info['fps'] is None:
         return None, 'cannot read the frame rate of %s' % ctx.rel(path), 2
     return info, None, 0
+
+
+def verify_video_format(ctx, probe_visual, probe_final):
+    """The V4 render is yuv420p; mux_av.sh only copies it, so a different pix_fmt means the final was re-encoded."""
+    p = []
+    for label, path, probe in (('visual', ctx.paths['visual'], probe_visual), ('final', ctx.paths['final'], probe_final)):
+        if probe is not None and probe['pix_fmt'] != EXPECTED_PIX_FMT:
+            p.append('%s pix_fmt is %r, not %s: the final must not be re-encoded (mux_av.sh copies the visual stream as it was rendered)'
+                     % (ctx.rel(path), probe['pix_fmt'], EXPECTED_PIX_FMT))
+    return p
 
 
 def verify_render_receipt(receipt_path, ctx, layout_info, probe=None):
@@ -1113,6 +1145,25 @@ def verify_render_receipt(receipt_path, ctx, layout_info, probe=None):
         p.append('render receipt gatesLockSha256 is null/invalid (render ran without a lock)')
     elif not LOCK_FILE.is_file() or h(LOCK_FILE) != lock.lower():
         p.append('render receipt gatesLockSha256 differs from the current gates.lock.json')
+    for key, rel in (('engineSha256', ENGINE_REL), ('entrySha256', ENTRY_REL)):
+        v, f = data.get(key), ctx.composer / rel
+        if not valid_sha(v):
+            p.append('render receipt %s missing' % key)
+        elif not f.is_file() or h(f) != v.lower():
+            p.append('render receipt %s does not match the current composer %s (rendered with another engine/entry)' % (key, rel))
+    closure = data.get('entryClosure')
+    if not (isinstance(closure, dict) and closure):
+        p.append('render receipt entryClosure missing')
+    else:
+        for rel, v in sorted(closure.items()):
+            f = (ctx.composer / rel) if isinstance(rel, str) and rel.startswith('src/') and '..' not in Path(rel).parts else None
+            if f is None or not valid_sha(v):
+                p.append('render receipt entryClosure has a bad entry %r' % (rel,))
+            elif not f.is_file() or h(f) != v.lower():
+                p.append('render receipt entryClosure[%s] does not match the current composer file' % rel)
+        for rel in (ENGINE_REL, ENTRY_REL):
+            if rel not in closure:
+                p.append('render receipt entryClosure does not list %s' % rel)
     if layout_info.get('manifestHash') and (data.get('gateManifestHash') or '').lower() != str(layout_info['manifestHash']).lower():
         p.append('render receipt gateManifestHash differs from the layout report manifestHash')
     if layout_info.get('runId') and data.get('gateRunId') != layout_info['runId']:
@@ -1276,6 +1327,18 @@ def run_verified(ctx, env, deadline):
         probs, cls, vinfo = ['visual or final video missing'], 2, {}
     recs.append(verified_record('mux-video', probs, ctx, P['final'], {ctx.rel(p): h(p) for p in (P['visual'], P['final']) if p.is_file()},
                                 cls=cls or 2, status='missing' if cls == 4 else 'stale', extra=vinfo or None))
+    # pixel format: yuv420p on both (a re-encode of the final is a quality failure); colour facts of the final go into the receipt
+    fprobe, ferr, fcls = (None, 'final file missing', 2) if not P['final'].is_file() else probe_video(ctx, P['final'], env, deadline)
+    if ferr or perr:
+        err_cls = 4 if 4 in (pcls if perr else 0, fcls if ferr else 0) else 2
+        recs.append(verified_record('video-format', [x for x in (perr, ferr) if x], ctx, P['final'], {}, cls=err_cls,
+                                    status='missing' if err_cls == 4 else 'stale'))
+        summary_info['video'] = None
+    else:
+        vf = {k: fprobe.get(k) for k in ('pix_fmt', 'color_space', 'color_range')}
+        recs.append(verified_record('video-format', verify_video_format(ctx, probe, fprobe), ctx, P['final'],
+                                    {ctx.rel(p): h(p) for p in (P['visual'], P['final'])}, cls=1, status='fail', extra=dict(vf)))
+        summary_info['video'] = vf
     # final duration
     probs, cls, dinfo = verify_duration(ctx, env, deadline)
     recs.append(verified_record('final-duration', probs, ctx, P['final'], {ctx.rel(P['final']): h(P['final'])} if P['final'].is_file() else {},
@@ -1518,6 +1581,7 @@ def run(args):
             problems.append('composer-mismatch: --composer %s is not %s' % (args.composer, repo_root / 'remotion-composer'))
         lock_mod = load_sibling('gates_lock')
         lock_mod.GIT_BIN = tools.get('git') or 'git'
+        lock_mod.NODE_BIN = tools.get('node') or 'node'
         lock_mod.GIT_TIMEOUT = GIT_TIMEOUT_SEC
         parent = SKILL_DIR.parent
         if parent.name == 'skills' and parent.parent.name in ('.claude', '.agents'):
@@ -1534,9 +1598,15 @@ def run(args):
     if problems:
         if deadline.expired():
             return finish(4, [], [remaining_msg('integrity')] + ['integrity: %s' % p for p in problems[:5]], problems)
+        if all(p.startswith('tool-missing:') for p in problems):      # node / gate_integrity.mjs cannot list the required files
+            return finish(4, [], ['integrity: %s' % p for p in problems[:20]], problems)
         return finish(3, [], ['integrity: %s' % p for p in problems[:20]], problems, hint=RESTORE_HINT)
     if deadline.expired():
         return finish(4, [], [remaining_msg('integrity')])
+    missing_tools = [n for n in REQUIRED_TOOLS if not tools.get(n)]
+    if missing_tools:
+        return finish(4, [], ['required tool(s) not found on PATH: %s (swift = macOS Vision OCR for the frames gate; '
+                              'nothing was run)' % ', '.join(missing_tools)])
 
     # ---- context, run lock, deliver path (class 2 problems; nothing has run yet)
     try:
@@ -1646,7 +1716,7 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
                                     for k in ('episode', 'script', 'source_script', 'srt', 'words', 'line_starts', 'word_pages',
                                               'caption_options', 'captions', 'visual', 'final')},
                    'layout': vinfo.get('layout'), 'render': vinfo.get('render'), 'mux': vinfo.get('mux'),
-                   'music': vinfo.get('music'),
+                   'music': vinfo.get('music'), 'video': vinfo.get('video'),
                    'manifest_sha256': ctx.manifest_sha,
                    'gates': [public(r, False) for r in records], 'relevance_status': relevance,
                    'started_at': started, 'finished_at': now_iso(), 'seconds': round(time.monotonic() - t_start, 2)}

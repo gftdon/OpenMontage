@@ -14,8 +14,23 @@ spec = importlib.util.spec_from_file_location('gates_lock_under_test', SCRIPT)
 gl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gl)
 
+NODE = shutil.which('node')
+if NODE:
+    gl.NODE_BIN = NODE
 NAME = 'FakeSkill'
 ENGINE = 'remotion-composer/src/YtNewsStyle01V4.tsx'
+REAL_INTEGRITY = SCRIPT.parent / 'gate_integrity.mjs'
+# a stand-in for the engine team's `gate_integrity.mjs <composer> --list-external`: prints FAKE_EXTERNAL_LIST (default: the engine file)
+FAKE_INTEGRITY = '''import process from 'node:process';
+if (process.argv.includes('--list-external')) {
+  const exit = Number(process.env.FAKE_LIST_EXIT || 0);
+  if (exit) { process.stderr.write('boom\\n'); process.exit(exit); }
+  const list = process.env.FAKE_EXTERNAL_LIST ?? 'remotion-composer/src/YtNewsStyle01V4.tsx';
+  process.stdout.write(list ? list + '\\n' : '');
+  process.exit(0);
+}
+process.exit(2);
+'''
 
 
 def sh(cwd, *args):
@@ -30,6 +45,7 @@ def make_repo(tmp, external=('engine/core.ts',)):
     (skill / 'references').mkdir()
     (skill / 'SKILL.md').write_text('skill\n')
     (skill / 'scripts' / 'gate.py').write_text('print(1)\n')
+    (skill / 'scripts' / 'gate_integrity.mjs').write_text(FAKE_INTEGRITY)
     (skill / 'references' / 'a.md').write_text('ref\n')
     (skill / 'scripts' / 'tests' / 'test_x.py').write_text('x\n')
     (skill / 'scripts' / '__pycache__' / 'gate.cpython-312.pyc').write_bytes(b'\0\1')
@@ -37,7 +53,7 @@ def make_repo(tmp, external=('engine/core.ts',)):
     (repo / 'engine').mkdir()
     (repo / 'engine' / 'core.ts').write_text('export {}\n')
     (repo / 'remotion-composer' / 'src').mkdir(parents=True)
-    (repo / 'remotion-composer' / 'src' / 'YtNewsStyle01V4.tsx').write_text('export const E = 1;\n')     # REQUIRED_EXTERNAL
+    (repo / 'remotion-composer' / 'src' / 'YtNewsStyle01V4.tsx').write_text('export const E = 1;\n')     # printed by the fake --list-external
     sh(repo, 'git', 'init', '-q')
     sh(repo, 'git', 'config', 'user.email', 't@t')
     sh(repo, 'git', 'config', 'user.name', 't')
@@ -62,6 +78,7 @@ def codes(problems):
     return sorted({p.split(':')[0] for p in problems})
 
 
+@unittest.skipUnless(NODE, 'node required')
 class LockTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='gates-lock-')
@@ -79,8 +96,9 @@ class LockTests(unittest.TestCase):
         self.assertEqual([], self.verify())
         lock = json.loads((self.skill / 'scripts' / 'gates.lock.json').read_text())
         # tests and fixtures are locked too; only __pycache__, .DS_Store and the lock itself are excluded
-        self.assertEqual(['SKILL.md', 'references/a.md', 'scripts/gate.py', 'scripts/tests/test_x.py'], list(lock['files']))
-        self.assertEqual(['engine/core.ts', ENGINE], list(lock['external']))      # the required file is always locked
+        self.assertEqual(['SKILL.md', 'references/a.md', 'scripts/gate.py', 'scripts/gate_integrity.mjs', 'scripts/tests/test_x.py'],
+                         list(lock['files']))
+        self.assertEqual(['engine/core.ts', ENGINE], list(lock['external']))      # what --list-external printed is always locked
         self.assertEqual((NAME, 'yt-news-v4-gates-lock', 1), (lock['skill'], lock['schema'], lock['version']))
         for excluded in ('__pycache__', '.DS_Store', 'gates.lock.json', '.pyc'):
             self.assertFalse(any(excluded in k for k in lock['files']), excluded)
@@ -101,6 +119,20 @@ class LockTests(unittest.TestCase):
         (self.skill / 'scripts' / 'tests' / 'fixtures').mkdir()
         (self.skill / 'scripts' / 'tests' / 'fixtures' / 'f.json').write_text('{}')
         self.assertIn('file-extra', codes(self.verify()))
+
+    def test_a_new_file_anywhere_in_the_skill_or_its_mirror_is_file_extra(self):
+        for root, label in ((self.skill, ''), (self.mirror, 'mirror')):
+            for sub in ('scripts', 'scripts/tests', 'assets', 'references', '.'):
+                (root / sub).mkdir(parents=True, exist_ok=True)
+                f = root / sub / 'added.txt'
+                f.write_text('x\n')
+                p = [x for x in self.verify() if x.startswith('file-extra')]
+                self.assertTrue(p, (label, sub))
+                self.assertTrue(any('added.txt' in x for x in p), (label, sub, p))
+                if label:
+                    self.assertTrue(any('[mirror' in x for x in p), (label, sub, p))
+                f.unlink()
+        self.assertEqual([], [x for x in self.verify() if x.startswith('file-extra')])
 
     def test_lock_is_deterministic(self):
         a = gl.lock_bytes(gl.build_lock(self.skill, self.repo, ['engine/core.ts']))
@@ -244,7 +276,8 @@ class LockTests(unittest.TestCase):
         real = subprocess.run
 
         def spy(cmd, *a, **k):
-            calls.append((cmd, k.get('env')))
+            if cmd[0] == gl.GIT_BIN:
+                calls.append((cmd, k.get('env')))
             return real(cmd, *a, **k)
         bogus = str(Path(self.tmp) / 'nope')
         with mock.patch.object(gl.subprocess, 'run', side_effect=spy), \
@@ -267,21 +300,100 @@ class LockTests(unittest.TestCase):
         p = gl.verify(self.skill, self.repo, [self.mirror], deadline=_t.monotonic() - 1)
         self.assertIn('git-unavailable', codes(p))
 
-    def test_required_external_constant_is_the_engine_file_and_the_only_list(self):
-        self.assertEqual((ENGINE,), gl.REQUIRED_EXTERNAL)
-        # verify() with no argument enforces it; the lock written without --external has it
-        self.assertEqual([], gl.verify(self.skill, self.repo, [self.mirror]))
-        write_lock(self.repo, self.skill, ('engine/core.ts',), required=())
-        shutil.copy(self.skill / 'scripts' / 'gates.lock.json', self.mirror / 'scripts' / 'gates.lock.json')
-        self.commit()
-        self.assertEqual(['external-not-locked'], codes(gl.verify(self.skill, self.repo, [self.mirror])))
+    # ---- the required externals come from the engine's own command, never from this module
+    def test_no_required_list_is_typed_in_the_module(self):
+        text = SCRIPT.read_text()
+        self.assertFalse(hasattr(gl, 'REQUIRED_EXTERNAL'))
+        self.assertNotIn('YtNewsStyle01V4', text)
+        self.assertNotIn('ytNewsStyle01V4', text)
 
-    def test_write_cli_without_external_always_includes_the_required_files(self):
+    def run_cli(self, *args, **env):
+        e = dict(os.environ, **env)
+        return subprocess.run([sys.executable, '-B', str(SCRIPT), *args], capture_output=True, text=True, env=e)
+
+    def test_the_list_follows_the_command_output(self):
+        listed = '\n'.join([ENGINE, 'engine/core.ts', ENGINE])           # unsorted + duplicated: normalised
+        with mock.patch.dict(os.environ, {'FAKE_EXTERNAL_LIST': listed}):
+            self.assertEqual(['engine/core.ts', ENGINE], gl.list_required_external(self.skill, self.repo))
+
+    def test_the_command_is_run_against_repo_remotion_composer_with_list_external(self):
+        calls = []
+        real = subprocess.run
+
+        def spy(cmd, *a, **k):
+            if cmd[0] == gl.NODE_BIN:
+                calls.append(cmd)
+            return real(cmd, *a, **k)
+        with mock.patch.object(gl.subprocess, 'run', side_effect=spy):
+            gl.list_required_external(self.skill, self.repo)
+        self.assertEqual([[gl.NODE_BIN, str(self.skill / 'scripts' / 'gate_integrity.mjs'), str(self.repo / 'remotion-composer'),
+                           '--list-external']], calls)
+
+    def test_a_path_printed_by_the_command_that_the_lock_lacks_fails_verify(self):
+        with mock.patch.dict(os.environ, {'FAKE_EXTERNAL_LIST': '\n'.join([ENGINE, 'remotion-composer/src/new.tsx'])}):
+            p = self.verify()
+        self.assertEqual(['external-not-locked'], codes(p))
+        self.assertIn('remotion-composer/src/new.tsx', p[0])
+
+    def test_write_refuses_when_the_list_is_unusable_and_writes_nothing(self):
+        out = Path(self.tmp) / 'lock.json'
+        cases = {'empty': {'FAKE_EXTERNAL_LIST': ''}, 'exit': {'FAKE_LIST_EXIT': '3'}, 'absolute': {'FAKE_EXTERNAL_LIST': '/etc/passwd'},
+                 'escape': {'FAKE_EXTERNAL_LIST': '../x.tsx'}, 'missing-file': {'FAKE_EXTERNAL_LIST': 'remotion-composer/src/none.tsx'}}
+        for label, env in cases.items():
+            r = self.run_cli('write', '--skill-dir', str(self.skill), '--repo-root', str(self.repo), '--out', str(out), **env)
+            self.assertEqual(2, r.returncode, (label, r.stdout, r.stderr))
+            self.assertFalse(out.exists(), label)
+        r = self.run_cli('write', '--skill-dir', str(self.skill), '--repo-root', str(self.repo), '--out', str(out), FAKE_LIST_EXIT='3')
+        self.assertIn('cannot obtain the required external files', r.stderr)
+
+    def test_write_refuses_when_the_script_is_missing(self):
+        (self.skill / 'scripts' / 'gate_integrity.mjs').unlink()
+        with self.assertRaises(ValueError) as cm:
+            gl.build_lock(self.skill, self.repo, [])
+        self.assertIn('gate_integrity.mjs is missing', str(cm.exception))
+
+    def test_verify_problem_codes_tool_missing_versus_unavailable_list(self):
+        (self.skill / 'scripts' / 'gate_integrity.mjs').unlink()
+        self.assertIn('tool-missing', codes(self.verify()))                  # finalize: class 4
+        (self.skill / 'scripts' / 'gate_integrity.mjs').write_text(FAKE_INTEGRITY)
+        with mock.patch.dict(os.environ, {'FAKE_EXTERNAL_LIST': ''}):
+            self.assertIn('required-external-unavailable', codes(self.verify()))      # finalize: class 3
+        with mock.patch.dict(os.environ, {'FAKE_LIST_EXIT': '2'}):
+            p = self.verify()
+        self.assertIn('required-external-unavailable', codes(p))
+        self.assertTrue(any('exited 2' in x for x in p))
+
+    def test_node_missing_is_tool_missing(self):
+        old = gl.NODE_BIN
+        self.addCleanup(setattr, gl, 'NODE_BIN', old)
+        gl.NODE_BIN = str(Path(self.tmp) / 'no-such-node')
+        self.assertIn('tool-missing', codes(self.verify()))
+
+    def test_the_command_is_bounded_by_the_deadline(self):
+        import time as _t
+        with self.assertRaises(gl.RequiredListError) as cm:
+            gl.list_required_external(self.skill, self.repo, deadline=_t.monotonic() - 1)
+        self.assertEqual('tool', cm.exception.kind)
+
+    def test_cli_verify_reports_an_unusable_list_with_exit_1(self):
+        r = self.run_cli('verify', '--skill-dir', str(self.skill), '--repo-root', str(self.repo), FAKE_EXTERNAL_LIST='')
+        self.assertEqual(1, r.returncode)
+        self.assertIn('required-external-unavailable', r.stdout)
+
+    def test_write_cli_without_external_includes_every_printed_path(self):
         out = self.skill / 'scripts' / 'gates.lock.json'
-        r = subprocess.run([sys.executable, '-B', str(SCRIPT), 'write', '--skill-dir', str(self.skill), '--repo-root', str(self.repo),
-                            '--out', str(out)], capture_output=True, text=True)
+        r = self.run_cli('write', '--skill-dir', str(self.skill), '--repo-root', str(self.repo), '--out', str(out))
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertEqual([ENGINE], list(json.loads(out.read_text())['external']))
+
+    @unittest.skipUnless(REAL_INTEGRITY.is_file(), 'real gate_integrity.mjs required')
+    def test_the_real_script_prints_a_usable_list(self):
+        real_skill = SCRIPT.parent.parent
+        r = subprocess.run([NODE, str(REAL_INTEGRITY), str(self.repo / 'remotion-composer'), '--list-external'], capture_output=True, text=True)
+        self.assertEqual(0, r.returncode, r.stderr)
+        printed = sorted(x for x in r.stdout.split('\n') if x)
+        self.assertGreaterEqual(len(printed), 4)
+        self.assertEqual(printed, gl.list_required_external(real_skill, self.repo))
 
     def test_required_external_must_be_listed_in_the_lock(self):
         self.assertEqual([], gl.verify(self.skill, self.repo, [self.mirror], ['engine/core.ts']))
@@ -294,7 +406,7 @@ class LockTests(unittest.TestCase):
         shutil.copy(self.skill / 'scripts' / 'gates.lock.json', self.mirror / 'scripts' / 'gates.lock.json')
         self.commit()
         self.assertEqual([], gl.verify(self.skill, self.repo, [self.mirror], required_external=()))      # fine without the requirement
-        self.assertEqual(['external-not-locked'], codes(self.verify()))                              # the default requirement
+        self.assertEqual(['external-not-locked'], codes(self.verify()))                              # the command's list
         p = gl.verify(self.skill, self.repo, [self.mirror], ['engine/core.ts'])
         self.assertEqual(['external-not-locked'], codes(p))
 

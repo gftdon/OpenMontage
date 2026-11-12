@@ -883,6 +883,12 @@ def cmd_cutaways(beats_path, cuts_path, media_roots, frames_dir, runner, episode
     max_hold = load_max_hold()
     ed = _episode_data()
     try:
+        ed.picture_boxes()
+    except ed.LanesFileMissing as e:          # config missing: exit 4 like a missing qc_thresholds.json. An INVALID file stays per-beat
+        raise ToolMissing(str(e)) from e     # static-hold-region-unknown errors (ValueError from visible_region)
+    except ed.LanesFileError:
+        pass
+    try:
         ep = ed.load_episode(beats_path, fallback_vo_end=episode_end)
     except ed.EpisodeFormatError as e:
         raise BadInput(str(e)) from e

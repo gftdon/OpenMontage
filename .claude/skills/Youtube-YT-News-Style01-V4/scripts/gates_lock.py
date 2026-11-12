@@ -2,13 +2,14 @@
 """Integrity lock for the gate files of this skill.
 
 gates_lock.py write  --skill-dir S [--external REPO_REL ...] --repo-root W --out S/scripts/gates.lock.json
-  (always locks REQUIRED_EXTERNAL too; refuses when the skill tree holds a file git does not track or ignores)
+  (always locks the files printed by `gate_integrity.mjs --list-external` too; refuses when that command fails or the skill
+  tree holds a file git does not track or ignores)
 gates_lock.py verify --skill-dir S --repo-root W [--mirror DIR ...] [--require-external REPO_REL ...]
 
 verify() returns a list of problem strings ("<code>: detail"); an empty list means the skill dir (and every
 mirror) matches the lock, the lock matches HEAD, and every locked file matches HEAD. Fail-closed: no git,
-no lock, a symlink or an unexpected file is a problem. Every path of REQUIRED_EXTERNAL (and of the
-required_external argument, which replaces it when given) must appear under the lock's "external" map ("external-not-locked") - a lock that does not cover the engine file
+no lock, a symlink or an unexpected file is a problem. Every path printed by
+`gate_integrity.mjs --list-external` (or of the required_external argument, which replaces it when given) must appear under the lock's "external" map ("external-not-locked") - a lock that does not cover the engine file
 is refused even when everything it does list is intact.
 """
 import argparse
@@ -26,16 +27,28 @@ LOCK_REL = 'scripts/gates.lock.json'
 EXCLUDED_DIR_NAMES = {'__pycache__'}
 EXCLUDED_REL_DIRS = set()   # tests and fixtures are locked too (they cannot be weakened)
 EXCLUDED_FILE_NAMES = {'.DS_Store'}
-# The ONE list of files outside the skill folder (repo-relative) that every lock must cover.  `write` always includes
-# them (plus any extra --external), `verify` and finalize refuse a lock that lacks one; the final list comes from the
-# engine team (CF-A66).  Adding a file later is a one-line change here.
-REQUIRED_EXTERNAL = ('remotion-composer/src/YtNewsStyle01V4.tsx',)
+# The files outside the skill folder (repo-relative) that every lock must cover are NEVER typed here: they are what the
+# engine team's own command prints,  node <skill>/scripts/gate_integrity.mjs <repo>/remotion-composer --list-external
+# (one repo-relative path per line).  `write` always includes them (plus any extra --external); `verify` and finalize
+# refuse a lock that lacks one.  When node, the script or the list is unusable everything fails closed: `write` refuses,
+# `verify` reports "tool-missing: ..." (node / script / timeout: finalize exit 4) or "required-external-unavailable: ..."
+# (bad or empty list: finalize exit 3).
+NODE_BIN = 'node'          # finalize.py sets this to the realpath it resolved once at start
+LIST_TIMEOUT = 20
 GIT_BIN = 'git'            # finalize.py sets this to the realpath it resolved once at start
 GIT_TIMEOUT = 20           # per git call (seconds); a verify() runs ~6 of them, all bounded by the caller's deadline
 
 
 class GitUnavailable(Exception):
     pass
+
+
+class RequiredListError(Exception):
+    """kind 'tool': node / the script is missing or timed out (infrastructure); kind 'list': the command ran but gave no usable list."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
 
 
 def sha256_file(path):
@@ -108,6 +121,37 @@ def check_tracked(skill_dir, repo_root, files, external, deadline=None):
     return bad
 
 
+def list_required_external(skill_dir, repo_root, deadline=None):
+    """The required external files, as printed by the engine team's `gate_integrity.mjs <composer> --list-external`."""
+    script = Path(skill_dir) / 'scripts' / 'gate_integrity.mjs'
+    if not script.is_file():
+        raise RequiredListError('tool', '%s is missing: cannot list the required external files' % script)
+    timeout = LIST_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise RequiredListError('tool', 'time budget exhausted before the required external files could be listed')
+    env = {k: v for k, v in os.environ.items() if k not in ('NODE_OPTIONS', 'NODE_PATH')}
+    try:
+        r = subprocess.run([NODE_BIN, str(script), str(Path(repo_root) / 'remotion-composer'), '--list-external'],
+                           capture_output=True, timeout=timeout, env=env, cwd=str(repo_root), stdin=subprocess.DEVNULL)
+    except FileNotFoundError as e:
+        raise RequiredListError('tool', 'node not found: %s' % e)
+    except subprocess.TimeoutExpired:
+        raise RequiredListError('tool', 'gate_integrity.mjs --list-external timed out after %.0fs' % timeout)
+    except OSError as e:
+        raise RequiredListError('tool', 'cannot run node: %s' % e)
+    if r.returncode != 0:
+        raise RequiredListError('list', 'gate_integrity.mjs --list-external exited %d: %s' % (r.returncode, r.stderr.decode(errors='replace')[-300:].strip()))
+    lines = [x.strip() for x in r.stdout.decode(errors='replace').splitlines() if x.strip()]
+    if not lines:
+        raise RequiredListError('list', 'gate_integrity.mjs --list-external printed nothing')
+    try:
+        return sorted(set(_check_external_rel(x) for x in lines))
+    except ValueError as e:
+        raise RequiredListError('list', 'gate_integrity.mjs --list-external printed a bad path: %s' % e)
+
+
 def build_lock(skill_dir, repo_root, external=(), check_git=True, deadline=None, required=None):
     """check_git: refuse (ValueError naming the files) when the skill tree - or an external file - holds a file that git
     does not track or that is ignored: a lock can never be written over junk.  Tracked means in the index (git add)."""
@@ -116,8 +160,13 @@ def build_lock(skill_dir, repo_root, external=(), check_git=True, deadline=None,
     if problems:
         raise ValueError('; '.join(problems))
     ext = {}
-    # required=None -> REQUIRED_EXTERNAL; tests that need a deliberately incomplete lock pass required=()
-    external = list(REQUIRED_EXTERNAL if required is None else required) + list(external)
+    # required=None -> what gate_integrity.mjs --list-external prints (fail closed); an explicit list (tests) replaces it
+    if required is None:
+        try:
+            required = list_required_external(skill_dir, repo_root, deadline)
+        except RequiredListError as e:
+            raise ValueError('refusing to lock: cannot obtain the required external files: %s' % e)
+    external = list(required) + list(external)
     for rel in sorted(set(_check_external_rel(e) for e in external)):
         f = repo_root / rel
         if not f.is_file() or f.is_symlink():
@@ -245,7 +294,13 @@ def verify(skill_dir, repo_root, mirror_dirs=(), required_external=None, deadlin
     except (ValueError, AttributeError) as e:
         return ['lock-invalid: %s' % e]
     problems = []
-    for rel in (REQUIRED_EXTERNAL if required_external is None else required_external):
+    if required_external is None:
+        try:
+            required_external = list_required_external(skill_dir, repo_root, deadline)
+        except RequiredListError as e:
+            problems.append('%s: %s' % ('tool-missing' if e.kind == 'tool' else 'required-external-unavailable', e))
+            required_external = ()
+    for rel in required_external:
         try:
             wanted = _check_external_rel(rel)
         except ValueError as e:
@@ -301,7 +356,7 @@ def main(argv=None):
     v.add_argument('--skill-dir', required=True)
     v.add_argument('--repo-root', required=True)
     v.add_argument('--mirror', action='append', default=[])
-    v.add_argument('--require-external', action='append', default=[], help='extra to REQUIRED_EXTERNAL (never instead of it)')
+    v.add_argument('--require-external', action='append', default=[], help='extra to the list printed by gate_integrity.mjs --list-external')
     args = ap.parse_args(argv)
     try:
         if args.cmd == 'write':
@@ -309,7 +364,13 @@ def main(argv=None):
             Path(args.out).write_bytes(lock_bytes(lock))
             print('wrote %s (%d files, %d external)' % (args.out, len(lock['files']), len(lock['external'])))
             return 0
-        problems = verify(args.skill_dir, args.repo_root, args.mirror, list(REQUIRED_EXTERNAL) + args.require_external)
+        try:
+            wanted = list_required_external(args.skill_dir, args.repo_root) + args.require_external
+        except RequiredListError as e:
+            print('%s: %s' % ('tool-missing' if e.kind == 'tool' else 'required-external-unavailable', e))
+            print('1 problem(s)')
+            return 1
+        problems = verify(args.skill_dir, args.repo_root, args.mirror, wanted)
     except (ValueError, OSError) as e:
         print('error: %s' % e, file=sys.stderr)
         return 2

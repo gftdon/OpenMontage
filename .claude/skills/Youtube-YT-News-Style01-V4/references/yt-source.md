@@ -18,7 +18,7 @@ bash "$SKILL/scripts/yt_survey.sh" --frames-only $P/assets/ytsource/source.mp4 $
 - **Timed transcript** = หลักฐานว่าต้นฉบับ "พูด/แสดง" อะไรเมื่อไร ถ้า `yt_survey.sh` พิมพ์ WARNING ว่าไม่มี transcript (429/ไม่มี subtitle) ให้สร้างเองแบบ local offline — ห้ามข้าม เพราะ `lint_content.py` ใช้ตรวจว่าช่วงที่ตัดมีหัวข้อที่ป้ายอ้าง:
 
 ```bash
-# ไม่มี transcript_timed.json: สร้างแบบ local offline เป็นหน้าต่างละไม่เกิน 300 s (คำสั่งเดียวต้องจบ < 8 นาที) แล้วรวม
+# ไม่มี transcript_timed.json: สร้างแบบ local offline เป็นหน้าต่างละไม่เกิน 300 s (คำสั่งเดียวต้องจบ < 8 นาที) แล้วรวม (`merge` ข้ามไฟล์ `*.done.json` ที่ from-audio เขียนไว้ จึงใช้ `part_*.json` ได้)
 # เรียกซ้ำด้วยอาร์กิวเมนต์เดิมได้ (พิมพ์ "already done")
 python3 "$SKILL/scripts/source_timed.py" from-audio $P/assets/ytsource/source.mp4 --out $P/assets/ytsource/part_0000.json --start 0 --duration 300
 #   ... --start 300 --out part_0300.json ... จนครบความยาววิดีโอ แล้ว:

@@ -1,10 +1,10 @@
 # Production B-roll freshness (inherited V2 gate)
 
-ทุก `src` ของ beat `broll`/`clip` ปรากฏได้ไม่เกินหนึ่ง beat (ยกเว้น source clip เดียวกันที่ช่วง `[from, from+shown)` ไม่ซ้อนกัน — กฎ S10 ของ engine) Source clips ใช้ prefix `yt_` และต้องตัดจากวิดีโอต้นฉบับของตอนนี้ (`cut_clips.sh` เขียน `_cuts.json`) Stock ถือว่า fresh เมื่อดาวน์โหลดสำหรับตอนนี้ด้วย `fetch_broll`, อยู่ใน manifest พร้อม raw hash ที่ตรง และไม่ซ้ำเนื้อหากับตอนอื่น อนุญาต stock เก่าที่อนุมัติแล้วไม่เกินสองไฟล์ การเปลี่ยนชื่อไฟล์ไม่ทำให้ของเก่าเป็นของใหม่
+ทุก `src` ของ beat `broll`/`clip` ปรากฏได้ไม่เกินหนึ่ง beat (ยกเว้น source clip เดียวกันที่ช่วง `[from, from+shown)` ไม่ซ้อนกัน — กฎ S10 ของ engine) Source clips ใช้ prefix `yt_` และต้องตัดจากวิดีโอต้นฉบับของตอนนี้ (`cut_clips.sh` เขียน `_cuts.json`) (กฎ stock ด้านล่างสืบทอดจาก V2: stock fresh = ดาวน์โหลดสำหรับตอนนี้ด้วย `fetch_broll` พร้อม manifest/raw hash ที่ตรง และไม่ซ้ำเนื้อหากับตอนอื่น; stock เก่าที่อนุมัติแล้วไม่เกินสองไฟล์; การเปลี่ยนชื่อไฟล์ไม่ทำให้ของเก่าเป็นของใหม่ — แต่ **ใน V4 `fetch_broll.py` มีแค่โหมด `--music` โหมด footage ทุกแบบ exit 3** จึงไม่มี stock ใหม่ให้เข้า manifest)
 
 ใช้ slug และ `assetDir` ใหม่ทุกตอน ห้าม copy คลัง B-roll ของตอนอื่นมาใช้จริง เลือก query จากบรรทัดที่พูดในตอนนี้ และ source UI มาก่อน ความตรงของภาพกับคำพูด (semantic/vision) เป็นขั้นแยก ความไม่ซ้ำไม่ได้พิสูจน์ความตรง
 
-**โหมดไม่มีคนดู (V4):** stock/AI footage ใช้ได้เฉพาะ clip ที่มี relevance verdict ผ่านเท่านั้น (ดู `v4-contract.md` ส่วน "Unattended policy") โดยปกติไม่มี → ตอนนั้นไม่มี stock และ `check_broll.py` มีหน้าที่แค่ยืนยันว่า source clip ไม่ซ้ำ/ไม่ปลอมชื่อ ห้ามรัน `fetch_broll.py` เพื่อ "หาของมาเติม" ถ้าไม่มี verdict
+**โหมดไม่มีคนดู (V4):** stock/AI footage ใช้ได้เฉพาะ clip ที่มี relevance verdict ผ่านเท่านั้น (ดู `v4-contract.md` ส่วน "Unattended policy") โดยปกติไม่มี → ตอนนั้นไม่มี stock และ `check_broll.py` มีหน้าที่แค่ยืนยันว่า source clip ไม่ซ้ำ/ไม่ปลอมชื่อ ห้ามรัน `fetch_broll.py` เพื่อ "หาของมาเติม" (ใช้ได้เฉพาะ `--music` ขั้น 9 ของ SKILL.md)
 
 ใน V4 beats อยู่ใน `artifacts/episode.json` (field `beats`; ตาราง `brollDur` อยู่ในไฟล์เดียวกัน) ไม่ใช่ `BEATS` ใน TSX
 

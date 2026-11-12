@@ -379,7 +379,8 @@ def _timing_anchors(b, field, text, th, inp, counts):
 
 
 def check_timing(ep, inp, th, issues, metrics):
-    """card-timing-*. Whole-beat labels (kind 'beat', and every text of the final beat) can only be
+    """card-timing-*. Whole-beat labels (kind 'beat', every text of the final beat, and a typo card beat's first card cards[0], whose
+    start is pinned to the beat start by schema S14) can only be
     gone-before-spoken (a label may recap something said earlier); timed items (stats, cards, items with
     `at`, lower) also get late / early with the tolerance, and card-timing-far when their number is spoken
     only further than timingMaxDistanceSeconds away. Recap beats (typo summary3 / final4) and whole-beat
@@ -396,7 +397,9 @@ def check_timing(ep, inp, th, issues, metrics):
         for field, text, ws, we, kind in ed.text_fields(b):
             if field == 'cta':
                 continue
-            label_like = kind == 'beat' or b is last
+            # Schema S14: a typo card beat's first card starts exactly at the beat start (cards[0].at == t), so it cannot be timed to the
+            # spoken word: cards[0] is a whole-beat label (gone-before-spoken only, no early / late / far). cards[1..] keep the +-2 s rule.
+            label_like = kind == 'beat' or b is last or (b.get('media') == 'typo' and field.startswith('cards[0].'))
             counts = {}
             anc, amb = _timing_anchors(b, field, text, th, inp, counts)
             ambiguous += amb

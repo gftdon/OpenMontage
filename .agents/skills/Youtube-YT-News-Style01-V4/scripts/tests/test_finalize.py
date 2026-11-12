@@ -18,6 +18,10 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 NAME = 'FakeSkill'
 REAL_NAME = 'Youtube-YT-News-Style01-V4'      # gate_integrity.mjs only accepts a lock written for this skill name
 ENGINE_REL = 'remotion-composer/src/YtNewsStyle01V4.tsx'
+# what `gate_integrity.mjs <composer> --list-external` prints (the real script, and the fake one of the temp skills)
+EXTERNAL_PATHS = ['remotion-composer/src/YtNewsStyle01V4.tsx', 'remotion-composer/src/ytNewsStyle01V4.entry.tsx',
+                  'remotion-composer/src/ytNewsStyle01V4Sample.json', 'remotion-composer/src/ytNewsStyle01V4SampleCaptions.json']
+ENTRY_SRC = (SCRIPTS.parent / 'assets' / 'ytNewsStyle01V4.entry.reference.tsx').read_text()      # the real entry: the closure/registration are real
 FIXTURES = SCRIPTS / 'tests' / 'fixtures' / 'episodes'
 COMP = 'YtNewsStyle01V4'
 HAVE_FFMPEG = shutil.which('ffmpeg') is not None
@@ -101,7 +105,16 @@ if (b.garbage) { console.log('not json'); } else { console.log(JSON.stringify({ 
 process.exit(b.exit !== undefined ? b.exit : (valid ? 0 : 1));
 '''
 
-JS_INTEGRITY = JS_HEAD.replace('__NAME__', 'gate_integrity') + r'''
+# `--list-external` is answered BEFORE any stub logging (it runs at lock-writing time, from any cwd).  FAKE_EXTERNAL_LIST (newline
+# separated) replaces the list, FAKE_LIST_EXIT makes the command fail.
+JS_INTEGRITY = r'''
+if (process.argv.includes('--list-external')) {
+  if (process.env.FAKE_LIST_EXIT) { console.error('fake list failure'); process.exit(Number(process.env.FAKE_LIST_EXIT)); }
+  const list = process.env.FAKE_EXTERNAL_LIST !== undefined ? process.env.FAKE_EXTERNAL_LIST : __LIST__;
+  if (list) console.log(list);
+  process.exit(0);
+}
+'''.replace('__LIST__', json.dumps('\n'.join(EXTERNAL_PATHS))) + JS_HEAD.replace('__NAME__', 'gate_integrity') + r'''
 const ok = b.ok !== false;
 console.log(JSON.stringify({ ok, issues: ok ? [] : [{ id: 'engine-drift', message: 'engine differs from reference' }], warnings: [] }));
 process.exit(b.exit !== undefined ? b.exit : (ok ? 0 : 3));
@@ -116,7 +129,7 @@ STUB_FILES = {'lint_beats.py': PY_STUB, 'lint_content.py': PY_STUB, 'lint_captio
               'episode_schema.mjs': JS_SCHEMA, 'gate_integrity.mjs': JS_INTEGRITY}
 ALL_GATES = ['frames', 'final-av', 'final-pixels', 'loudness', 'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions',
              'script', 'derived']
-ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'final-duration', 'relevance']
+ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration', 'relevance']
 STEM = {'beats': 'lint_beats', 'content': 'lint_content', 'captions': 'lint_captions', 'frames': 'frame_checks',
         'loudness': 'measure_loudness', 'timing': 'timing_check', 'final-pixels': 'qc_final_pixels', 'schema': 'episode_schema',
         'gate-integrity': 'gate_integrity'}
@@ -189,12 +202,12 @@ def probe_video(path):
     return {'width': int(s['width']), 'height': int(s['height']), 'fps': float(a) / float(b), 'frames': int(s['nb_read_packets'])}
 
 
-def make_videos(proj, visual_args=None):
+def make_videos(proj, visual_args=None, pix_fmt='yuv420p'):
     """visual.mp4 = 2 s of motion + the V4 end card (1 s solid dark static frame) -> exactly totalDurationSec 3.0;
     final.mp4 = the same video packets (mux_av.sh stream-copies the video)."""
     args = visual_args or ['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
                            '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0']
-    ffmpeg(*args, '-pix_fmt', 'yuv420p', str(proj / 'renders' / 'visual.mp4'))
+    ffmpeg(*args, '-pix_fmt', pix_fmt, str(proj / 'renders' / 'visual.mp4'))
     ffmpeg('-i', str(proj / 'renders' / 'visual.mp4'), '-c:v', 'copy', str(proj / 'renders' / 'final.mp4'))
 
 
@@ -237,6 +250,7 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME):
     lock = repo / '.claude' / 'skills' / name / 'scripts' / 'gates.lock.json'
     ep, cap = proj / 'artifacts' / 'episode.json', proj / 'artifacts' / 'caption-joined.json'
     vis, fin = proj / 'renders' / 'visual.mp4', proj / 'renders' / 'final.mp4'
+    composer = repo / 'remotion-composer'
     avatar = repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
     rd = proj / 'qc' / 'layout' / 'runs' / run_id
     rd.mkdir(parents=True, exist_ok=True)
@@ -247,8 +261,11 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME):
         'schema': 'yt-news-v4-music-source', 'provider': 'pixabay', 'track_id': '42', 'track_title': 'Calm Tech', 'url': 'https://example.test/42',
         'query': 'calm technology', 'sha256': sha(bed), 'fetched_at': '2026-11-12T00:00:00Z'}))
     manifest = {'schema': 'yt-news-v4-run-manifest', 'version': 1, 'runId': run_id, 'compositionId': COMP,
-                'sourceHashes': {'episode.json': sha(ep), 'captions.json': sha(cap), 'src/Root.tsx': 'a' * 64,
-                                 'scripts/gates.lock.json': sha(lock)},
+                'sourceHashes': {'episode.json': sha(ep), 'captions.json': sha(cap), 'scripts/gates.lock.json': sha(lock),
+                                 'src/YtNewsStyle01V4.tsx': sha(composer / 'src' / 'YtNewsStyle01V4.tsx'),
+                                 'src/ytNewsStyle01V4.entry.tsx': sha(composer / 'src' / 'ytNewsStyle01V4.entry.tsx'),
+                                 'src/ytNewsStyle01V4Sample.json': sha(composer / 'src' / 'ytNewsStyle01V4Sample.json'),
+                                 'src/ytNewsStyle01V4SampleCaptions.json': sha(composer / 'src' / 'ytNewsStyle01V4SampleCaptions.json')},
                 'mediaDigest': {'method': 'sha256-per-file-v1', 'assetDir': 'ep1', 'digest': 'b' * 64, 'files': 3, 'bytes': 99},
                 'fontsDigest': {'method': 'sha256-per-file-v1', 'digest': 'c' * 64}, 'bundleKey': 'k-1',
                 'planSha256': 'd' * 64, 'frames': [0, 25, 50], 'thresholdsSha256': 'e' * 64}
@@ -269,8 +286,11 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME):
                'outputBytes': vis.stat().st_size, 'frameCount': facts['frames'], 'durationInFrames': facts['frames'],
                'fps': facts['fps'], 'width': facts['width'],
                'height': facts['height'], 'codec': 'h264', 'pixelFormat': 'yuv420p', 'hasAudio': False,
-               'episodeJsonSha256': sha(ep), 'captionsJsonSha256': sha(cap), 'engineSha256': 'a' * 64,
-               'engineReferenceSha256': 'a' * 64, 'rootTsxSha256': 'a' * 64, 'indexTsxSha256': 'a' * 64,
+               'episodeJsonSha256': sha(ep), 'captionsJsonSha256': sha(cap),
+               'engineSha256': sha(composer / 'src' / 'YtNewsStyle01V4.tsx'), 'engineReferenceSha256': 'a' * 64,
+               'entrySha256': sha(composer / 'src' / 'ytNewsStyle01V4.entry.tsx'), 'entryReferenceSha256': 'a' * 64,
+               'entryClosure': {'src/' + n: sha(composer / 'src' / n) for n in ('YtNewsStyle01V4.tsx', 'ytNewsStyle01V4.entry.tsx',
+                                                                                  'ytNewsStyle01V4Sample.json', 'ytNewsStyle01V4SampleCaptions.json')},
                'fontsDigest': 'c' * 64, 'mediaDigest': 'b' * 64, 'mediaDigestMethod': 'sha256-per-file-v1',
                'gatesLockSha256': sha(lock), 'gateReportPath': str(proj / 'qc' / 'layout' / 'report.json'),
                'gateReportSha256': sha(proj / 'qc' / 'layout' / 'report.json'), 'gateRunId': run_id,
@@ -313,8 +333,12 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
         (skill / rel).write_text(body)
     (repo / 'remotion-composer' / 'src').mkdir(parents=True)
     (repo / 'remotion-composer' / 'src' / 'YtNewsStyle01V4.tsx').write_text(ENGINE_SRC)
-    (repo / 'remotion-composer' / 'src' / 'Root.tsx').write_text(ROOT_SRC)
-    (skill / 'assets').mkdir()
+    (repo / 'remotion-composer' / 'src' / 'Root.tsx').write_text(ROOT_SRC)          # another pipeline's file: not V4, not locked
+    (repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4.entry.tsx').write_text(ENTRY_SRC)
+    (repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4Sample.json').write_text('{}\n')
+    (repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4SampleCaptions.json').write_text('{}\n')
+    (skill / 'assets').mkdir(exist_ok=True)
+    (skill / 'assets' / 'ytNewsStyle01V4.entry.reference.tsx').write_text(ENTRY_SRC)
     (skill / 'assets' / 'YtNewsStyle01V4.reference.tsx').write_text(ENGINE_SRC)     # identical: no engine drift
     if 'episode_schema.mjs' in real:        # the real validator reads its JSON schema from <skill>/assets
         shutil.copy(SCRIPTS.parent / 'assets' / 'episode.schema.json', skill / 'assets' / 'episode.schema.json')
@@ -324,6 +348,8 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     sh(repo, 'git', 'config', 'commit.gpgsign', 'false')
     (repo / '.gitignore').write_text('__pycache__/\nprojects/\nout/\n.stub_*\nremotion-composer/public/\n')
     sh(repo, 'git', 'add', '-A')            # a lock is only written over files git tracks
+    if required is None and 'gate_integrity.mjs' in omit:
+        required = EXTERNAL_PATHS               # no script to ask: the lock is built from the known list
     (skill / 'scripts' / 'gates.lock.json').write_bytes(_gl.lock_bytes(_gl.build_lock(skill, repo, list(external), required=required)))
     shutil.copytree(skill, repo / '.agents' / 'skills' / name)
     sh(repo, 'git', 'add', '-A')
@@ -397,9 +423,9 @@ class FinalizeBase(unittest.TestCase):
         fn(d)
         p.write_text(json.dumps(d))
 
-    def set_videos(self, visual_args):
+    def set_videos(self, visual_args, pix_fmt='yuv420p'):
         """Replace visual.mp4 (and final.mp4 = its packets) and re-write the receipts that describe them."""
-        make_videos(self.proj, visual_args)
+        make_videos(self.proj, visual_args, pix_fmt)
         write_receipts(self.repo, name=self.name)
 
     def argv_of(self, stem):
@@ -767,12 +793,24 @@ class MissingScriptTests(FinalizeBase):
 
 
 class MissingNodeGateTests(FinalizeBase):
-    omit = ('qc_final_pixels.mjs', 'episode_schema.mjs', 'gate_integrity.mjs')
+    omit = ('qc_final_pixels.mjs', 'episode_schema.mjs')
 
     def test_new_gate_scripts_missing_count_as_missing(self):
         self.assertEqual(4, self.run_fin())
-        for name in ('final-pixels', 'schema', 'gate-integrity'):
+        for name in ('final-pixels', 'schema'):
             self.assertEqual('missing', self.gate(self.failed(), name)['status'], name)
+
+
+class MissingGateIntegrityScriptTests(FinalizeBase):
+    omit = ('gate_integrity.mjs',)
+
+    def test_without_gate_integrity_the_required_files_cannot_be_listed_exit_4_nothing_runs(self):
+        self.assertEqual(4, self.run_fin())
+        f = self.failed()
+        self.assertTrue(any(p.startswith('tool-missing:') and 'gate_integrity.mjs' in p for p in f['integrity_problems']), f['integrity_problems'])
+        self.assertEqual([], f['gates'])
+        for stem in STEM.values():
+            self.assertFalse(self.ran(stem), stem)
 
 
 class MissingManifestHelperTests(FinalizeBase):
@@ -824,7 +862,7 @@ class IntegrityTests(FinalizeBase):
     def test_lock_regenerated_not_committed(self):
         for d in (self.skill, self.repo / '.agents' / 'skills' / NAME):
             (d / 'scripts' / 'lint_beats.py').write_text('import sys; sys.exit(0)\n')
-        lock = _gl.lock_bytes(_gl.build_lock(self.skill, self.repo, [ENGINE_REL]))
+        lock = _gl.lock_bytes(_gl.build_lock(self.skill, self.repo, [], required=EXTERNAL_PATHS))
         for d in (self.skill, self.repo / '.agents' / 'skills' / NAME):
             (d / 'scripts' / 'gates.lock.json').write_bytes(lock)
         self.assertIntegrityFailure()
@@ -1463,17 +1501,21 @@ class TimingScriptMissingTests(FinalizeBase):
 class RequiredExternalTests(FinalizeBase):
     required = ()           # the lock does not cover the engine file
 
-    def test_constant_names_the_engine_file_and_lives_in_gates_lock_only(self):
-        self.assertEqual([ENGINE_REL], list(_gl.REQUIRED_EXTERNAL))
-        self.assertNotIn('REQUIRED_EXTERNAL =', (SCRIPTS / 'finalize.py').read_text())
+    def test_the_list_is_never_typed_in_python(self):
+        text = (SCRIPTS / 'gates_lock.py').read_text()
+        self.assertNotIn('YtNewsStyle01V4', text)
+        self.assertNotIn('ytNewsStyle01V4', text)
+        self.assertFalse(hasattr(_gl, 'REQUIRED_EXTERNAL'))
+        self.assertIn('--list-external', text)
 
-    def test_lock_without_the_engine_external_is_exit_3(self):
+    def test_lock_without_the_required_externals_is_exit_3_naming_them(self):
         self.behavior(lint_beats={'exit': 1, 'pass': False})      # integrity must win over a quality failure
         self.assertEqual(3, self.run_fin())
         self.assertNotDelivered()
         f = self.failed()
         self.assertEqual(3, f['exit_code'])
-        self.assertTrue(any(p.startswith('external-not-locked') and ENGINE_REL in p for p in f['integrity_problems']), f['integrity_problems'])
+        for rel in EXTERNAL_PATHS:
+            self.assertTrue(any(p.startswith('external-not-locked') and rel in p for p in f['integrity_problems']), (rel, f['integrity_problems']))
         self.assertEqual([], f['gates'])
         for stem in STEM.values():
             self.assertFalse(self.ran(stem), stem)
@@ -1484,22 +1526,78 @@ class RequiredExternalTests(FinalizeBase):
 
 class OtherExternalOnlyTests(FinalizeBase):
     required = ()
-    external = ('remotion-composer/src/Root.tsx',)          # an external, but not the engine
+    external = ('remotion-composer/src/Root.tsx',)          # an external, but not the required ones
 
     def test_other_external_does_not_satisfy_the_requirement(self):
         self.assertEqual(3, self.run_fin())
         self.assertTrue(any('external-not-locked' in p for p in self.failed()['integrity_problems']))
 
 
-class EngineLockedHappyTests(FinalizeBase):
-    def test_lock_lists_the_engine_and_a_change_of_the_engine_is_exit_3(self):
-        self.assertEqual(0, self.run_fin(), self.out)
-        lock = json.loads((self.skill / 'scripts' / 'gates.lock.json').read_text())
-        self.assertEqual([ENGINE_REL], list(lock['external']))
-        self.deliver.unlink()
-        (self.repo / ENGINE_REL).write_text(ENGINE_SRC + '// tampered\n')
+class OnePathMissingFromTheLockTests(FinalizeBase):
+    required = EXTERNAL_PATHS[:3]          # every path but the last sample JSON
+
+    def test_a_lock_that_lacks_any_one_printed_path_is_exit_3(self):
         self.assertEqual(3, self.run_fin())
-        self.assertTrue(any('external-changed' in p for p in self.failed()['integrity_problems']))
+        probs = self.failed()['integrity_problems']
+        self.assertEqual(['external-not-locked: ' + EXTERNAL_PATHS[3]], [p.split(' is not listed')[0] for p in probs])
+
+
+class ExternalListCommandTests(FinalizeBase):
+    """The required files come from `gate_integrity.mjs <composer> --list-external`; every way that command can fail is closed."""
+
+    def run_with_env(self, **env):
+        with mock.patch.dict(os.environ, env):
+            return self.run_fin()
+
+    def test_happy_lock_lists_every_printed_path(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertEqual(EXTERNAL_PATHS, list(json.loads((self.skill / 'scripts' / 'gates.lock.json').read_text())['external']))
+
+    def test_a_path_the_command_prints_that_the_lock_lacks_is_exit_3(self):
+        self.assertEqual(3, self.run_with_env(FAKE_EXTERNAL_LIST='\n'.join(EXTERNAL_PATHS + ['remotion-composer/src/newV4File.tsx'])))
+        self.assertTrue(any('external-not-locked' in p and 'newV4File.tsx' in p for p in self.failed()['integrity_problems']))
+        self.assertNotDelivered()
+
+    def test_empty_list_is_exit_3(self):
+        self.assertEqual(3, self.run_with_env(FAKE_EXTERNAL_LIST=''))
+        self.assertTrue(any(p.startswith('required-external-unavailable:') and 'printed nothing' in p for p in self.failed()['integrity_problems']))
+
+    def test_failing_command_is_exit_3(self):
+        self.assertEqual(3, self.run_with_env(FAKE_LIST_EXIT='2'))
+        self.assertTrue(any(p.startswith('required-external-unavailable:') and 'exited 2' in p for p in self.failed()['integrity_problems']))
+
+    def test_unsafe_printed_paths_are_refused(self):
+        for bad in ('/etc/passwd', '../outside.tsx'):
+            self.assertEqual(3, self.run_with_env(FAKE_EXTERNAL_LIST=bad), bad)
+            self.assertTrue(any('required-external-unavailable' in p for p in self.failed()['integrity_problems']), bad)
+
+    def test_node_missing_is_class_4(self):
+        real = None
+
+        def patch(m):
+            nonlocal real
+            real = m.resolve_tools
+            m.resolve_tools = lambda: dict(real(), node='/nonexistent/bin/node')
+        self.assertEqual(4, self.run_fin(patch=patch))
+        self.assertTrue(any(p.startswith('tool-missing:') for p in self.failed()['integrity_problems']))
+        self.assertEqual([], self.failed()['gates'])
+
+    def test_a_missing_list_is_never_mixed_with_a_real_integrity_problem_class_3_wins(self):
+        (self.skill / 'scripts' / 'lint_beats.py').write_text('x\n')
+        self.assertEqual(3, self.run_with_env(FAKE_EXTERNAL_LIST=''))
+
+
+class EngineLockedHappyTests(FinalizeBase):
+    def test_a_change_of_any_locked_external_is_exit_3(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        for rel in EXTERNAL_PATHS:
+            self.deliver.unlink(missing_ok=True)
+            f = self.repo / rel
+            before = f.read_text()
+            f.write_text(before + ('' if rel.endswith('.json') else '// tampered\n') + (' ' if rel.endswith('.json') else ''))
+            self.assertEqual(3, self.run_fin(), rel)
+            self.assertTrue(any('external-changed' in p and rel in p for p in self.failed()['integrity_problems']), rel)
+            f.write_text(before)
 
 
 @unittest.skipUnless(HAVE_FFMPEG and HAVE_NODE, 'node (and ffmpeg for the shared fixtures) required: the contract test runs the real .mjs')
@@ -1535,7 +1633,7 @@ class RealValidatorContractTests(FinalizeBase):
         integrity = json.loads((self.rdir / 'gate-integrity.json').read_text())
         self.assertIs(True, integrity['ok'])
         self.assertEqual('ok', integrity['lock']['status'])
-        self.assertEqual(1, integrity['lock']['external'])        # the engine is covered by the lock
+        self.assertEqual(4, integrity['lock']['external'])        # the engine, the entry and the two sample JSONs are covered by the lock
         cmd = gates['schema']['command']
         self.assertIn('--public', cmd)
         self.assertIn(str(self.repo / 'remotion-composer' / 'public'), cmd)
@@ -1551,11 +1649,31 @@ class RealValidatorContractTests(FinalizeBase):
         self.edit(self.proj / 'artifacts' / 'episode.json', lambda d: d['beats'][0].update(t=1))
         self.assertEqual('fail', self.check_gates()['schema']['status'])
 
-    def test_real_integrity_refuses_a_root_that_does_not_register_the_engine(self):
-        (self.repo / 'remotion-composer' / 'src' / 'Root.tsx').write_text('export const Root = () => null;\n')
-        g = self.check_gates()['gate-integrity']
-        self.assertEqual('integrity', g['status'])           # exit 3 of gate_integrity.mjs = integrity class 3
-        self.assertTrue(any('root-registration' in i for i in g['issues']), g['issues'])
+    def test_the_lock_was_written_from_the_real_list_external_command(self):
+        r = subprocess.run(['node', str(SCRIPTS / 'gate_integrity.mjs'), str(self.repo / 'remotion-composer'), '--list-external'],
+                           capture_output=True, text=True, check=True)
+        printed = r.stdout.split()
+        self.assertEqual(EXTERNAL_PATHS, printed)                  # the fixture list mirrors the engine team's command today
+        lock = json.loads((self.skill / 'scripts' / 'gates.lock.json').read_text())
+        self.assertEqual(printed, list(lock['external']))
+
+    def test_a_tampered_entry_never_reaches_the_gate_it_stops_at_the_lock(self):
+        # the entry is a locked external: entry-drift / entry-registration / entry-closure are the second line behind it
+        (self.repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4.entry.tsx').write_text('export const Root = () => null;\n')
+        self.assertEqual(3, self.run_fin('--check'))
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        self.assertTrue(any('ytNewsStyle01V4.entry.tsx' in p for p in doc['integrity_problems']), doc)
+
+    def test_real_gate_integrity_reports_the_new_issue_ids_when_the_entry_is_wrong(self):
+        # run the real command directly against a composer whose entry drifted, registers nothing and imports a foreign file
+        (self.repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4.entry.tsx').write_text(
+            'import "./Root";\nexport const Root = () => null;\n')
+        r = subprocess.run(['node', str(self.skill / 'scripts' / 'gate_integrity.mjs'), str(self.repo / 'remotion-composer'), '--json',
+                            '--skill-dir', str(self.skill), '--require-lock'], capture_output=True, text=True)
+        self.assertEqual(3, r.returncode)
+        ids = {i['id'] for i in json.loads(r.stdout)['issues']}
+        self.assertTrue({'entry-drift', 'entry-registration', 'entry-closure'} <= ids, ids)
+        self.assertNotIn('root-registration', ids)
 
     def test_real_integrity_without_composer_public_is_class_2_for_the_schema_gate(self):
         shutil.rmtree(self.repo / 'remotion-composer' / 'public')
@@ -1799,6 +1917,210 @@ class MuxVideoAndReceiptFactsTests(FinalizeBase):
             self.assertIn(key, g['reason'])
 
 
+class VideoFormatTests(FinalizeBase):
+    """Item 5: ffprobe pix_fmt of BOTH renders/visual.mp4 and renders/final.mp4 is yuv420p; the final's colour facts go into the receipt."""
+
+    def test_delivered_receipt_records_pix_fmt_color_space_color_range_of_the_final(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        rc = self.receipt()
+        self.assertEqual({'pix_fmt', 'color_space', 'color_range'}, set(rc['video']))
+        self.assertEqual('yuv420p', rc['video']['pix_fmt'])
+        g = self.gate(rc, 'video-format')
+        self.assertEqual('pass', g['status'])
+
+    def test_recorded_colour_facts_are_what_ffprobe_says_about_the_final(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=pix_fmt,color_space,color_range',
+                            '-of', 'json', str(self.fin)], capture_output=True, text=True, check=True)
+        s = json.loads(r.stdout)['streams'][0]
+        self.assertEqual({k: s.get(k) for k in ('pix_fmt', 'color_space', 'color_range')}, self.receipt()['video'])
+
+    def test_a_visual_that_is_not_yuv420p_is_a_quality_failure_exit_1(self):
+        self.set_videos(None, pix_fmt='yuv444p')            # the final is its stream copy, so the streams agree: only the format is wrong
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        g = self.gate(self.failed(), 'video-format')
+        self.assertEqual('fail', g['status'])
+        self.assertIn('visual.mp4 pix_fmt is', g['reason'])
+        self.assertIn('yuv444p', g['reason'])
+        self.assertIn('must not be re-encoded', g['reason'])
+
+    def test_a_re_encoded_final_that_is_not_yuv420p_names_the_final(self):
+        ffmpeg('-i', str(self.proj / 'renders' / 'visual.mp4'), '-c:v', 'libx264', '-pix_fmt', 'yuv444p', str(self.fin))
+        write_receipts(self.repo)
+        code = self.run_fin()
+        self.assertEqual(2, code, self.out)                 # mux-video (the stream differs) is class 2 and wins over the class 1 format failure
+        self.assertNotDelivered()
+        f = self.failed()
+        g = self.gate(f, 'video-format')
+        self.assertEqual('fail', g['status'])
+        self.assertIn('final.mp4 pix_fmt is', g['reason'])
+        self.assertIn('must not be re-encoded', g['reason'])
+        self.assertEqual('stale', self.gate(f, 'mux-video')['status'])
+
+    def test_an_unprobable_final_is_not_a_format_pass(self):
+        self.fin.write_bytes(b'not a video')
+        self.assertNotEqual(0, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        self.assertNotEqual('pass', self.gate(self.failed(), 'video-format')['status'])
+
+
+class SwiftRequiredTests(FinalizeBase):
+    """Item 6: swift (Vision OCR of the frames gate) is a required tool; finalize stops with class 4 before any gate runs."""
+
+    def test_missing_swift_is_exit_4_and_nothing_ran(self):
+        real = None
+
+        def patch(m):
+            nonlocal real
+            real = m.resolve_tools
+            m.resolve_tools = lambda: dict(real(), swift=None)
+        self.behavior(lint_beats={'exit': 1, 'pass': False})      # a quality failure must not mask the tool problem
+        self.assertEqual(4, self.run_fin(patch=patch), self.out)
+        self.assertNotDelivered()
+        f = self.failed()
+        self.assertEqual(4, f['exit_code'])
+        self.assertTrue(any('swift' in r for r in f['reasons']), f['reasons'])
+        self.assertEqual([], f['gates'])
+        for stem in STEM.values():
+            self.assertFalse(self.ran(stem), stem)
+
+    def test_swift_is_part_of_the_required_tools(self):
+        m = self.module()
+        self.assertIn('swift', m.REQUIRED_TOOLS)
+
+    @unittest.skipUnless(importlib.util.find_spec('numpy') and importlib.util.find_spec('PIL'), 'frame_checks.py needs numpy and PIL in this interpreter')
+    def test_the_real_frame_checks_cutaways_exits_4_when_neither_swift_nor_swiftc_exists(self):
+        """Read-only check of frame_checks.py (not edited): no OCR is never a silent skip."""
+        t = Path(self.tmp) / 'fc'
+        (t / 'bin').mkdir(parents=True)
+        (t / 'media').mkdir()
+        for tool in ('ffmpeg', 'ffprobe'):
+            os.symlink(shutil.which(tool), t / 'bin' / tool)
+        ep = json.loads((FIXTURES / 'valid' / 'sample-v1.json').read_text())
+        ep['beats'] = [b for b in ep['beats'] if b.get('media') not in ('broll', 'clip') or b['src'] == 'photographer_for_images']
+        ep['brollDur'] = {'photographer_for_images': ep['brollDur']['photographer_for_images']}
+        (t / 'ep.json').write_text(json.dumps(ep))
+        ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=12', '-pix_fmt', 'yuv420p', str(t / 'media' / 'photographer_for_images.mp4'))
+        r = subprocess.run([sys.executable, '-B', str(SCRIPTS / 'frame_checks.py'), 'cutaways', '--beats', str(t / 'ep.json'),
+                            '--media-root', str(t / 'media'), '--frames-dir', str(t / 'fr'), '--episode-end', '30'],
+                           capture_output=True, text=True, env={'PATH': str(t / 'bin'), 'HOME': os.environ.get('HOME', str(t))}, cwd=t)
+        self.assertEqual(4, r.returncode, r.stdout + r.stderr)
+        self.assertIn('swift / swiftc not found', r.stderr)
+
+
+class RenderReceiptEngineBindingTests(FinalizeBase):
+    """Items 1 and 2: the receipt binds the engine, the entry and the entry closure; outputSha256 only binds a file to its receipt."""
+
+    def test_removed_fields_are_not_required_any_more(self):
+        rc = json.loads(self.render_path().read_text())
+        self.assertNotIn('rootTsxSha256', rc)
+        self.assertNotIn('indexTsxSha256', rc)
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_each_engine_binding_field_is_required_and_checked(self):
+        cases = {
+            'engine-missing': lambda d: d.pop('engineSha256'),
+            'engine-wrong': lambda d: d.update(engineSha256='1' * 64),
+            'entry-missing': lambda d: d.pop('entrySha256'),
+            'entry-wrong': lambda d: d.update(entrySha256='2' * 64),
+            'closure-missing': lambda d: d.pop('entryClosure'),
+            'closure-empty': lambda d: d.update(entryClosure={}),
+            'closure-wrong-file': lambda d: d['entryClosure'].update({'src/ytNewsStyle01V4Sample.json': '3' * 64}),
+            'closure-without-entry': lambda d: d['entryClosure'].pop('src/ytNewsStyle01V4.entry.tsx'),
+            'closure-without-engine': lambda d: d['entryClosure'].pop('src/YtNewsStyle01V4.tsx'),
+            'closure-escape': lambda d: d['entryClosure'].update({'src/../../etc/passwd': '4' * 64}),
+        }
+        for label, fn in cases.items():
+            write_receipts(self.repo)
+            self.edit(self.render_path(), fn)
+            self.assertEqual(2, self.run_fin(), (label, self.out))
+            self.assertEqual('stale', self.gate(self.failed(), 'render')['status'], label)
+
+    def test_a_composer_file_changed_after_the_render_is_stale(self):
+        (self.repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4Sample.json').write_text('{"a": 1}\n')
+        # the lock (a locked external) already refuses this one; the receipt closure is the second line behind it
+        self.assertEqual(3, self.run_fin(), self.out)
+
+    def test_output_sha256_is_not_reproducible_a_re_render_with_a_different_hash_and_a_fresh_receipt_delivers(self):
+        """A re-render of the same inputs gives a different outputSha256 (encoder output is not reproducible).  The receipt only binds a
+        file to ITS receipt: a second render with a new hash and a new receipt is a normal, accepted state."""
+        self.assertEqual(0, self.run_fin(), self.out)
+        before = sha(self.proj / 'renders' / 'visual.mp4')
+        self.deliver.unlink()
+        Path(str(self.deliver) + '.receipt.json').unlink()
+        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
+                         '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0', '-crf', '31'])
+        self.assertNotEqual(before, sha(self.proj / 'renders' / 'visual.mp4'))
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_a_visual_re_rendered_without_a_new_receipt_is_stale(self):
+        before = json.loads(self.render_path().read_text())['outputSha256']
+        make_videos(self.proj, ['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
+                                '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0', '-crf', '33'])
+        self.assertNotEqual(before, sha(self.proj / 'renders' / 'visual.mp4'))
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertEqual('stale', self.gate(self.failed(), 'render')['status'])
+
+
+class SkillTreeCoverageTests(FinalizeBase):
+    """Item 4: every file of the skill tree (and of the .agents mirror) must be listed in gates.lock.json.
+    COVERED: any regular file below the skill directory (scripts/, scripts/tests/, assets/, references/, SKILL.md ...), in both the
+    .claude copy and the .agents mirror.  NOT covered (by design): __pycache__ directories (purged by finalize before the gates run),
+    .DS_Store, the lock file itself (pinned by git HEAD and by the render receipt) and anything outside the two skill directories."""
+
+    def mirror(self):
+        return self.repo / '.agents' / 'skills' / self.name
+
+    def test_a_new_file_in_scripts_is_file_extra(self):
+        (self.skill / 'scripts' / 'new_helper.py').write_text('x = 1\n')
+        self.behavior(lint_beats={'exit': 1, 'pass': False})
+        self.assertEqual(3, self.run_fin(), self.out)
+        self.assertTrue(any(p.startswith('file-extra') and 'scripts/new_helper.py' in p for p in self.failed()['integrity_problems']), self.failed())
+        self.assertEqual([], self.failed()['gates'])
+
+    def test_a_new_file_in_scripts_tests_is_file_extra(self):
+        (self.skill / 'scripts' / 'tests' / 'test_new.py').write_text('x = 1\n')
+        self.assertEqual(3, self.run_fin(), self.out)
+        self.assertTrue(any(p.startswith('file-extra') and 'scripts/tests/test_new.py' in p for p in self.failed()['integrity_problems']))
+
+    def test_a_new_file_in_assets_is_file_extra(self):
+        (self.skill / 'assets' / 'new-asset.json').write_text('{}\n')
+        self.assertEqual(3, self.run_fin(), self.out)
+        self.assertTrue(any(p.startswith('file-extra') and 'assets/new-asset.json' in p for p in self.failed()['integrity_problems']))
+
+    def test_a_new_file_in_the_agents_mirror_is_file_extra(self):
+        for sub in ('scripts', 'scripts/tests', 'assets'):
+            (self.mirror() / sub / 'mirror-only.txt').write_text('x\n')
+            self.assertEqual(3, self.run_fin(), (sub, self.out))
+            self.assertTrue(any(p.startswith('file-extra') and 'mirror-only.txt' in p and '.agents' in p for p in self.failed()['integrity_problems']),
+                            (sub, self.failed()['integrity_problems']))
+            (self.mirror() / sub / 'mirror-only.txt').unlink()
+        self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_a_new_file_in_a_new_subdirectory_is_file_extra(self):
+        (self.skill / 'extras').mkdir()
+        (self.skill / 'extras' / 'x.md').write_text('x\n')
+        self.assertEqual(3, self.run_fin(), self.out)
+        self.assertTrue(any(p.startswith('file-extra') and 'extras/x.md' in p for p in self.failed()['integrity_problems']))
+
+    def test_a_symlink_in_the_skill_tree_is_refused(self):
+        os.symlink(self.skill / 'SKILL.md', self.skill / 'scripts' / 'link.py')
+        self.assertEqual(3, self.run_fin(), self.out)
+
+    def test_pycache_is_the_only_tolerated_extra_and_finalize_purges_it(self):
+        pc = self.skill / 'scripts' / '__pycache__'
+        pc.mkdir()
+        (pc / 'x.cpython-312.pyc').write_bytes(b'\0')
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertFalse(pc.exists())
+
+    def test_the_lock_refuses_to_be_written_over_an_untracked_file(self):
+        (self.skill / 'scripts' / 'untracked.py').write_text('x\n')
+        with self.assertRaises(Exception):
+            _gl.build_lock(self.skill, self.repo, [], required=EXTERNAL_PATHS)
+
+
 class MusicBedProvenanceTests(FinalizeBase):
     def sidecar(self):
         return Path(str(self.proj / 'assets' / 'audio' / 'bed.mp3') + '.source.json')
@@ -1999,7 +2321,7 @@ class LockCoverageAndGitIndependenceTests(FinalizeBase):
         r = subprocess.run([sys.executable, '-B', str(self.skill / 'scripts' / 'gates_lock.py'), 'write', '--skill-dir', str(self.skill),
                             '--repo-root', str(self.repo), '--out', str(lock)], capture_output=True, text=True)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-        self.assertEqual([ENGINE_REL], list(json.loads(lock.read_text())['external']))
+        self.assertEqual(EXTERNAL_PATHS, list(json.loads(lock.read_text())['external']))
         shutil.copy(lock, self.repo / '.agents' / 'skills' / self.name / 'scripts' / 'gates.lock.json')
         self.commit_all('regenerated lock')
         self.assertEqual(0, self.run_fin(), self.out)
@@ -2034,7 +2356,7 @@ class LockCoverageAndGitIndependenceTests(FinalizeBase):
         for d in (self.skill, self.repo / '.agents' / 'skills' / self.name):
             (d / 'scripts' / 'lint_beats.py').write_text(original + '\n# tampered\n')
         sh(self.repo, 'git', 'add', '-A')
-        lock = _gl.lock_bytes(_gl.build_lock(self.skill, self.repo, []))
+        lock = _gl.lock_bytes(_gl.build_lock(self.skill, self.repo, [], required=EXTERNAL_PATHS))
         for d in (self.skill, self.repo / '.agents' / 'skills' / self.name):
             (d / 'scripts' / 'gates.lock.json').write_bytes(lock)
         self.commit_all('tamper + regenerate lock')

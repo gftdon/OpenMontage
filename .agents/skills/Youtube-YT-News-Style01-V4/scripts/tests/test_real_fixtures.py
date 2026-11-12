@@ -297,6 +297,83 @@ class VisibleRegionTests(unittest.TestCase):
                 n += 1
         self.assertGreaterEqual(n, 18)
 
+    def test_picture_boxes_are_read_from_the_engine_lanes_file(self):
+        lanes = read(SCRIPTS.parent / 'assets' / 'yt-news-v4-lanes.json')
+        for layout, scene in (('stage', 'S'), ('wide', 'W')):
+            lane = lanes['lanes'][lanes['pictureLaneByScene'][scene]]
+            self.assertEqual((lane['w'], lane['h']), tuple(ed.PICTURE_BOX[layout]))
+        self.assertEqual((1138, 640), tuple(ed.PICTURE_BOX['stage']))          # today's values
+        self.assertEqual((1280, 720), tuple(ed.PICTURE_BOX['wide']))
+        self.assertEqual({'stage', 'wide'}, set(ed.PICTURE_BOX))
+        self.assertIn('stage', ed.PICTURE_BOX)
+        self.assertNotIn('flat', ed.PICTURE_BOX)
+        self.assertIsNone(ed.PICTURE_BOX.get('flat'))
+
+    def with_lanes(self, content):
+        """Run a block with episode_data.LANES_PATH pointing at a temp file holding `content` (None = missing file)."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def cm():
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / 'lanes.json'
+                if content is not None:
+                    p.write_text(content if isinstance(content, str) else json.dumps(content), encoding='utf-8')
+                old = ed.LANES_PATH
+                ed.LANES_PATH = p
+                try:
+                    yield
+                finally:
+                    ed.LANES_PATH = old
+        return cm()
+
+    def test_a_broken_lanes_file_fails_closed(self):
+        good = read(SCRIPTS.parent / 'assets' / 'yt-news-v4-lanes.json')
+
+        def mutate(fn):
+            d = json.loads(json.dumps(good))
+            fn(d)
+            return d
+        broken = {
+            'not json': 'nope {',
+            'not an object': '[]',
+            'wrong schema': mutate(lambda d: d.update(schema='other')),
+            'wrong version': mutate(lambda d: d.update(version=2)),
+            'no lanes': mutate(lambda d: d.pop('lanes')),
+            'no pictureLaneByScene': mutate(lambda d: d.pop('pictureLaneByScene')),
+            'S missing': mutate(lambda d: d['pictureLaneByScene'].pop('S')),
+            'S is null': mutate(lambda d: d['pictureLaneByScene'].update(S=None)),
+            'W names an unknown lane': mutate(lambda d: d['pictureLaneByScene'].update(W='nope')),
+            'W lane has no h': mutate(lambda d: d['lanes']['wide.picture'].pop('h')),
+            'S lane width 0': mutate(lambda d: d['lanes']['split.picture'].update(w=0)),
+            'S lane width a string': mutate(lambda d: d['lanes']['split.picture'].update(w='1138')),
+            'S lane width negative': mutate(lambda d: d['lanes']['split.picture'].update(w=-5)),
+        }
+        for name, content in broken.items():
+            with self.subTest(name), self.with_lanes(content):
+                for layout in ('stage', 'wide'):          # the file is validated as a whole: one bad entry fails both layouts
+                    with self.assertRaises(ValueError):
+                        ed.visible_region(layout, 1920, 1080, None)
+                    with self.assertRaises(ValueError):
+                        ed.PICTURE_BOX[layout]
+
+    def test_a_missing_lanes_file_is_a_distinct_error(self):
+        with self.with_lanes(None):
+            with self.assertRaises(ed.LanesFileMissing):
+                ed.picture_boxes()
+            with self.assertRaises(ValueError):                    # still a ValueError for every caller's fail-closed path
+                ed.visible_region('stage', 1920, 1080, None)
+        self.assertTrue(issubclass(ed.LanesFileMissing, ed.LanesFileError))
+        self.assertTrue(issubclass(ed.LanesFileError, ValueError))
+
+    def test_the_file_is_reread_when_it_changes(self):
+        good = read(SCRIPTS.parent / 'assets' / 'yt-news-v4-lanes.json')
+        good['lanes']['split.picture']['w'], good['lanes']['split.picture']['h'] = 1000, 500
+        with self.with_lanes(good):
+            self.assertEqual((1000, 500), tuple(ed.PICTURE_BOX['stage']))
+            self.assertEqual((1280, 720), tuple(ed.PICTURE_BOX['wide']))
+        self.assertEqual((1138, 640), tuple(ed.PICTURE_BOX['stage']))
+
     def test_hard_coded_values_without_score_relevance(self):
         # stage 1138x640, crop 120,136,1678x944: s = max(0.67818, 0.67797) -> region 1678 x 943.7..., centred
         x, y, w, h = ed.visible_region('stage', 1920, 1080, {'x': 120, 'y': 136, 'w': 1678, 'h': 944})
