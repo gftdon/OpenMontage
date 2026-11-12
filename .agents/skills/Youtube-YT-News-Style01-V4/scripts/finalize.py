@@ -74,6 +74,17 @@ COMPOSER_PACKAGES = ('remotion', '@remotion/bundler', '@remotion/renderer')
 # the exact files YtNewsStyle01V4.tsx loads (render-blocking; a failed load cancels the render), relative to <composer>/public
 FONT_FILES = ('fonts/Kanit-Bold.ttf', 'fonts/Kanit-ExtraBold.ttf')
 WHISPER_DEFAULT_MODEL = 'mlx-community/whisper-large-v3-mlx'      # word_timing.sh default
+# music-presence gate (fresh, on renders/final.mp4): the mean volume of the final file just after the voice ends.
+# Measured on real files, window voEnd+0.5 ... +2.5 s (ffmpeg volumedetect mean_volume): four finals WITH music -27.3, -27.6,
+# -29.4, -29.5 dB; the real mux with a silent bed (voice only) -91.0 dB.  Threshold locked by lead 2026-11-12.
+MUSIC_PRESENCE_MIN_MEAN_DB = -60.0
+MUSIC_PRESENCE_START_AFTER_VO = 0.5       # the avatar audio ends at voEndSec; start a little later, the bed is still fading out
+MUSIC_PRESENCE_END_AFTER_VO = 2.5
+MUSIC_PRESENCE_MIN_WINDOW = 1.0           # a shorter window measures too little
+# mirrors `afade=t=out:st=${VO_END}:d=4.2` in mux_av.sh (a test reads the script and compares); END_AFTER_VO must stay <= 0.6 x this,
+# so that the whole window lies in the part of the fade where the bed is still clearly audible
+MUX_FADE_OUT_SECONDS = 4.2
+MUSIC_PRESENCE_END_MARGIN = 0.1           # the window stops this far before the end of the file
 
 # =================================================================================================================
 # CONTRACT with the other team's scripts (CF-A66, commit 5fe7699).  EVERY field / flag name of those scripts that
@@ -147,18 +158,30 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    `--check` and by `--preflight` (same function).  ONE intentional difference: `word-timing` (venv / extractor / cached
 #    whisper model of word_timing.sh) is `--preflight`-only; finalize never runs word_timing.sh.
 # -- fetch_broll.py --music : <bed>.source.json {schema "yt-news-v4-music-source", provider, track_id, track_title, url,
-#    query, sha256, fetched_at}; sha256 must equal the bed file's sha256.  The bed itself is the file the MUX RECEIPT names
-#    (bed.path + bed.sha256, re-hashed); the sidecar is looked up beside THAT path.  provider:
-#      "pixabay_music"  -> the record above, nothing more.
-#      "music_library"  -> the owner-approved local library (music_library.py / music_library.json, both in the skill, so the
-#                          gate lock covers them): the bed's sha256 MUST be a track of the skill's OWN scripts/music_library.json
-#                          (SCRIPTS_DIR, never a path from the sidecar / project / environment), and the sidecar's library_file
-#                          and license must equal that manifest entry.  Not in the manifest, unreadable manifest or a field
-#                          mismatch fail the `mux` record ("... is not in the approved music library").  The library FILE in
-#                          music_library/ is NOT needed at delivery time (the bed is already in the project).
-#      anything else    -> fails closed.
+#    query, sha256, fetched_at}; sha256 must equal the bed file's sha256.  The music bed is checked INSIDE THE `mux` RECORD
+#    (there is no separate `music` record: every failure below is reported as `mux` / status `stale` / exit 2, in its reason).
+#    The bed is the file the MUX RECEIPT names (bed.path + bed.sha256, re-hashed); after resolving symlinks it must be a
+#    regular file under <project>/assets/audio/ (else "music bed must be a file under <project>/assets/audio/ (got <path>)");
+#    the sidecar is read beside that path.  Order of the music check:
+#      1. the skill's OWN scripts/music_library.json (SCRIPTS_DIR; never a path from the sidecar / project / environment) is
+#         loaded FIRST; unreadable / invalid fails the check for EVERY provider ("... scripts/music_library.json cannot be used").
+#      2. list NOT empty -> only provider "music_library" is accepted: the bed's sha256 must be a track of the list and the
+#         sidecar's library_file and license must equal that entry ("... is not in the approved music library ...").  A
+#         "pixabay_music" sidecar is refused ("provider pixabay_music is not accepted while the approved music library has
+#         tracks"), even when the bytes happen to be an approved track.  The library FILE in music_library/ is NOT needed at
+#         delivery time (the bed is already in the project).
+#      3. list EMPTY -> "pixabay_music" is accepted (the record above, nothing more); "music_library" fails (not in the list).
+#      4. any other provider fails closed.
 #    The delivery receipt `music` entry = provider, bed_sha256, track_id, track_title, url, sidecar {path, sha256} and, for the
 #    library: library_file, license, origin, approved_by, approved_on, manifest_sha256 (+ sidecar_manifest_sha256).
+# -- music-presence (fresh gate, in a real run and in --check, listed right after `loudness`): mean_volume of renders/final.mp4
+#    (ffmpeg -ss <start> -t <len> -i final.mp4 -vn -af volumedetect -f null -) in the window voEndSec+0.5 ... min(voEndSec+2.5,
+#    duration-0.1), voEndSec from artifacts/episode.json (Ctx.ep['vo_end']).  PASS when the mean is above -60.0 dB.  It proves
+#    ONLY that there is sound after the voice ends, i.e. that a bed was muxed in at all (a voice-only mux measures -91 dB).  It
+#    does NOT prove that the sound is the approved bed (the `mux` record binds that), nor that music is present throughout
+#    the video.  Window < 1.0 s = quality failure (exit 1); no audio stream / unreadable / ffmpeg failure / timeout = exit 4.
+#    The record carries mean_db, window [start, end], threshold_db; the delivery receipt carries `music_presence`
+#    {mean_db, window_start, window_end} (next to the `music` entry).
 # -- music-library (`--preflight` ONLY, like word-timing; a real run and --check do not run it): at least one track of
 #    scripts/music_library.json must be usable (music_library.check_library status "ok").  The online source (Pixabay) is
 #    refused at the time of writing, so the library is the one music source every run can rely on; failing at step 0 is
@@ -223,6 +246,8 @@ GATES = [
     dict(name='loudness', interp='python', script='measure_loudness.py', args=['{final}', '--report', '{report}'],
          optional_args=[], inputs=['final'], needs=[], report='{reports}/final-audio.json',
          limit=60, required=True),
+    dict(name='music-presence', runner='music_presence', optional_args=[], inputs=['final'], needs=['vo_end'],
+         report='{reports}/music-presence.json', limit=30, required=True),
     dict(name='timing', interp='python', script='timing_check.py',
          args=['--audio', '{avatar}', '--words', '{words}', '--line-starts', '{line_starts}', '--srt', '{srt}',
                '--report', '{report}'],
@@ -789,8 +814,12 @@ def spawn(cmd, ctx, limit, env):
     return res
 
 
+def gate_scripts(gate):
+    return gate.get('scripts') or ([gate['script']] if gate.get('script') else [])
+
+
 def interps_needed(gate):
-    scripts = gate.get('scripts') or [gate['script']]
+    scripts = gate_scripts(gate)
     return {'python' if s.endswith('.py') else 'node' for s in scripts}
 
 
@@ -944,7 +973,82 @@ def runner_derived(gate, ctx, base, report, limit, env):
     return finish_runner(gate, ctx, dict(base, seconds=total, code=0), report, data, '; '.join(mism), issues=mism)
 
 
-RUNNERS = {'script': runner_script, 'derived': runner_derived}
+_MEAN_VOLUME = re.compile(r'mean_volume:\s*(-?inf|-?\d+(?:\.\d+)?)\s*dB')
+
+
+def runner_music_presence(gate, ctx, base, report, limit, env):
+    """Is there sound in the final file after the voice ends?  (see the CONTRACT comment: what this does and does not prove)"""
+    final, vo = ctx.paths['final'], ctx.ep['vo_end']
+    ffmpeg, ffprobe = ctx.tools.get('ffmpeg'), ctx.tools.get('ffprobe')
+    if not ffmpeg or not ffprobe:
+        return record(gate, 'missing', 4, '%s not found on PATH' % ('ffmpeg' if not ffmpeg else 'ffprobe'), **base)
+    started = time.monotonic()
+
+    def left():
+        return limit - (time.monotonic() - started)
+
+    def fail(status, cls, reason, extra=None, out=''):
+        data = {'schema': 'yt-news-v4-music-presence', 'pass': False, 'reason': reason, 'threshold_db': MUSIC_PRESENCE_MIN_MEAN_DB,
+                'videoSha256': ctx.hash(final)}
+        data.update(extra or {})
+        return finish_music(gate, ctx, base, report, data, status, cls, reason, extra, out, time.monotonic() - started)
+
+    probe = spawn([ffprobe, '-v', 'error', '-show_entries', 'stream=codec_type:format=duration', '-of', 'json', str(final)], ctx, max(left(), 1), env)
+    if probe['cancelled'] or probe['timed_out'] or probe['code'] != 0:
+        why = 'cancelled: finalize was terminated' if probe['cancelled'] else 'ffprobe timed out' if probe['timed_out'] else \
+            'ffprobe could not read %s (exit %s)' % (ctx.rel(final), probe['code'])
+        return fail('crashed' if probe['cancelled'] else 'timeout' if probe['timed_out'] else 'crashed', 4, why)
+    try:
+        info = json.loads(probe['stdout'].decode('utf-8', 'replace'))
+        duration = float(info['format']['duration'])
+        has_audio = any(st.get('codec_type') == 'audio' for st in info.get('streams', []))
+    except (ValueError, KeyError, TypeError):
+        return fail('crashed', 4, 'cannot read the duration of %s' % ctx.rel(final))
+    if not has_audio:
+        return fail('crashed', 4, 'the final file %s has no audio stream: nothing to measure' % ctx.rel(final))
+    start = vo + MUSIC_PRESENCE_START_AFTER_VO
+    end = min(vo + MUSIC_PRESENCE_END_AFTER_VO, duration - MUSIC_PRESENCE_END_MARGIN)
+    window = [round(start, 3), round(end, 3)]
+    if end - start < MUSIC_PRESENCE_MIN_WINDOW:
+        need = MUSIC_PRESENCE_START_AFTER_VO + MUSIC_PRESENCE_MIN_WINDOW + MUSIC_PRESENCE_END_MARGIN
+        return fail('fail', 1, 'only %.2f s of the final file is left after the voice ends (voEndSec %s, duration %.2f); at least %.1f s is '
+                    'needed to measure that the music bed is present' % (max(duration - vo, 0.0), vo, duration, need),
+                    {'window': window, 'duration': round(duration, 3)})
+    res = spawn([ffmpeg, '-nostdin', '-hide_banner', '-ss', '%.3f' % start, '-t', '%.3f' % (end - start), '-i', str(final), '-vn',
+                 '-af', 'volumedetect', '-f', 'null', '-'], ctx, max(left(), 1), env)
+    out = res['stderr']
+    if res['cancelled']:
+        return fail('crashed', 4, 'cancelled: finalize was terminated', {'window': window}, out)
+    if res['timed_out']:
+        return fail('timeout', 4, 'timeout: the volume measurement exceeded the %.0fs limit of the gate' % limit, {'window': window}, out)
+    if res['code'] != 0:
+        return fail('crashed', 4, 'ffmpeg volumedetect exited with code %s' % res['code'], {'window': window}, out)
+    found = _MEAN_VOLUME.search(out)
+    if not found:
+        return fail('crashed', 4, 'cannot read mean_volume from the ffmpeg volumedetect output', {'window': window}, out)
+    silent = found.group(1).endswith('inf')
+    mean = None if silent else float(found.group(1))
+    shown = '-inf' if silent else '%.1f' % mean
+    where = '%.2f\u2013%.2f s' % (start, end)
+    extra = {'mean_db': mean, 'window': window, 'threshold_db': MUSIC_PRESENCE_MIN_MEAN_DB}
+    if silent or mean <= MUSIC_PRESENCE_MIN_MEAN_DB:
+        return fail('fail', 1, 'the final file is silent after the voice ends (mean %s dB in %s, must be above %.1f dB): the music bed is '
+                    'missing from the mix; run the music step and the mux again' % (shown, where, MUSIC_PRESENCE_MIN_MEAN_DB), extra, out)
+    detail = 'mean %s dB in %s (must be above %.1f dB)' % (shown, where, MUSIC_PRESENCE_MIN_MEAN_DB)
+    data = {'schema': 'yt-news-v4-music-presence', 'pass': True, 'detail': detail, 'videoSha256': ctx.hash(final), **extra}
+    return finish_music(gate, ctx, base, report, data, 'pass', 0, '', dict(extra, detail=detail), out, time.monotonic() - started)
+
+
+def finish_music(gate, ctx, base, report, data, status, cls, reason, extra, out, seconds):
+    write_json_atomic(report, data)
+    b = dict(base, seconds=seconds, out=out)
+    b['inputs'] = dict(base['inputs'])
+    b['inputs'][ctx.rel(report)] = ctx.hash(report)
+    b['command'] = 'ffmpeg -ss <voEndSec+%.1f> -t <window> -i %s -vn -af volumedetect -f null -' % (MUSIC_PRESENCE_START_AFTER_VO, ctx.rel(ctx.paths['final']))
+    return record(gate, status, cls, reason, extra=extra or None, **b)
+
+
+RUNNERS = {'script': runner_script, 'derived': runner_derived, 'music_presence': runner_music_presence}
 
 
 def run_gate(gate, ctx, inputs, deadline, env, deps=None):
@@ -956,10 +1060,10 @@ def run_gate(gate, ctx, inputs, deadline, env, deps=None):
         inputs.setdefault(ctx.rel(path), ctx.hash(path))
     rel_report = ctx.rel(report)
     runner = gate.get('runner')
-    scripts = gate.get('scripts') or [gate['script']]
+    scripts = gate_scripts(gate)
     if runner:
         cmd = ['<%s>' % gate['name']]
-        command = ' + '.join(scripts)
+        command = ' + '.join(scripts) or 'ffmpeg -af volumedetect'
     else:
         cmd = exe_for(ctx, gate['script']) + argv
         command = shlex.join(cmd)
@@ -1261,16 +1365,19 @@ MUSIC_PROVIDER_LIBRARY = 'music_library'      # == music_library.SIDECAR_PROVIDE
 MUSIC_MANIFEST = SCRIPTS_DIR / 'music_library.json'       # the skill's own (locked) copy: the only manifest that counts
 
 
-def verify_library_music(src, bed_sha):
-    """provider music_library: the bed must be a track of the skill's own manifest.  -> (problems, receipt fields)"""
-    short = bed_sha[:12]
+def load_music_manifest():
+    """The skill's own approved-music list.  -> (helper module, manifest, None) or (None, None, error text)."""
     try:
         lib = load_sibling('music_library')
-        manifest = lib.load_manifest(MUSIC_MANIFEST)
-        track = lib.find_track(manifest, bed_sha)
+        return lib, lib.load_manifest(MUSIC_MANIFEST), None
     except Exception as e:  # noqa: BLE001 - MusicLibraryError, a missing helper, anything: fail closed
-        return ['music bed %s is not in the approved music library: scripts/music_library.json cannot be used (%s)'
-                % (short, str(e) or type(e).__name__)], {}
+        return None, None, str(e) or type(e).__name__
+
+
+def verify_library_music(lib, manifest, src, bed_sha):
+    """provider music_library: the bed must be a track of the skill's own list.  -> (problems, receipt fields)"""
+    short = bed_sha[:12]
+    track = lib.find_track(manifest, bed_sha)
     if not isinstance(track, dict):
         return ['music bed %s is not in the approved music library (scripts/music_library.json)' % short], {}
     bad = [(k, src.get(k), track.get(f)) for k, f in (('library_file', 'file'), ('license', 'license')) if src.get(k) != track.get(f)]
@@ -1307,10 +1414,17 @@ def verify_mux_receipt(receipt_path, ctx):
             p.append('mux receipt %s.sha256 missing' % key)
         elif not Path(path).is_file() or ctx.hash(path) != v['sha256'].lower():
             p.append('mux receipt %s.sha256 does not match the current %s' % (key, ctx.rel(path)))
-    if bed_path is not None and bed_path.is_file():
+    audio_dir = ctx.project / 'assets' / 'audio'
+    if bed_path is not None and bed_path.is_file() and not inside(bed_path, audio_dir):
+        p.append('music bed must be a file under %s/ (got %s)' % (ctx.rel(audio_dir), bed_path))
+    elif bed_path is not None and bed_path.is_file():
         sidecar = Path(str(bed_path) + '.source.json')
         src, serr = read_json(sidecar)
         bed_sha = ctx.hash(bed_path)
+        lib, manifest, merr = load_music_manifest()                 # FIRST, whatever the provider says
+        if merr:
+            p.append('music bed %s is not in the approved music library: scripts/music_library.json cannot be used (%s)'
+                     % (bed_sha[:12], merr))
         if serr or not isinstance(src, dict):
             p.append('music bed has no fetch record: %s is %s' % (ctx.rel(sidecar), serr or 'not a JSON object'))
         elif src.get('schema') != MUSIC_SCHEMA:
@@ -1322,11 +1436,17 @@ def verify_mux_receipt(receipt_path, ctx):
             info['music'] = {k: src.get(k) for k in ('provider', 'track_id', 'track_title', 'url')}
             info['music']['bed_sha256'] = bed_sha
             info['music']['sidecar'] = {'path': ctx.rel(sidecar), 'sha256': ctx.hash(sidecar)}
-            if provider == MUSIC_PROVIDER_LIBRARY:
-                lp, fields = verify_library_music(src, bed_sha)
+            if merr:
+                pass                                                # already reported; no provider is accepted without the list
+            elif provider == MUSIC_PROVIDER_LIBRARY:
+                lp, fields = verify_library_music(lib, manifest, src, bed_sha)
                 p += lp
                 info['music'].update(fields)
-            elif provider != MUSIC_PROVIDER_ONLINE:
+            elif provider == MUSIC_PROVIDER_ONLINE:
+                if manifest.get('tracks'):
+                    p.append('music bed %s: provider %s is not accepted while the approved music library has tracks '
+                             '(scripts/music_library.json); run the music step again' % (bed_sha[:12], MUSIC_PROVIDER_ONLINE))
+            else:
                 p.append('music bed %s has an unknown provider %r in %s (expected %s or %s)'
                          % (bed_sha[:12], provider, ctx.rel(sidecar), MUSIC_PROVIDER_ONLINE, MUSIC_PROVIDER_LIBRARY))
     return p, info
@@ -2018,6 +2138,14 @@ def run(args):
             release_run_lock(state['lock'])
 
 
+def music_presence_receipt(records):
+    rec = next((r for r in records if r['name'] == 'music-presence'), None)
+    if rec is None or rec['status'] != 'pass':
+        return None
+    window = rec.get('window') or [None, None]
+    return {'mean_db': rec.get('mean_db'), 'window_start': window[0], 'window_end': window[1]}
+
+
 def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, receipt_p, receipt_tmp, t_start, started,
                 finish, lexical, tools):
     """Order: copy -> partial; receipt -> its temp name; receipt renamed; the mp4 is renamed LAST, so an mp4 at the deliver
@@ -2042,6 +2170,7 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
                                               'caption_options', 'captions', 'visual', 'final')},
                    'layout': vinfo.get('layout'), 'render': vinfo.get('render'), 'mux': vinfo.get('mux'),
                    'music': vinfo.get('music'), 'video': vinfo.get('video'),
+                   'music_presence': music_presence_receipt(records),
                    'manifest_sha256': ctx.manifest_sha,
                    'gates': [public(r, False) for r in records], 'relevance_status': relevance,
                    'started_at': started, 'finished_at': now_iso(), 'seconds': round(time.monotonic() - t_start, 2)}

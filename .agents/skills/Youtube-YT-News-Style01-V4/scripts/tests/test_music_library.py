@@ -82,7 +82,11 @@ class ManifestTests(Base):
         self.bad(manifest(track(approved_on='12/11/2026')), 'approved_on')
         self.bad(manifest(track(duration_sec=0)), 'duration_sec')
         self.bad(manifest(track(duration_sec=True)), 'duration_sec')
+        for v in (float('inf'), float('-inf'), float('nan'), -3, '120'):
+            self.bad(manifest(track(duration_sec=v)), 'duration_sec')     # json.dumps writes Infinity / NaN
         self.bad(manifest(track(title=5)), 'title')
+        self.bad(manifest(track(title='')), 'title')
+        self.bad(manifest(track(title='   ')), 'title')
 
     def test_top_level_failures(self):
         self.bad(dict(manifest(), schema='other'), 'schema')

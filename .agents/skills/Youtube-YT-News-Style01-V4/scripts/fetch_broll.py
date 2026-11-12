@@ -21,7 +21,9 @@ Writes the mp3 and a sidecar `<out.mp3>.source.json`
   pixabay:  {"schema":"yt-news-v4-music-source","provider":"pixabay_music","track_id","track_title","url","query",
              "sha256":<of the mp3>,"fetched_at":<UTC ISO>}      (a field the provider does not return is null)
 A Pixabay mp3 is only accepted when ffprobe finds an audio stream of at least 30 s. An existing out.mp3 is never
-overwritten without --force (a failed --force run keeps the previous pair). Transient Pixabay failures (network
+overwritten without --force. A failed --force run keeps the previous pair, except when the new mp3 was already
+put in place and the sidecar could not be: then both files are removed (nothing usable is left at <out>; exit 4).
+Transient Pixabay failures (network
 errors, HTTP 429 / 5xx, timeouts) are retried with backoff inside MUSIC_RETRY_BUDGET_SECONDS (180 s).
 Exit codes: 0 ok (valid mp3 + sidecar exist), 2 usage / refusal to overwrite, 3 footage mode refused,
 4 no music bed could be fetched (one `ERROR:` line ending "no music bed was written"; no partial mp3 /
@@ -366,7 +368,7 @@ def fetch_music(query: str, out_path, force: bool = False, manifest_path=None, r
     """Fetch the bed. Returns the sidecar dict; raises MusicRefused (exit 2) / MusicFailed (exit 4).
     The approved library (music_library.py) comes first: a non-empty list means library only (no Pixabay call);
     Pixabay is used only when the list is empty. On any failure nothing new is left behind (a failed --force run
-    keeps the previous mp3 + sidecar).
+    keeps the previous mp3 + sidecar, except a failure while the sidecar is put in place, which removes both).
     manifest_path / repo_root are a test seam only: main() never passes them (default: the manifest shipped with
     the skill, and the current directory as repo root)."""
     out = Path(out_path)
@@ -395,6 +397,18 @@ def fetch_music(query: str, out_path, force: bool = False, manifest_path=None, r
         except ml.MusicLibraryError as e:
             empty = _one_line(e)
         raise MusicFailed(f"Pixabay: {_one_line(pixabay_error)}; music library: {empty}; no music bed was written")
+
+
+def _publish_pair(part: Path, out: Path, side_part: Path, side: Path) -> None:
+    """Move the finished mp3 and sidecar into place (mp3 first). If the sidecar cannot be put in place after the mp3
+    was, BOTH are removed: no orphan sidecar may describe a missing or different file (raises the OSError)."""
+    os.replace(part, out)
+    try:
+        os.replace(side_part, side)
+    except OSError:
+        out.unlink(missing_ok=True)
+        side.unlink(missing_ok=True)
+        raise
 
 
 def _copy_from_library(query: str, out: Path, manifest: dict, manifest_sha: str, root: Path) -> dict:
@@ -428,12 +442,7 @@ def _copy_from_library(query: str, out: Path, manifest: dict, manifest_sha: str,
                    "approved_by": track["approved_by"], "approved_on": track["approved_on"],
                    "manifest_sha256": manifest_sha}
         side_part.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(part, out)
-        try:
-            os.replace(side_part, side)
-        except OSError:
-            out.unlink(missing_ok=True)   # never leave an mp3 without its sidecar
-            raise
+        _publish_pair(part, out, side_part, side)
         return sidecar
     except MusicFailed:
         cleanup()
@@ -507,12 +516,7 @@ def _fetch_pixabay(query: str, out: Path) -> dict:
                    "query": query, "sha256": sha,
                    "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
         side_part.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(part, out)
-        try:
-            os.replace(side_part, side)
-        except OSError:
-            out.unlink(missing_ok=True)   # never leave an mp3 without its sidecar
-            raise
+        _publish_pair(part, out, side_part, side)
         return sidecar
     except MusicFailed:
         cleanup()
@@ -533,7 +537,7 @@ def main(argv=None) -> int:
     ap.add_argument("--per-page", type=int, default=30)
     ap.add_argument("--dry-run", action="store_true", help="(footage mode, disabled in V4)")
     ap.add_argument("--music", nargs=2, metavar=("QUERY", "MUSIC_OUT"),
-                    help='fetch a Pixabay music track, e.g. --music "calm tech" projects/<slug>/assets/audio/bed.mp3')
+                    help='fetch the music bed: the approved library if its list has tracks, else Pixabay; e.g. --music "calm tech" projects/<slug>/assets/audio/bed.mp3')
     ap.add_argument("--force", action="store_true", help="overwrite an existing MUSIC_OUT (only after a fully valid new download)")
     ap.add_argument("--plan", help="(footage mode, disabled in V4)")
     ap.add_argument("--context", help="(footage mode, disabled in V4)")

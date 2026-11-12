@@ -6,7 +6,7 @@
 
 **โหมดไม่มีคนดู (V4):** stock/AI footage ใช้ได้เฉพาะ clip ที่มี relevance verdict ผ่านเท่านั้น (ดู `v4-contract.md` ส่วน "Unattended policy") โดยปกติไม่มี → ตอนนั้นไม่มี stock และ `check_broll.py` มีหน้าที่แค่ยืนยันว่า source clip ไม่ซ้ำ/ไม่ปลอมชื่อ ห้ามรัน `fetch_broll.py` เพื่อ "หาของมาเติม" (ใช้ได้เฉพาะ `--music` ขั้น 9 ของ SKILL.md)
 
-ledger ความไม่ซ้ำนี้คุม **footage** เท่านั้น เพลงประกอบ (`fetch_broll.py --music`) อยู่นอกขอบเขต: bed ซ้ำข้ามตอนได้ เพราะเจ้าของเลือกเพลงช่องไว้ใน `scripts/music_library.json` (ไฟล์ใน `music_library/`) และคำสั่งใช้คลังนี้ก่อนและที่เดียวเมื่อรายการมีเพลง (ไม่ติดต่อ Pixabay) — สิ่งที่ห้ามคือ agent copy bed เอง (จากงานอื่นหรือจากคลัง) ไม่ใช่การที่ bed มาจากคลัง
+ledger ความไม่ซ้ำนี้คุม **footage** เท่านั้น เพลงประกอบ (`fetch_broll.py --music`) อยู่นอกขอบเขต: bed ซ้ำข้ามตอนได้ เพราะเจ้าของเลือกเพลงช่องไว้ใน `scripts/music_library.json` (ไฟล์ใน `music_library/`) และคำสั่งใช้คลังนี้ก่อนและที่เดียวเมื่อรายการมีเพลง (ไม่ติดต่อ Pixabay) — สิ่งที่ห้ามคือ agent copy bed เอง (จากงานอื่นหรือจากคลัง) ไม่ใช่การที่ bed มาจากคลัง ตอนส่งมอบ finalize (ภายใน record `mux`) ผ่านเฉพาะ bed ที่ sidecar เป็น `music_library` และ sha256 อยู่ในรายการที่ล็อกไว้ โดยไฟล์ต้องอยู่ใต้ `$P/assets/audio/`
 
 ใน V4 beats อยู่ใน `artifacts/episode.json` (field `beats`; ตาราง `brollDur` อยู่ในไฟล์เดียวกัน) ไม่ใช่ `BEATS` ใน TSX
 

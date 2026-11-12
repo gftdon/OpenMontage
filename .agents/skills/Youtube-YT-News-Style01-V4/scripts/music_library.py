@@ -4,7 +4,10 @@
 The list of approved tracks is `music_library.json` next to this file, so it is part of the skill and covered by
 the gate lock. The mp3 files themselves live in the library directory (default `<repo root>/music_library`,
 override with the absolute path in env MUSIC_LIBRARY_DIR); a file only counts when its sha256 equals the
-manifest entry. `fetch_broll.py --music` falls back to this library when Pixabay fails.
+manifest entry. A symlink or any non-regular file in the library folder counts as `missing` (the owner must place
+real files there). `fetch_broll.py --music` uses this library first: when the list has at least one track the bed
+comes from the library only (Pixabay is not tried, even if no track is usable); Pixabay is used only when the
+list is empty.
 
   python music_library.py check [--repo-root R]
       one line per track `<status> <file> <sha256[:12]>` + a summary; exit 0 when at least one track is ok, else 4.
@@ -18,6 +21,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -90,8 +94,8 @@ def _validate(data, source) -> dict:
         if f in seen_file:
             raise MusicLibraryError(f"{where}: duplicate file {f}")
         seen_file.add(f)
-        if t["title"] is not None and not isinstance(t["title"], str):
-            raise MusicLibraryError(f"{where}: 'title' must be a string or null")
+        if t["title"] is not None and (not isinstance(t["title"], str) or not t["title"].strip()):
+            raise MusicLibraryError(f"{where}: 'title' must be a non-empty string or null")
         for key in ("license", "origin", "approved_by"):
             _text(t, key, where)
         d = t["approved_on"]
@@ -102,8 +106,9 @@ def _validate(data, source) -> dict:
         except ValueError:
             raise MusicLibraryError(f"{where}: 'approved_on' must be a real date YYYY-MM-DD (got {d!r})")
         dur = t["duration_sec"]
-        if dur is not None and (isinstance(dur, bool) or not isinstance(dur, (int, float)) or not dur > 0):
-            raise MusicLibraryError(f"{where}: 'duration_sec' must be a number > 0 or null")
+        if dur is not None and (isinstance(dur, bool) or not isinstance(dur, (int, float))
+                                or (isinstance(dur, float) and not math.isfinite(dur)) or not dur > 0):
+            raise MusicLibraryError(f"{where}: 'duration_sec' must be a finite number > 0 or null")
     return data
 
 

@@ -128,7 +128,7 @@ REAL_ALWAYS = ('qc_manifest.mjs', 'srt_to_script.py', 'words_by_line.py', 'line_
 STUB_FILES = {'lint_beats.py': PY_STUB, 'lint_content.py': PY_STUB, 'lint_captions.py': PY_STUB,
               'frame_checks.py': PY_STUB, 'measure_loudness.py': PY_STUB, 'timing_check.py': PY_STUB, 'qc_final_pixels.mjs': JS_PIXELS,
               'episode_schema.mjs': JS_SCHEMA, 'gate_integrity.mjs': JS_INTEGRITY}
-ALL_GATES = ['frames', 'final-av', 'final-pixels', 'loudness', 'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions',
+ALL_GATES = ['frames', 'final-av', 'final-pixels', 'loudness', 'music-presence', 'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions',
              'script', 'derived']
 ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration', 'relevance']
 STEM = {'beats': 'lint_beats', 'content': 'lint_content', 'captions': 'lint_captions', 'frames': 'frame_checks',
@@ -203,13 +203,27 @@ def probe_video(path):
     return {'width': int(s['width']), 'height': int(s['height']), 'fps': float(a) / float(b), 'frames': int(s['nb_read_packets'])}
 
 
-def make_videos(proj, visual_args=None, pix_fmt='yuv420p'):
-    """visual.mp4 = 2 s of motion + the V4 end card (1 s solid dark static frame) -> exactly totalDurationSec 3.0;
-    final.mp4 = the same video packets (mux_av.sh stream-copies the video)."""
-    args = visual_args or ['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
-                           '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0']
-    ffmpeg(*args, '-pix_fmt', pix_fmt, str(proj / 'renders' / 'visual.mp4'))
-    ffmpeg('-i', str(proj / 'renders' / 'visual.mp4'), '-c:v', 'copy', str(proj / 'renders' / 'final.mp4'))
+TONE = 'sine=frequency=440:sample_rate=48000:duration=30'       # sound all the way: the voice, then the bed after it
+VISUAL_ARGS = ['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=2',
+               '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0']
+
+
+def final_with_audio(proj, *video_args, audio=TONE, out=None):
+    """final.mp4 = the packets of visual.mp4 (by default) + an audio track built from the lavfi source `audio` (None = no audio)."""
+    visual = str(proj / 'renders' / 'visual.mp4')
+    dest = str(out or proj / 'renders' / 'final.mp4')
+    if audio is None:
+        ffmpeg('-i', visual, *(video_args or ('-c:v', 'copy')), '-an', dest)
+    else:
+        ffmpeg('-i', visual, '-f', 'lavfi', '-i', audio, '-map', '0:v:0', '-map', '1:a:0', *(video_args or ('-c:v', 'copy')),
+               '-c:a', 'aac', '-shortest', dest)
+
+
+def make_videos(proj, visual_args=None, pix_fmt='yuv420p', audio=TONE):
+    """visual.mp4 = 2 s of motion + the V4 end card (2 s solid dark static frame) -> exactly totalDurationSec 4.0 (voEndSec 2.0);
+    final.mp4 = the same video packets (mux_av.sh stream-copies the video) + sound after the voice ends (the music-presence gate)."""
+    ffmpeg(*(visual_args or VISUAL_ARGS), '-pix_fmt', pix_fmt, str(proj / 'renders' / 'visual.mp4'))
+    final_with_audio(proj, audio=audio)
 
 
 ENV_BACKUP = {}
@@ -248,7 +262,7 @@ def setUpModule():
         (p / d).mkdir(parents=True)
     (p / 'artifacts' / 'episode.json').write_text(json.dumps({
         'schema': 'yt-news-v4-episode/1', 'assetDir': 'ep1', 'avatarFile': 'avatar.mp4', 'fps': 25, 'voEndSec': 2.0,
-        'totalDurationSec': 3.0, 'beats': [{'t': 0}]}))
+        'totalDurationSec': 4.0, 'beats': [{'t': 0}]}))
     (p / 'artifacts' / 'source_script.txt').write_text(SOURCE_SCRIPT)
     (p / 'assets' / 'avatar.srt').write_text(SRT)
     (p / 'artifacts' / 'word_timing' / 'caption_pages.json').write_text(json.dumps(PAGES))
@@ -291,8 +305,16 @@ def lib_track(**kw):
     return d
 
 
+def online_sidecar(bed, **kw):
+    """The sidecar of the retired online source (provider pixabay_music): accepted only while the approved list is EMPTY."""
+    d = {'schema': 'yt-news-v4-music-source', 'provider': 'pixabay_music', 'track_id': '42', 'track_title': 'Calm Tech',
+         'url': 'https://example.test/42', 'query': 'calm technology', 'sha256': sha(bed), 'fetched_at': '2026-11-12T00:00:00Z'}
+    d.update(kw)
+    return d
+
+
 def library_sidecar(bed, **kw):
-    """The sidecar fetch_broll.py writes when it falls back to the approved library."""
+    """The sidecar fetch_broll.py writes: the approved library is the first and only source."""
     d = {'schema': 'yt-news-v4-music-source', 'provider': 'music_library', 'track_id': None, 'url': None, 'track_title': 'Calm Tech',
          'library_file': LIB_FILE, 'license': 'CC0-1.0', 'origin': 'https://example.test/calm', 'approved_by': 'owner',
          'approved_on': '2026-11-12', 'manifest_sha256': 'e' * 64, 'query': 'calm technology', 'fallback_reason': 'pixabay 403',
@@ -301,7 +323,7 @@ def library_sidecar(bed, **kw):
     return d
 
 
-def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=b'BED-MUSIC', sidecar=None):
+def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=None, sidecar=None):
     """Layout report v3 + run manifest, render receipt and mux receipt in the shapes the real writers produce."""
     proj = repo / 'projects' / 'p1'
     lock = repo / '.claude' / 'skills' / name / 'scripts' / 'gates.lock.json'
@@ -313,10 +335,12 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=b'BED-MUSIC', sidec
     rd.mkdir(parents=True, exist_ok=True)
     bed = proj / 'assets' / 'audio' / 'bed.mp3'
     bed.parent.mkdir(parents=True, exist_ok=True)
-    bed.write_bytes(bed_bytes)
-    Path(str(bed) + '.source.json').write_text(json.dumps(sidecar(bed) if callable(sidecar) else sidecar or {
-        'schema': 'yt-news-v4-music-source', 'provider': 'pixabay_music', 'track_id': '42', 'track_title': 'Calm Tech',
-        'url': 'https://example.test/42', 'query': 'calm technology', 'sha256': sha(bed), 'fetched_at': '2026-11-12T00:00:00Z'}))
+    # the default bed is the real path: an approved library track + the library sidecar.  A fixture with an EMPTY approved list
+    # (make_repo drops .stub_online_bed) gets the retired online bed instead, the only kind an empty list accepts.
+    online = (repo / '.stub_online_bed').exists()
+    bed.write_bytes(bed_bytes if bed_bytes is not None else (b'BED-MUSIC' if online else LIB_BYTES))
+    side = sidecar(bed) if callable(sidecar) else sidecar or (online_sidecar(bed) if online else library_sidecar(bed))
+    Path(str(bed) + '.source.json').write_text(json.dumps(side))
     manifest = {'schema': 'yt-news-v4-run-manifest', 'version': 1, 'runId': run_id, 'compositionId': COMP,
                 'sourceHashes': {'episode.json': sha(ep), 'captions.json': sha(cap), 'scripts/gates.lock.json': sha(lock),
                                  'src/YtNewsStyle01V4.tsx': sha(composer / 'src' / 'YtNewsStyle01V4.tsx'),
@@ -379,6 +403,9 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     tracks = [lib_track()] if library_tracks is None else library_tracks
     (skill / 'scripts' / 'music_library.json').write_text(manifest_text if manifest_text is not None else json.dumps(
         {'schema': 'yt-news-v4-music-library', 'version': 1, 'tracks': tracks}))
+    if library_tracks == [] and manifest_text is None:
+        (Path(tmp) / 'repo').mkdir(parents=True, exist_ok=True)
+        (Path(tmp) / 'repo' / '.stub_online_bed').write_text('an empty approved list: the default bed is the online one\n')
     (Path(tmp) / 'repo' / 'music_library').mkdir(parents=True, exist_ok=True)
     (Path(tmp) / 'repo' / 'music_library' / LIB_FILE).write_bytes(LIB_BYTES)
     (skill / 'scripts' / 'qc_thresholds.json').write_text('{}')
@@ -811,20 +838,20 @@ class HappyAndGateTests(FinalizeBase):
         self.assertEqual(0, self.run_fin(), self.out)          # fixture ends with the dark static end card
         self.deliver.unlink()
         # a frozen segment BEFORE voEndSec (2.0) is still a failure
-        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=0.4', '-vf', 'tpad=stop_mode=clone:stop_duration=2.6'])
+        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=0.4', '-vf', 'tpad=stop_mode=clone:stop_duration=3.6'])
         self.assertEqual(1, self.run_fin())
         self.assertEqual('fail', self.gate(self.failed(), 'final-av')['status'])
         self.assertNotDelivered()
 
     def test_final_duration_must_match_total_duration(self):
-        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=4'])
+        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=3'])
         self.assertEqual(2, self.run_fin())
         g = self.gate(self.failed(), 'final-duration')
         self.assertEqual('stale', g['status'])
         self.assertIn('totalDurationSec', g['reason'])
 
     def test_final_duration_within_one_frame_is_accepted(self):
-        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=3.02'])
+        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=4.02'])
         self.assertEqual(0, self.run_fin(), self.out)
 
     def test_input_mutated_during_run_is_rejected(self):
@@ -1119,7 +1146,7 @@ class MuxReceiptVerifyTests(FinalizeBase):
         self.assertIn('final.audio/final.json', self.gate(self.failed(), 'mux')['reason'])
 
     def test_final_replaced_after_mux(self):
-        shutil.copy(self.proj / 'renders' / 'visual.mp4', self.fin)
+        final_with_audio(self.proj, audio='sine=frequency=880:sample_rate=48000:duration=30')     # another mix than the one muxed
         self.assertEqual(2, self.run_fin())
         self.assertEqual('stale', self.gate(self.failed(), 'mux')['status'])
 
@@ -1953,7 +1980,7 @@ class FramesMediaRootTests(FinalizeBase):
 class MuxVideoAndReceiptFactsTests(FinalizeBase):
     def test_final_must_carry_the_video_packets_of_the_visual(self):
         # same picture, different encode: the sha of the final differs from the visual's stream
-        ffmpeg('-i', str(self.proj / 'renders' / 'visual.mp4'), '-c:v', 'libx264', '-crf', '30', '-pix_fmt', 'yuv420p', str(self.fin))
+        final_with_audio(self.proj, '-c:v', 'libx264', '-crf', '30', '-pix_fmt', 'yuv420p')
         write_receipts(self.repo)
         self.assertEqual(2, self.run_fin(), self.out)
         g = self.gate(self.failed(), 'mux-video')
@@ -1961,7 +1988,7 @@ class MuxVideoAndReceiptFactsTests(FinalizeBase):
         self.assertIn('differs from', g['reason'])
 
     def test_final_with_a_different_number_of_frames_is_refused(self):
-        ffmpeg('-i', str(self.proj / 'renders' / 'visual.mp4'), '-c:v', 'copy', '-t', '2.5', str(self.fin))
+        final_with_audio(self.proj, '-c:v', 'copy', '-t', '2.5')
         write_receipts(self.repo)
         self.assertEqual(2, self.run_fin(), self.out)
         self.assertEqual('stale', self.gate(self.failed(), 'mux-video')['status'])
@@ -1973,7 +2000,7 @@ class MuxVideoAndReceiptFactsTests(FinalizeBase):
         ffmpeg('-f', 'lavfi', '-i', 'anoisesrc=d=3:c=pink:a=0.3:r=48000', str(tmp / 'vo.wav'))
         ffmpeg('-f', 'lavfi', '-i', 'anoisesrc=d=3:c=brown:a=0.2:r=48000', str(tmp / 'bed.wav'))
         r = subprocess.run(['bash', str(SCRIPTS / 'mux_av.sh'), str(tmp / 'visual.mp4'), str(tmp / 'vo.wav'), str(tmp / 'bed.wav'),
-                            str(tmp / 'final.mp4'), '3', '2'], capture_output=True, text=True, cwd=tmp)
+                            str(tmp / 'final.mp4'), '4', '2'], capture_output=True, text=True, cwd=tmp)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         m = self.module()
         ctx = m.Ctx(type('A', (), {'project': str(self.proj), 'composer': 'remotion-composer', 'manifest': None})(), self.repo,
@@ -2025,7 +2052,7 @@ class VideoFormatTests(FinalizeBase):
         self.assertIn('must not be re-encoded', g['reason'])
 
     def test_a_re_encoded_final_that_is_not_yuv420p_names_the_final(self):
-        ffmpeg('-i', str(self.proj / 'renders' / 'visual.mp4'), '-c:v', 'libx264', '-pix_fmt', 'yuv444p', str(self.fin))
+        final_with_audio(self.proj, '-c:v', 'libx264', '-pix_fmt', 'yuv444p')
         write_receipts(self.repo)
         code = self.run_fin()
         self.assertEqual(2, code, self.out)                 # mux-video (the stream differs) is class 2 and wins over the class 1 format failure
@@ -2128,15 +2155,13 @@ class RenderReceiptEngineBindingTests(FinalizeBase):
         before = sha(self.proj / 'renders' / 'visual.mp4')
         self.deliver.unlink()
         Path(str(self.deliver) + '.receipt.json').unlink()
-        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
-                         '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0', '-crf', '31'])
+        self.set_videos([*VISUAL_ARGS, '-crf', '31'])
         self.assertNotEqual(before, sha(self.proj / 'renders' / 'visual.mp4'))
         self.assertEqual(0, self.run_fin(), self.out)
 
     def test_a_visual_re_rendered_without_a_new_receipt_is_stale(self):
         before = json.loads(self.render_path().read_text())['outputSha256']
-        make_videos(self.proj, ['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=1',
-                                '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0', '-crf', '33'])
+        make_videos(self.proj, [*VISUAL_ARGS, '-crf', '33'])
         self.assertNotEqual(before, sha(self.proj / 'renders' / 'visual.mp4'))
         self.assertEqual(2, self.run_fin(), self.out)
         self.assertEqual('stale', self.gate(self.failed(), 'render')['status'])
@@ -2721,7 +2746,149 @@ class RealRunEnvironmentTests(PreflightBase):
         self.assertEqual(0, self.run_fin(), self.out)
 
 
+class MusicPresenceTests(FinalizeBase):
+    """music-presence: there must be sound in renders/final.mp4 after the voice ends (voEndSec 2.0, duration 4.0 here)."""
+
+    def gate_rec(self, doc=None):
+        return self.gate(doc or self.failed(), 'music-presence')
+
+    def new_final(self, audio):
+        final_with_audio(self.proj, audio=audio)
+        write_receipts(self.repo, name=self.name)          # the mux receipt describes the new file
+
+    def test_the_gate_sits_right_after_loudness(self):
+        self.assertEqual(['frames', 'final-av', 'final-pixels', 'loudness', 'music-presence', 'timing'], [g['name'] for g in
+                                                                                                          self.module().GATES][:6])
+
+    def test_sound_after_the_voice_passes_and_the_record_the_report_and_the_receipt_carry_the_measurement(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        rc = self.receipt()
+        g = self.gate_rec(rc)
+        self.assertEqual('pass', g['status'])
+        self.assertGreater(g['mean_db'], -60.0)
+        self.assertEqual([2.5, 3.9], g['window'])
+        self.assertEqual(-60.0, g['threshold_db'])
+        self.assertRegex(g['detail'], r'^mean -?\d+\.\d dB in 2\.50\u20133\.90 s \(must be above -60\.0 dB\)$')
+        self.assertEqual({'mean_db', 'window_start', 'window_end'}, set(rc['music_presence']))
+        self.assertEqual((g['mean_db'], 2.5, 3.9), (rc['music_presence']['mean_db'], rc['music_presence']['window_start'], rc['music_presence']['window_end']))
+        report = json.loads((self.rdir / 'music-presence.json').read_text())
+        self.assertIs(True, report['pass'])
+        self.assertEqual(sha(self.fin), report['videoSha256'])
+
+    def test_the_gate_is_part_of_check_mode_and_its_check_json(self):
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        g = self.gate(doc, 'music-presence')
+        self.assertEqual(('pass', 'fresh'), (g['status'], g['kind']))
+        self.assertIn('mean_db', g)
+        self.assertIn('music-presence', self.out)
+
+    def test_digital_silence_after_the_voice_is_exit_1_with_the_reason(self):
+        self.new_final('sine=frequency=440:sample_rate=48000:duration=2,apad=whole_dur=30')           # voice only, a silent bed
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        g = self.gate_rec()
+        self.assertEqual('fail', g['status'])
+        self.assertRegex(g['reason'], r'^the final file is silent after the voice ends \(mean (-91\.0|-inf) dB in 2\.50\u20133\.90 s, must be above -60\.0 dB\): '
+                                       r'the music bed is missing from the mix; run the music step and the mux again$')
+        self.assertTrue(any(r.startswith('music-presence: the final file is silent after the voice ends') for r in self.failed()['reasons']))
+
+    def test_quiet_noise_about_minus_70_db_fails_and_about_minus_50_db_passes(self):
+        self.new_final('anoisesrc=d=30:a=0.00055:r=48000')
+        self.assertEqual(1, self.run_fin(), self.out)
+        low = self.gate_rec()['mean_db']
+        self.assertLess(low, -60.0)
+        self.assertGreater(low, -85.0)
+        self.new_final('anoisesrc=d=30:a=0.0055:r=48000')
+        self.assertEqual(0, self.run_fin(), self.out)
+        high = self.gate_rec(self.receipt())['mean_db']
+        self.assertGreater(high, -60.0)
+        self.assertLess(high, -40.0)
+
+    def runner(self, vo_end):
+        m = self.module()
+        args = type('A', (), {'project': str(self.proj), 'composer': 'remotion-composer', 'manifest': None})()
+        ctx = m.Ctx(args, self.repo, self.deliver, m.resolve_tools())
+        ctx.ep['vo_end'] = vo_end
+        gate = next(g for g in m.GATES if g['name'] == 'music-presence')
+        report = ctx.reports / 'music-presence.json'
+        base = dict(report=ctx.rel(report), inputs={}, command='x')
+        return m.runner_music_presence(gate, ctx, base, report, 30, m.gate_env(ctx.tools))
+
+    def test_a_tail_that_is_too_short_is_a_quality_failure_exit_1_with_the_reason(self):
+        rec = self.runner(3.0)                         # 1.0 s left after the voice ends
+        self.assertEqual(('fail', 1), (rec['status'], rec['cls']))
+        self.assertEqual('only 1.00 s of the final file is left after the voice ends (voEndSec 3.0, duration 4.00); at least 1.6 s is needed to '
+                         'measure that the music bed is present', rec['reason'])
+        rec = self.runner(2.4)                         # window 2.9 .. 3.9 = 1.0 s: enough
+        self.assertEqual('pass', rec['status'])
+
+    def test_a_short_tail_through_the_whole_run_is_exit_1(self):
+        def patch(m):
+            m.MUSIC_PRESENCE_MIN_WINDOW = 2.0          # the same code path with the real fixture (window 1.4 s)
+        self.assertEqual(1, self.run_fin(patch=patch), self.out)
+        self.assertEqual('fail', self.gate_rec()['status'])
+        self.assertIn('is left after the voice ends', self.gate_rec()['reason'])
+
+    def test_a_final_without_an_audio_stream_is_exit_4(self):
+        final_with_audio(self.proj, audio=None)
+        write_receipts(self.repo, name=self.name)
+        self.assertEqual(4, self.run_fin(), self.out)
+        g = self.gate_rec()
+        self.assertEqual('crashed', g['status'])
+        self.assertIn('has no audio stream', g['reason'])
+
+    def fake_ffmpeg(self, body):
+        f = Path(self.tmp) / 'fake-ffmpeg'
+        f.write_text('#!/bin/sh\n' + body)
+        f.chmod(0o755)
+        return str(f)
+
+    def with_ffmpeg(self, path):
+        def patch(m):
+            real = m.resolve_tools
+            m.resolve_tools = lambda: dict(real(), ffmpeg=path)
+        return patch
+
+    def test_ffmpeg_failing_or_unreadable_output_is_exit_4(self):
+        self.assertEqual(4, self.run_fin(patch=self.with_ffmpeg(self.fake_ffmpeg('echo boom >&2\nexit 1\n'))), self.out)
+        self.assertEqual('ffmpeg volumedetect exited with code 1', self.gate_rec()['reason'])
+        self.assertEqual(4, self.run_fin(patch=self.with_ffmpeg(self.fake_ffmpeg('exit 0\n'))), self.out)
+        self.assertEqual('cannot read mean_volume from the ffmpeg volumedetect output', self.gate_rec()['reason'])
+
+    def test_a_timeout_of_the_measurement_is_exit_4(self):
+        def patch(m):
+            real = m.spawn
+
+            def spawn(cmd, ctx, limit, env):
+                if 'volumedetect' in cmd:
+                    return {'code': None, 'stdout': b'', 'stderr': '', 'timed_out': True, 'cancelled': False, 'seconds': limit, 'start_ns': 0}
+                return real(cmd, ctx, limit, env)
+            m.spawn = spawn
+        self.assertEqual(4, self.run_fin(patch=patch), self.out)
+        g = self.gate_rec()
+        self.assertEqual('timeout', g['status'])
+        self.assertIn('exceeded the 30s limit', g['reason'])
+
+    def test_exit_precedence_integrity_and_tool_failures_still_win_over_a_music_failure(self):
+        self.new_final('sine=frequency=440:sample_rate=48000:duration=2,apad=whole_dur=30')
+        self.edit(self.layout_path(), lambda d: d.update(complete=False))            # a class 2 problem as well
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertEqual('fail', self.gate_rec()['status'])
+
+    def test_the_constants_and_the_mux_script_still_agree(self):
+        m = self.module()
+        mux = (SCRIPTS / 'mux_av.sh').read_text()
+        self.assertIn('afade=t=out:st=${VO_END}:d=4.2', mux)
+        self.assertEqual(4.2, m.MUX_FADE_OUT_SECONDS)
+        self.assertLessEqual(m.MUSIC_PRESENCE_END_AFTER_VO, 0.6 * m.MUX_FADE_OUT_SECONDS)
+        self.assertEqual((-60.0, 0.5, 2.5, 1.0), (m.MUSIC_PRESENCE_MIN_MEAN_DB, m.MUSIC_PRESENCE_START_AFTER_VO,
+                                                 m.MUSIC_PRESENCE_END_AFTER_VO, m.MUSIC_PRESENCE_MIN_WINDOW))
+
+
 class MusicBedProvenanceTests(FinalizeBase):
+    library_tracks = []          # the online record is accepted only while the approved list is empty
+
     def sidecar(self):
         return Path(str(self.proj / 'assets' / 'audio' / 'bed.mp3') + '.source.json')
 
@@ -2804,21 +2971,67 @@ class MusicLibraryBedTests(FinalizeBase):
             self.assertIn(text, reason)
             self.assertIn(sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12], reason)
 
-    def test_a_path_in_the_sidecar_or_an_env_var_cannot_point_at_another_manifest(self):
-        decoy = Path(self.tmp) / 'decoy-manifest.json'
-        decoy.write_text(json.dumps({'schema': 'yt-news-v4-music-library', 'version': 1, 'tracks': [lib_track(
-            sha256=hashlib.sha256(b'SOME OTHER SONG').hexdigest(), file='other.mp3')]}))
-        self.library_bed(bed_bytes=b'SOME OTHER SONG', manifest_path=str(decoy), manifest=str(decoy), library_manifest=str(decoy))
-        env = {k: str(decoy) for k in ('MUSIC_LIBRARY_MANIFEST', 'MUSIC_LIBRARY_JSON', 'MUSIC_MANIFEST')}
-        env['MUSIC_LIBRARY_DIR'] = str(Path(self.tmp))
-        with mock.patch.dict(os.environ, env):
-            self.assertEqual(2, self.run_fin(), self.out)
-        self.assertIn('is not in the approved music library', self.mux_reason())
-        shutil.copy(decoy, self.proj / 'assets' / 'audio' / 'music_library.json')          # nor a manifest inside the project
+    def test_no_list_outside_the_skill_can_make_a_bed_acceptable(self):
+        other_bytes = b'SOME OTHER SONG'
+        other = lib_track(sha256=hashlib.sha256(other_bytes).hexdigest(), file='other.mp3')
+        decoy_text = json.dumps({'schema': 'yt-news-v4-music-library', 'version': 1, 'tracks': [other]})
+        self.library_bed(bed_bytes=other_bytes, library_file='other.mp3', manifest_path=str(Path(self.tmp) / 'decoy.json'))
+        sha12 = sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12]
+        expected = 'music bed %s is not in the approved music library (scripts/music_library.json)' % sha12
+        # (a) a list copied into the project, beside the bed and at the project root
+        (self.proj / 'assets' / 'audio' / 'music_library.json').write_text(decoy_text)
+        (self.proj / 'music_library.json').write_text(decoy_text)
         self.assertEqual(2, self.run_fin(), self.out)
+        self.assertEqual(expected, self.mux_reason())
+        # (b) MUSIC_LIBRARY_DIR pointing at a folder that holds a different list (and the file it names)
+        folder = Path(self.tmp) / 'other-library'
+        folder.mkdir()
+        (folder / 'music_library.json').write_text(decoy_text)
+        (folder / 'other.mp3').write_bytes(other_bytes)
+        with mock.patch.dict(os.environ, {'MUSIC_LIBRARY_DIR': str(folder)}):
+            self.assertEqual(2, self.run_fin(), self.out)
+        self.assertEqual(expected, self.mux_reason())                       # would be exit 0 if any list outside the skill counted
         # and the other way round: a good bed is accepted whatever the sidecar claims about a manifest path
         self.library_bed(manifest_path='/nonexistent/manifest.json')
         self.assertEqual(0, self.run_fin(), self.out)
+
+    def test_an_online_sidecar_is_refused_while_the_approved_list_has_tracks(self):
+        write_receipts(self.repo, name=self.name, bed_bytes=b'AN OLD PIXABAY BED', sidecar=online_sidecar)
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertNotDelivered()
+        sha12 = sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12]
+        self.assertEqual('music bed %s: provider pixabay_music is not accepted while the approved music library has tracks '
+                         '(scripts/music_library.json); run the music step again' % sha12, self.mux_reason())
+
+    def test_an_online_sidecar_is_refused_even_when_the_bytes_are_an_approved_track(self):
+        write_receipts(self.repo, name=self.name, bed_bytes=LIB_BYTES, sidecar=online_sidecar)
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertIn('provider pixabay_music is not accepted while the approved music library has tracks', self.mux_reason())
+
+    def test_a_bed_outside_the_project_audio_directory_is_refused(self):
+        write_receipts(self.repo, name=self.name)
+        for where in (Path(self.tmp) / 'other-episode' / 'assets' / 'audio', self.repo / 'music_library'):
+            where.mkdir(parents=True, exist_ok=True)
+            bed = where / 'bed.mp3'
+            bed.write_bytes(LIB_BYTES)
+            Path(str(bed) + '.source.json').write_text(json.dumps(library_sidecar(bed)))
+            self.edit(self.mux_path(), lambda d, b=bed: d['bed'].update(path=str(b), sha256=sha(b)))
+            self.assertEqual(2, self.run_fin(), (where, self.out))
+            self.assertIn('music bed must be a file under projects/p1/assets/audio/ (got %s)' % bed, self.mux_reason())
+
+    def test_a_bed_that_is_a_symlink_pointing_outside_is_refused(self):
+        write_receipts(self.repo, name=self.name)
+        outside = Path(self.tmp) / 'outside-bed.mp3'
+        outside.write_bytes(LIB_BYTES)
+        bed = self.proj / 'assets' / 'audio' / 'bed.mp3'
+        bed.unlink()
+        os.symlink(outside, bed)
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertIn('music bed must be a file under projects/p1/assets/audio/ (got %s)' % bed, self.mux_reason())
+
+    def test_the_bed_in_the_project_audio_directory_is_accepted(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertIn('assets/audio/bed.mp3', self.receipt()['music']['sidecar']['path'])
 
     def test_an_unknown_or_missing_provider_fails_closed(self):
         for provider in ('spotify', 'pixabay', '', None):
@@ -2838,22 +3051,21 @@ class MusicLibraryBedTests(FinalizeBase):
         self.assertEqual(0, self.run_fin(), self.out)
         self.assertNotIn('music-library', self.out)                 # the check is preflight-only
 
-    def test_the_online_provider_is_unchanged(self):
-        self.assertEqual(0, self.run_fin(), self.out)
-        self.assertEqual('pixabay_music', self.receipt()['music']['provider'])
-
 
 class MusicLibraryInvalidManifestTests(FinalizeBase):
     manifest_text = '{"not": "a manifest"'
 
-    def test_an_invalid_manifest_fails_a_library_bed_but_not_an_online_one(self):
-        write_receipts(self.repo, name=self.name, bed_bytes=LIB_BYTES, sidecar=lambda bed: library_sidecar(bed))
-        self.assertEqual(2, self.run_fin(), self.out)
-        reason = self.gate(self.failed(), 'mux')['reason']
-        self.assertIn('music bed %s is not in the approved music library: scripts/music_library.json cannot be used' % sha(self.proj / 'assets' / 'audio' / 'bed.mp3')[:12], reason)
-        self.assertIn('not valid JSON', reason)
-        write_receipts(self.repo, name=self.name)                   # the online record never reads the manifest
-        self.assertEqual(0, self.run_fin(), self.out)
+    def test_an_invalid_manifest_fails_the_music_check_for_every_provider(self):
+        bed = self.proj / 'assets' / 'audio' / 'bed.mp3'
+        for label, kw in (('library', {'bed_bytes': LIB_BYTES, 'sidecar': library_sidecar}),
+                          ('online', {'bed_bytes': b'AN OLD PIXABAY BED', 'sidecar': online_sidecar})):
+            write_receipts(self.repo, name=self.name, **kw)
+            self.assertEqual(2, self.run_fin(), (label, self.out))
+            self.assertNotDelivered()
+            reason = self.gate(self.failed(), 'mux')['reason']
+            self.assertIn('music bed %s is not in the approved music library: scripts/music_library.json cannot be used' % sha(bed)[:12],
+                          reason, label)
+            self.assertIn('not valid JSON', reason, label)
 
 
 class MusicLibraryEmptyManifestRealRunTests(FinalizeBase):
@@ -2862,6 +3074,7 @@ class MusicLibraryEmptyManifestRealRunTests(FinalizeBase):
     def test_an_empty_library_does_not_stop_a_real_run_or_a_check(self):
         self.assertEqual(0, self.run_fin('--check'), self.out)
         self.assertEqual(0, self.run_fin(), self.out)
+        self.assertEqual('pixabay_music', self.receipt()['music']['provider'])          # an empty list accepts the online record
         self.assertNotIn('music-library', self.out)
 
     def test_an_empty_manifest_refuses_a_library_bed(self):

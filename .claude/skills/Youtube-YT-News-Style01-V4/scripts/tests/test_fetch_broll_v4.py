@@ -455,6 +455,31 @@ class LibraryFirstTests(unittest.TestCase):
         self.assertEqual(LIB_A, self.out.read_bytes())
         self.assertEqual('music_library', json.loads(self.side.read_text())['provider'])
 
+    def test_sidecar_replace_failure_leaves_nothing_usable_at_out(self):
+        real = os.replace
+
+        def failing(src, dst):
+            if str(dst).endswith('.source.json'):
+                raise OSError('disk full')
+            return real(src, dst)
+        (self.lib / 'a.mp3').write_bytes(LIB_A)
+        for label, manifest, tool in (('library', self.manifest(lib_track('a.mp3', LIB_A)), FakeTool([])),
+                                      ('pixabay', self.manifest(), FakeTool(['ok']))):
+            for previous in (False, True):
+                self.out.parent.mkdir(parents=True, exist_ok=True)
+                for f in self.out.parent.glob('*'):
+                    f.unlink()
+                if previous:
+                    self.out.write_bytes(b'previous bed')
+                    self.side.write_text('{"keep": true}')
+                with patch.object(fb.os, 'replace', failing):
+                    rc, out, err = self.run_fb(tool if not previous else type(tool)([] if label == 'library' else ['ok']),
+                                               manifest, *(['--force'] if previous else []))
+                self.assertEqual(4, rc, (label, previous, err))
+                self.assertEqual(1, len(err.strip().splitlines()), err)
+                self.assertIn('disk full', err)
+                self.assertEqual([], self.leftovers(), (label, previous))   # neither mp3 nor sidecar nor temp file
+
     def test_no_overwrite_without_force_still_refuses_before_any_fetch(self):
         (self.lib / 'a.mp3').write_bytes(LIB_A)
         self.out.parent.mkdir(parents=True)
