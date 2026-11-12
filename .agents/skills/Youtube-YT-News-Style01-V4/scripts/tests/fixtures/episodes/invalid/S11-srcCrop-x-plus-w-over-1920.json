@@ -1,0 +1,73 @@
+{
+  "_expect": {
+    "rule": "S11",
+    "path": "/beats/1/srcCrop",
+    "engineMustReject": true
+  },
+  "schema": "yt-news-v4-episode/1",
+  "assetDir": "cf-a66-min",
+  "avatarFile": "avatar.mp4",
+  "avatarFaceBox": {
+    "x": 0.3,
+    "y": 0,
+    "w": 0.4,
+    "h": 0.46
+  },
+  "fps": 25,
+  "voEndSec": 12,
+  "totalDurationSec": 16.5,
+  "ctaT": 10.5,
+  "captionsInputSha256": "bda7cef7b92ed659db4d0460159174ed29b2463b3202b248ebdc5f58cdab26d0",
+  "brand": "AI TECH NEWS",
+  "dateLabel": "1 ม.ค. 2027",
+  "breakingLabel": "BREAKING NEWS",
+  "officialTag": "SOURCE · DEMO",
+  "page": {
+    "domain": "example.com",
+    "path": "/watch?v=demo"
+  },
+  "cta": "คุณคิดอย่างไร?",
+  "endcard": {
+    "eyebrow": "AI TECH NEWS",
+    "titleA": "Demo",
+    "titleB": "Minimal episode",
+    "cta": "คุณคิดอย่างไร?"
+  },
+  "brollDur": {
+    "yt_demo": 6
+  },
+  "beats": [
+    {
+      "t": 0,
+      "mode": "full"
+    },
+    {
+      "t": 3,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "stage",
+      "src": "yt_demo",
+      "from": 1,
+      "origin": "source",
+      "srcCrop": {
+        "x": 1000,
+        "y": 0,
+        "w": 1000,
+        "h": 562
+      },
+      "kicker": "SOURCE DEMO",
+      "headline": "หัวข้อตัวอย่าง",
+      "sub": "คำอธิบายสั้นๆ"
+    },
+    {
+      "t": 7,
+      "mode": "full",
+      "lower": {
+        "at": 7.5,
+        "dur": 2.5,
+        "title": "ข่าวด่วน",
+        "sub": "รายละเอียดข่าว"
+      }
+    }
+  ]
+}

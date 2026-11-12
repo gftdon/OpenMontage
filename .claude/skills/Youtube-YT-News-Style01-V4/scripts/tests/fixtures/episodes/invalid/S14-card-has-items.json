@@ -1,0 +1,198 @@
+{
+  "_expect": {
+    "rule": "S14",
+    "path": "/beats/2/items",
+    "engineMustReject": false
+  },
+  "schema": "yt-news-v4-episode/1",
+  "assetDir": "cf-a66-var",
+  "avatarFile": "avatar.mp4",
+  "avatarFaceBox": {
+    "x": 0.3,
+    "y": 0,
+    "w": 0.4,
+    "h": 0.46
+  },
+  "fps": 25,
+  "voEndSec": 40,
+  "totalDurationSec": 44.5,
+  "ctaT": 37,
+  "captionsInputSha256": "bda7cef7b92ed659db4d0460159174ed29b2463b3202b248ebdc5f58cdab26d0",
+  "brand": "AI TECH NEWS",
+  "dateLabel": "1 ม.ค. 2027",
+  "breakingLabel": "BREAKING NEWS",
+  "officialTag": "SOURCE · DEMO",
+  "page": {
+    "domain": "example.com",
+    "path": "/watch?v=demo"
+  },
+  "cta": "คุณคิดอย่างไร?",
+  "endcard": {
+    "eyebrow": "AI TECH NEWS",
+    "titleA": "Demo",
+    "titleB": "Minimal episode",
+    "cta": "คุณคิดอย่างไร?"
+  },
+  "brollDur": {
+    "stock_a": 20,
+    "yt_clip": 10
+  },
+  "beats": [
+    {
+      "t": 0,
+      "mode": "full"
+    },
+    {
+      "t": 4,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "stock_a",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "ภาพประกอบ",
+      "sub": "คำอธิบายภาพ",
+      "stats": [
+        {
+          "at": 6,
+          "dur": 4,
+          "big": "100",
+          "label": "STAT",
+          "tone": "mint"
+        }
+      ]
+    },
+    {
+      "t": 8,
+      "mode": "pip",
+      "media": "typo",
+      "typo": "card",
+      "layout": "stage",
+      "headline": "การ์ดข้อความ",
+      "cards": [
+        {
+          "at": 8,
+          "lines": [
+            "บรรทัดหนึ่ง",
+            "บรรทัดสอง"
+          ]
+        },
+        {
+          "at": 11,
+          "lines": [
+            "บรรทัดสาม"
+          ]
+        }
+      ],
+      "items": [
+        {
+          "at": 14,
+          "text": "ข้อแรก",
+          "icon": "💡"
+        },
+        {
+          "at": 15,
+          "text": "ข้อสอง"
+        },
+        {
+          "at": 16,
+          "text": "ข้อสาม",
+          "icon": "🚀"
+        }
+      ]
+    },
+    {
+      "t": 14,
+      "mode": "pip",
+      "media": "typo",
+      "typo": "summary3",
+      "layout": "stage",
+      "headline": "สรุปสามข้อ",
+      "items": [
+        {
+          "at": 14,
+          "text": "ข้อแรก",
+          "icon": "💡"
+        },
+        {
+          "at": 15,
+          "text": "ข้อสอง"
+        },
+        {
+          "at": 16,
+          "text": "ข้อสาม",
+          "icon": "🚀"
+        }
+      ]
+    },
+    {
+      "t": 20,
+      "mode": "pip",
+      "media": "typo",
+      "typo": "final4",
+      "layout": "stage",
+      "headline": "สี่ข้อสุดท้าย",
+      "sub": "คำบรรยายรอง",
+      "items": [
+        {
+          "at": 20,
+          "text": "หนึ่ง"
+        },
+        {
+          "at": 21,
+          "text": "สอง"
+        },
+        {
+          "at": 22,
+          "text": "สาม"
+        },
+        {
+          "at": 23,
+          "text": "สี่"
+        }
+      ]
+    },
+    {
+      "t": 26,
+      "mode": "pip",
+      "media": "typo",
+      "typo": "vs",
+      "layout": "stage",
+      "headline": "เปรียบเทียบ",
+      "vs": {
+        "left": {
+          "title": "ซ้าย",
+          "badge": "LEFT",
+          "lines": [
+            "หนึ่ง",
+            "สอง"
+          ]
+        },
+        "right": {
+          "title": "ขวา",
+          "badge": "RIGHT",
+          "lines": [
+            "สาม"
+          ]
+        },
+        "conclusion": "สรุปผล"
+      }
+    },
+    {
+      "t": 32,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 34,
+          "z": 1.2,
+          "fx": 0.5,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 36,
+      "mode": "full"
+    }
+  ]
+}
