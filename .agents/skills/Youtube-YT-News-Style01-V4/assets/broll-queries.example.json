@@ -1,6 +1,6 @@
 {
   "_note":                  "FORMAT example only - do NOT reuse these keys or queries. Write episode-specific queries from the script lines, with descriptive key names. Keys starting with _ are ignored by fetch_broll.py.",
-  "_format":                "key -> [pixabay search query, pixabay category]. Keys become public/<mediaDir>/broll/<key>.mp4 and BROLL_DUR keys. Categories: backgrounds fashion nature science education feelings health people religion places animals industry computer food sports transportation travel buildings business music",
+  "_format":                "key -> [pixabay search query, pixabay category]. Keys become public/<mediaDir>/broll/<key>.mp4 and the `brollDur` keys of episode.json. Categories: backgrounds fashion nature science education feelings health people religion places animals industry computer food sports transportation travel buildings business music",
   "example_abstract":       ["abstract technology particles blue", "backgrounds"],
   "example_chat_ai":        ["artificial intelligence chatbot typing", "computer"],
   "example_office":         ["business analyst office documents", "business"],
