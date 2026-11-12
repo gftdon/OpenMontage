@@ -1,0 +1,9 @@
+{
+  "skill_name":"Youtube-YT-News-Style01-V4",
+  "evals":[{
+    "id":1,
+    "prompt":"Repair a previous Thai AI news episode whose chip overlaps headline at 9s and 89s, stock has source URL, visual holds exceed 10s and audio is -15.5 LUFS. Use copied local media only and a new project; do not modify V2 or production ledger.",
+    "expected_output":"Actual-video baseline stills fail layout gate; V3 full planned DOM samples, beat lint and final encoded audio pass. Deliver 9/89/172s stills, final MP4 and measured pass1/pass2/final reports. Explicitly exclude editorial accuracy, opening hook and semantic stock choice from engine acceptance.",
+    "assertions":["stock has no source chrome", "source full layout has visible credit", "all holds <=10s including adjacent identical/avatar/typo", "slow zoom never resets hold", "missing probe/fonts/sample hard-fails", "measured final audio I=-14 +/-0.5 TP<=-1", "V2 unchanged and skill mirrors byte-identical"]
+  }]
+}

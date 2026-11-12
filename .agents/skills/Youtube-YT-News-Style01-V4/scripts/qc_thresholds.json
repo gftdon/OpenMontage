@@ -1,0 +1,16 @@
+{
+  "maxHoldSeconds": 10,
+  "maxEndcardSeconds": 5,
+  "cropStep": 0.15,
+  "scaleStep": 0.15,
+  "safeFraction": 0.05,
+  "readFontPx": 28,
+  "labelFontPx": 22,
+  "visibleOpacity": 0.05,
+  "avatarEmptyMinArea": 1500,
+  "avatarEmptyMinDimension": 24,
+  "avatarEmptyMaxSeconds": 0.3,
+  "targetI": -14,
+  "toleranceI": 0.5,
+  "maxTP": -1
+}

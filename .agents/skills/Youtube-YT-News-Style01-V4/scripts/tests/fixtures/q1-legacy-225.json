@@ -1,0 +1,287 @@
+{
+  "frame": 225,
+  "width": 1920,
+  "height": 1080,
+  "fontsOk": true,
+  "fields": [
+    {
+      "id": "auto-0",
+      "role": "read",
+      "layer": "current",
+      "text": "AI TECH NEWS",
+      "fontSize": 16.027131782945737,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 100,
+          "y": 38.5,
+          "width": 129.21875,
+          "height": 24
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-1",
+      "role": "read",
+      "layer": "current",
+      "text": "•",
+      "fontSize": 13.737499999999999,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 241.21875,
+          "y": 42,
+          "width": 4.90625,
+          "height": 17
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-2",
+      "role": "read",
+      "layer": "current",
+      "text": "7 พ.ย. 2026",
+      "fontSize": 13.058035714285715,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 258.125,
+          "y": 43.5,
+          "width": 91.40625,
+          "height": 15
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-3",
+      "role": "read",
+      "layer": "current",
+      "text": "IMAGE PROBLEM",
+      "fontSize": 13.008234797297298,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 1156.90625,
+          "y": 41,
+          "width": 118.09375,
+          "height": 19
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-4",
+      "role": "read",
+      "layer": "current",
+      "text": "🔒",
+      "fontSize": 11,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 172,
+          "y": 117.5,
+          "width": 14,
+          "height": 13
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-5",
+      "role": "read",
+      "layer": "current",
+      "text": "youtube.com",
+      "fontSize": 12.469408885542169,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 194,
+          "y": 115,
+          "width": 82.796875,
+          "height": 15
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-6",
+      "role": "read",
+      "layer": "current",
+      "text": "/watch?v=9ZxCOHkfn_8",
+      "fontSize": 12.459902731788079,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 284.796875,
+          "y": 115,
+          "width": 150.515625,
+          "height": 15
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-7",
+      "role": "read",
+      "layer": "current",
+      "text": "IMAGE PROBLEM",
+      "fontSize": 14,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 120,
+          "y": 801.21875,
+          "width": 132.171875,
+          "height": 21
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-8",
+      "role": "read",
+      "layer": "current",
+      "text": "อยากได้รูปภาพไปใช้งาน",
+      "fontSize": 32,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 120,
+          "y": 825.21875,
+          "width": 320.140625,
+          "height": 48
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-9",
+      "role": "read",
+      "layer": "current",
+      "text": "ขายของออนไลน์ ทำโปสเตอร์ หรืองานนำเสนอ",
+      "fontSize": 18,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 120,
+          "y": 874.609375,
+          "width": 336.828125,
+          "height": 27
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-10",
+      "role": "read",
+      "layer": "current",
+      "text": "COMMERCE",
+      "fontSize": 19.67293555583429,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 138.8135223388672,
+          "y": 858.880615234375,
+          "width": 107.21749877929688,
+          "height": 29.53900146484375
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-11",
+      "role": "read",
+      "layer": "current",
+      "text": "ใช้ลงขายของ",
+      "fontSize": 13.771054889084002,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 138.8135223388672,
+          "y": 883.4964599609375,
+          "width": 77.26304626464844,
+          "height": 20.6773681640625
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-12",
+      "role": "read",
+      "layer": "current",
+      "text": "เป็นการ",
+      "fontSize": 27.140624999999996,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 802.234375,
+          "y": 1000.90625,
+          "width": 87.453125,
+          "height": 41
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-13",
+      "role": "read",
+      "layer": "current",
+      "text": "นำไปใช้",
+      "fontSize": 26.93311737804878,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 895.6875,
+          "y": 1000.90625,
+          "width": 81.796875,
+          "height": 41
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-14",
+      "role": "read",
+      "layer": "current",
+      "text": "ลง",
+      "fontSize": 26.731534090909093,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 983.484375,
+          "y": 1000.90625,
+          "width": 32.671875,
+          "height": 41
+        }
+      ],
+      "clipped": false
+    },
+    {
+      "id": "auto-15",
+      "role": "read",
+      "layer": "current",
+      "text": "ขายของ",
+      "fontSize": 28.50354766845703,
+      "opacity": 1,
+      "rects": [
+        {
+          "x": 1019.2879638671875,
+          "y": 999.6734619140625,
+          "width": 101.345947265625,
+          "height": 43.4599609375
+        }
+      ],
+      "clipped": false
+    }
+  ],
+  "transition": false,
+  "footage": {
+    "origin": "stock",
+    "src": "ecommerce_package_order",
+    "credit": false,
+    "chrome": false
+  }
+}
