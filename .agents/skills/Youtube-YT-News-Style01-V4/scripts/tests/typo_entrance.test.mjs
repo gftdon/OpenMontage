@@ -8,7 +8,7 @@ const root = path.resolve(new URL('../../../../..', import.meta.url).pathname);
 const source = fs.readFileSync(path.join(root, 'remotion-composer/src/YtNewsStyle01V4.tsx'), 'utf8');
 const sampleBeats = JSON.parse(fs.readFileSync(path.join(root, 'remotion-composer/src/ytNewsStyle01V4Sample.json'), 'utf8')).beats;
 const fps = 25;
-const { layerPlan, sceneKind, IN_F, entranceStartSec } = await loadEngine();
+const { layerPlan, sceneKind, IN_F, XF_F, entranceStartSec } = await loadEngine();
 const startOf = (i) => Math.ceil(sampleBeats[i].t * fps);
 const typoIdx = sampleBeats.map((b, i) => (b.media === 'typo' ? i : -1)).filter((i) => i >= 0);
 
@@ -55,10 +55,10 @@ test('multi-card and multi-item beats: the 2nd+ entries come from cards[].at / i
   }
 });
 
-test('a T beat that follows a T beat (or S) starts its rows immediately; one that follows P waits', () => {
+test('a T beat that follows a T beat waits XF_F (the new card is opaque first); one that follows S starts immediately; one that follows P / W waits IN_F', () => {
   for (const i of typoIdx) {
     if (i === 0) continue;
     const p = layerPlan(startOf(i), sampleBeats, fps), prev = sceneKind(sampleBeats[i - 1]);
-    assert.equal(p.labelDelayFrames, prev === 'S' || prev === 'T' ? 0 : IN_F, `beat ${i} after ${prev}`);
+    assert.equal(p.labelDelayFrames, prev === 'T' ? XF_F : prev === 'S' ? 0 : IN_F, `beat ${i} after ${prev}`);
   }
 });

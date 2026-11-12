@@ -38,14 +38,25 @@ test('a crop with the box aspect shows exactly the crop rect', () => {
   close(-st.left / k, 240, 'x'); close(-st.top / k, 135, 'y'); close(box.w / k, 1440, 'w'); close(box.h / k, 810, 'h');
 });
 
-test('without a crop the whole frame is contain-fitted, centred, never overflowing', () => {
+test('without a crop the whole frame is cover-fitted and centred: the box is always completely filled (E3)', () => {
   for (const box of [...BOXES, { w: 1000, h: 800 }, { w: 1600, h: 600 }]) {
-    const s = Math.min(box.w / 1920, box.h / 1080), st = srcCropStyle(undefined, box);
+    const s = Math.max(box.w / 1920, box.h / 1080), st = srcCropStyle(undefined, box);
     assert.equal(st.objectFit, 'contain');
     close(st.width, 1920 * s, 'width'); close(st.height, 1080 * s, 'height');
     close(st.left, (box.w - 1920 * s) / 2, 'left'); close(st.top, (box.h - 1080 * s) / 2, 'top');
-    assert.ok(st.left >= -1e-6 && st.top >= -1e-6 && st.width <= box.w + 1e-6 && st.height <= box.h + 1e-6);
+    assert.ok(st.left <= 1e-6 && st.top <= 1e-6 && st.left + st.width >= box.w - 1e-6 && st.top + st.height >= box.h - 1e-6, JSON.stringify(box));
   }
   const st = srcCropStyle(undefined, { w: 1280, h: 720 });
   close(st.left, 0, 'left'); close(st.top, 0, 'top'); close(st.width, 1280, 'width');
+});
+
+test('16:9 media in every picture lane (split.picture, wide.picture) covers the picture box exactly: no black sliver on any side', async () => {
+  const { LANES } = await loadEngine();
+  for (const id of ['split.picture', 'wide.picture']) {
+    const box = { w: LANES[id].w, h: LANES[id].h }, st = srcCropStyle(undefined, box);
+    assert.ok(st.left <= 1e-9, `${id} left edge ${st.left}`); assert.ok(st.top <= 1e-9, `${id} top edge ${st.top}`);
+    assert.ok(st.left + st.width >= box.w - 1e-9, `${id} right edge ${st.left + st.width} < ${box.w}`);
+    assert.ok(st.top + st.height >= box.h - 1e-9, `${id} bottom edge ${st.top + st.height} < ${box.h}`);
+    assert.ok(st.width - box.w < 1 && st.height - box.h < 1, `${id} overflow ${st.width - box.w} x ${st.height - box.h}`);
+  }
 });

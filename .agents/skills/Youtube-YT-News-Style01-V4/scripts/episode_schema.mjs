@@ -24,6 +24,28 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SCHEMA_PATH = path.resolve(HERE, '../assets/episode.schema.json');
 
 const FPS = 25; // schema pins fps to 25
+
+// ---------------------------------------------------------------------------
+// Transition settle table (S09 tail). The engine (remotion-composer/src/YtNewsStyle01V4.tsx, layerPlan) keeps the OUTGOING
+// scene layer of beat i on screen after beat i+1 has started: XF_F + OUT_F frames inside one frame (S/T -> S/T, W -> W),
+// IN_F + OUT_F between the stage and the wide window, IN_F when the presenter takes over. IN_F = ceil(MODE_BLEND_SEC * fps).
+// A presenter beat has no scene layer (0). tests/settle_frames.test.mjs derives this table from the engine's own layerPlan for
+// every ordered pair of scene kinds, so the two can never drift apart.
+// ---------------------------------------------------------------------------
+const MODE_BLEND_SEC = 0.55;
+const IN_F = Math.ceil(MODE_BLEND_SEC * FPS);
+const XF_F = 9;
+const OUT_F = 9;
+/** Scene kind of a beat, as the engine's sceneKind(): P presenter, T text card, W wide window, S stage picture. */
+export const sceneKindOf = (b) => (b.mode === 'full' ? 'P' : b.media === 'typo' ? 'T' : b.layout === 'wide' ? 'W' : 'S');
+/** Frames the outgoing layer of a beat of kind `prev` stays on screen after the next beat (kind `next`) has started. */
+export function settleFrames(prev, next) {
+  if (prev === 'P') return 0;
+  const z = (k) => k === 'S' || k === 'T';
+  if ((z(prev) && z(next)) || (prev === 'W' && next === 'W')) return XF_F + OUT_F;
+  if ((z(prev) && next === 'W') || (prev === 'W' && z(next))) return IN_F + OUT_F;
+  return IN_F; // S / T / W -> P
+}
 const EPS = 1e-9; // tolerance for comparing seconds that came from decimal JSON literals
 
 // ---------------------------------------------------------------------------
@@ -281,6 +303,8 @@ function makeContext(ep, captions, opts) {
     end2(i) { return i + 1 < beats.length ? ctx.end(i + 1) : ep.voEndSec; },
     /** whole frames a beat is on screen (the renderer mounts at ceil(t*fps)) */
     shownFrames(i) { return Math.ceil(ctx.end(i) * FPS) - Math.ceil(beats[i].t * FPS); },
+    /** frames the outgoing layer of beat i is still on screen after beat i+1 starts (0 after the last beat) */
+    settle(i) { return i + 1 < beats.length ? settleFrames(sceneKindOf(beats[i]), sceneKindOf(beats[i + 1])) : 0; },
     /** Loop length L = floor((brollDur[src] - from) * fps) - 2 */
     loopLength(b) { return Math.floor((ep.brollDur[b.src] - (b.from || 0)) * FPS) - 2; },
   };
@@ -400,7 +424,9 @@ function ruleS08(ctx) {
   });
 }
 
-// S09: loop length L >= 25 frames; source beats must not loop (shown frames <= L, error); stock/ai looping is a warning.
+// S09: loop length L >= 25 frames; source beats must not loop (shown frames + the outgoing tail <= L, error); stock/ai looping is a warning.
+// The outgoing layer keeps playing for `settle` frames into the next beat; past the clip's last usable frame a source clip freezes
+// its last frame and a stock clip wraps to its first frame.
 function ruleS09(ctx) {
   ctx.beats.forEach((b, i) => {
     if (!isStageMedia(b) || typeof b.src !== 'string' || !hasKey(ctx.ep.brollDur, b.src)) return;
@@ -414,8 +440,30 @@ function ruleS09(ctx) {
     if (shown > L) {
       if (b.origin === 'source') ctx.err(p, 'S09', `source beat shows ${shown} frames but the clip only lasts ${L}: a source clip must not loop`);
       else ctx.warn(p, 'S09', `beat shows ${shown} frames but the clip lasts ${L}: it will loop`);
+      return;
+    }
+    const settle = ctx.settle(i);
+    if (shown + settle > L) {
+      const over = shown + settle - L; // frames missing at the end of the clip
+      const secs = (Math.ceil(over / FPS * 100 - 1e-9) / 100).toFixed(2); // reduce `from` by at least this many seconds
+      const from = b.from || 0;
+      const fix = from - Number(secs) >= -EPS
+        ? `lower "from" by at least ${secs} s (from ${from} s to ${Math.max(0, from - Number(secs)).toFixed(2)} s) or shorten the beat by ${secs} s`
+        : `"from" cannot go below 0 (it is ${from} s): shorten the beat by at least ${secs} s or use a longer clip`;
+      const what = b.origin === 'source' ? 'the clip would freeze on its last frame' : 'the clip would wrap to its first frame';
+      const msg = `beat ${i} clip "${b.src}": the beat shows ${shown} frames and its outgoing layer plays ${settle} more into beat ${i + 1} (${sceneKindOf(b)}>${sceneKindOf(ctx.beats[i + 1])}), ${shown + settle} frames in all, but the clip only has ${L} after from=${from} s (${over} frame${over === 1 ? "" : "s"} short): ${what}; ${fix}`;
+      if (b.origin === 'source') ctx.err(p, 'S09', msg);
+      else ctx.warn(p, 'S09', msg);
     }
   });
+}
+
+// S20: the closing question (CTA chip) lives in the presenter-only lane full.cta, so it must start on the last beat and that beat
+// must be a presenter beat: on any other scene the chip would overlap the window / presenter card. (ctaT < voEndSec stays S03.)
+function ruleS20(ctx) {
+  const last = ctx.beats.length - 1, b = ctx.beats[last];
+  if (b.mode !== 'full') ctx.err(`/beats/${last}/mode`, 'S20', `the last beat must be a presenter beat (mode "full"): the CTA chip uses the presenter-only lane full.cta, got mode "${b.mode}"`);
+  if (!(ctx.ep.ctaT >= b.t - EPS)) ctx.err('/ctaT', 'S20', `ctaT ${ctx.ep.ctaT} is before the start of the last beat (${b.t}): the CTA must start on the last presenter beat`);
 }
 
 // S10: a src may appear in several beats only if it is a source clip and the source ranges are disjoint.
@@ -720,6 +768,7 @@ export function validateEpisode(episode, captions, opts = {}) {
     ruleS17(ctx);
     if (ctx.timelineOk) ruleS18(ctx);
     ruleS19(ctx);
+    ruleS20(ctx);
     errors.push(...ctx.errors);
     warnings.push(...ctx.warnings);
   }

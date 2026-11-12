@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   OffthreadVideo,
   Loop,
@@ -279,10 +279,12 @@ export function sceneKind(b: Beat): SceneKind {
 // z-order: backdrop 0 · outgoing frame 10 · incoming frame 11 · presenter 20 (a wide window arriving over a
 // leaving presenter takes 21) · header 30 · stat rail 40 · lower third 45 · CTA 46 · caption 60 · end card 90.
 // Rules: the outgoing layer HOLDS at opacity 1 until the incoming layer reaches 1, then fades under it
-// over OUT_F frames and unmounts; outgoing labels unmount at f = 0; incoming labels start at labelDelayFrames.
+// over OUT_F frames and unmounts; incoming labels start at labelDelayFrames. Outgoing S / W labels unmount at f = 0;
+// an outgoing T card keeps its text in the FINISHED state (`finished`) for as long as the incoming picture does not cover it
+// (T->T / T->S: XF_F, T->W: IN_F; T->P: the presenter covers it, see CoverGuard) so a card never goes blank under a fade.
 // ===========================================================================
 export type FrameRect = { x: number; y: number; w: number; h: number; r: number };
-export interface SceneLayerPlan { key: string; index: number; kind: "S" | "T" | "W"; frame: "stage" | "wide"; role: "current" | "outgoing"; opacity: number; startFrame: number; labels: boolean /* labels render only on the current layer */ }
+export interface SceneLayerPlan { key: string; index: number; kind: "S" | "T" | "W"; frame: "stage" | "wide"; role: "current" | "outgoing"; opacity: number; startFrame: number; labels: boolean /* labels render only on the current layer */; finished: boolean /* an outgoing T card keeps its text, in the finished state */ }
 export interface FramePlan { mounted: boolean; opacity: number; z: number }
 export interface AvatarPlan {
   rect: FrameRect;
@@ -325,6 +327,7 @@ export function beatStartFrame(b: Beat, fps = 25): number { return Math.ceil(b.t
 // Frames (after the new beat starts) during which incoming labels wait. Spec §5 table, last column.
 export function labelDelayFor(prev: SceneKind | null, cur: SceneKind): number {
   if (prev === null) return 0;
+  if (prev === "T" && (cur === "T" || cur === "S")) return XF_F; // the incoming card / picture is opaque first, then its text enters: old text is never visible through new text
   if ((isZ(prev) && isZ(cur)) || (prev === "W" && cur === "W") || (prev === "P" && cur === "P")) return 0;
   return IN_F;
 }
@@ -348,7 +351,7 @@ export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
   const FULL: FrameRect = { x: full.x, y: full.y, w: full.w, h: full.h, r: full.r }, CARD: FrameRect = { x: card.x, y: card.y, w: card.w, h: card.h, r: card.r };
   const stage: FramePlan = { mounted: false, opacity: 0, z: 10 }, wide: FramePlan = { mounted: false, opacity: 0, z: 10 };
   const layers: SceneLayerPlan[] = [];
-  const mk = (i: number, k: "S" | "T" | "W", role: "current" | "outgoing", opacity: number): SceneLayerPlan => ({ key: `scene-${i}`, index: i, kind: k, frame: k === "W" ? "wide" : "stage", role, opacity, startFrame: Math.ceil(beats[i].t * fps), labels: role === "current" });
+  const mk = (i: number, k: "S" | "T" | "W", role: "current" | "outgoing", opacity: number, finished = false): SceneLayerPlan => ({ key: `scene-${i}`, index: i, kind: k, frame: k === "W" ? "wide" : "stage", role, opacity, startFrame: Math.ceil(beats[i].t * fps), labels: role === "current", finished: role === "outgoing" && k === "T" && finished });
   const curK = kind as "S" | "T" | "W", prevK = pk as "S" | "T" | "W";
   // Presenter (default = the current scene's settled state).
   let av: Omit<AvatarPlan, "punch"> = kind === "P" ? { rect: FULL, opacity: 1, cropProgress: 0, interpolated: false } : kind === "W" ? { rect: CARD, opacity: 0, cropProgress: 1, interpolated: false } : { rect: CARD, opacity: 1, cropProgress: 1, interpolated: false };
@@ -358,9 +361,9 @@ export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
   let curOpacity = 1;
   if (active) {
     if (pk === "P" && zc) { av = { rect: lerpRect(FULL, CARD, eIn), opacity: 1, cropProgress: eIn, interpolated: true }; }
-    else if (zp && kind === "P") { stage.mounted = true; stage.opacity = 1; stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1)); av = { rect: lerpRect(CARD, FULL, eIn), opacity: 1, cropProgress: 1 - eIn, interpolated: true }; }
-    else if (zp && zc) { curOpacity = eXf; layers.push(mk(prevIndex as number, prevK, "outgoing", hold(XF_F))); av = { rect: CARD, opacity: 1, cropProgress: 1, interpolated: false }; }
-    else if (zp && kind === "W") { wide.opacity = eIn; stage.mounted = true; stage.opacity = hold(IN_F); stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1)); av = { rect: CARD, opacity: 1 - eIn, cropProgress: 1, interpolated: false }; }
+    else if (zp && kind === "P") { stage.mounted = true; stage.opacity = 1; stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1, true)); av = { rect: lerpRect(CARD, FULL, eIn), opacity: 1, cropProgress: 1 - eIn, interpolated: true }; }
+    else if (zp && zc) { curOpacity = eXf; layers.push(mk(prevIndex as number, prevK, "outgoing", hold(XF_F), f < XF_F)); av = { rect: CARD, opacity: 1, cropProgress: 1, interpolated: false }; }
+    else if (zp && kind === "W") { wide.opacity = eIn; stage.mounted = true; stage.opacity = hold(IN_F); stage.z = 10; layers.push(mk(prevIndex as number, prevK, "outgoing", 1, f < IN_F)); av = { rect: CARD, opacity: 1 - eIn, cropProgress: 1, interpolated: false }; }
     else if (pk === "W" && zc) { stage.opacity = eIn; wide.mounted = true; wide.opacity = hold(IN_F); wide.z = 10; layers.push(mk(prevIndex as number, "W", "outgoing", 1)); av = { rect: CARD, opacity: eIn, cropProgress: 1, interpolated: false }; }
     else if (pk === "W" && kind === "W") { curOpacity = eXf; layers.push(mk(prevIndex as number, "W", "outgoing", hold(XF_F))); }
     else if (pk === "P" && kind === "W") { av = { rect: FULL, opacity: 1 - eIn, cropProgress: 0, interpolated: false }; }
@@ -392,7 +395,7 @@ export function layerPlan(frame: number, beats: Beat[], fps = 25): LayerPlan {
 // ---- Source crop maths (spec §6): crop = region of the 1920x1080 source that is cover-fitted into the box ----
 export function srcCropStyle(crop: SrcCrop | undefined, box: Rect): React.CSSProperties {
   if (!crop) {
-    const s = Math.min(box.w / W, box.h / H);
+    const s = Math.max(box.w / W, box.h / H); // cover: the box is always completely filled (contain left a sub-pixel black column at each side)
     return { position: "absolute", width: W * s, height: H * s, left: (box.w - W * s) / 2, top: (box.h - H * s) / 2, objectFit: "contain" };
   }
   const s = Math.max(box.w / crop.w, box.h / crop.h);
@@ -523,6 +526,11 @@ const enter = (l: Labels, at = 0, leadFrames = 0) => boundedEntrance(l.t, Math.m
 // the time the 0.55 s transition window of the beat has passed.
 const CHROME_LEAD_F = 2;
 
+// E2: the browser chrome shows a URL pill (source) and a credit / AI label; when the previous beat shows the same chrome
+// (S->S or W->W, same origin source or ai) it is one continuous object and its entrance does not run again.
+export const chromeKey = (b: Beat | null): string | null => (b && b.mode === "pip" && b.media !== "typo" && (b.origin === "source" || b.origin === "ai") ? `${b.layout}|${b.origin}` : null);
+export const chromeContinuous = (prev: Beat | null, cur: Beat | null): boolean => chromeKey(cur) !== null && chromeKey(cur) === chromeKey(prev);
+
 // Browser chrome: 52 px bar (persistent in its frame); URL pill + right-hand label only for the CURRENT beat's source / AI image.
 const BrowserChrome: React.FC<{ prefix: "split" | "wide"; origin: LaneId; beat: Beat | null; episode: EpisodeData; labels: Labels }> = ({ prefix, origin, beat, episode, labels }) => {
   const chromeId = `${prefix}.chrome` as LaneId, urlId = `${prefix}.chrome.url` as LaneId, labelId = `${prefix}.chrome.label` as LaneId;
@@ -564,7 +572,7 @@ const SceneLayer: React.FC<{ layer: SceneLayerPlan; children: React.ReactNode }>
 );
 
 // Museum card (S): picture + headline + description (the description yields to the stat rail).
-const MuseumScene: React.FC<{ beat: Beat; episode: EpisodeData; statVisible: boolean; labels: Labels; current: boolean }> = ({ beat, episode, statVisible, labels, current }) => {
+const MuseumScene: React.FC<{ beat: Beat; episode: EpisodeData; statVisible: boolean; labels: Labels; descLabels: Labels; current: boolean }> = ({ beat, episode, statVisible, labels, descLabels, current }) => {
   const pic = LANES["split.picture"];
   return (
     <>
@@ -575,7 +583,7 @@ const MuseumScene: React.FC<{ beat: Beat; episode: EpisodeData; statVisible: boo
         {current && <div style={{ ...laneBox("split.headline", "split.lower"), ...enter(labels) }}>
           <TextField id="headline" lane="split.headline" size={40} style={{ fontWeight: 800, whiteSpace: "nowrap" }}>{beat.headline}</TextField>
         </div>}
-        {current && beat.sub && !statVisible && <div style={{ ...laneBox("sub", "split.lower"), ...enter(labels) }}>
+        {current && beat.sub && !statVisible && <div style={{ ...laneBox("sub", "split.lower"), ...enter(descLabels) }}>
           <TextField id="description" lane="sub" style={{ color: CREAM_DIM, whiteSpace: "nowrap" }}>{beat.sub}</TextField>
         </div>}
       </Backing>
@@ -629,7 +637,33 @@ const VsCard: React.FC<{ side: VsSide; accent: string; k: "left" | "right" }> = 
 // 1-3 rows: one column, one line each (nowrap; overflow is a gate failure). 4 rows: two columns, a row may wrap to 2 lines.
 const CARD_TITLE_H = 98, CARD_RULE_MARGIN = "16px 0 34px", CARD_RULE_H = 6, CARD_PAD = 26, CARD_GAP = 22, CARD_ROW_PX = 60;
 const CARD_ROW_H = 82 + 2 * CARD_PAD; // 60 px text (line-height 82) + 26 px padding top and bottom = 134
-const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({ beat, labels, current }) => {
+// T -> P: the presenter grows over the outgoing card. A text field that the presenter box has reached is hidden for the frame
+// (the card, its backing and every field the presenter has not reached stay), because text under the presenter is a layout defect.
+// Pure function of the frame: the layout effect re-runs on every render and sets or clears `visibility` on each field.
+const CoverGuard: React.FC<{ cover: FrameRect | null; children: React.ReactNode }> = ({ cover, children }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const page = root.closest<HTMLElement>("[data-qc-root]");
+    const k = page ? page.getBoundingClientRect().width / W || 1 : 1, origin = page ? page.getBoundingClientRect() : { x: 0, y: 0 };
+    root.querySelectorAll<HTMLElement>("[data-qc-field]").forEach(el => {
+      let hide = false;
+      if (cover) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        hide = Array.from(range.getClientRects()).some(r => {
+          const x = (r.x - origin.x) / k, y = (r.y - origin.y) / k, w = r.width / k, h = r.height / k;
+          return w > 0 && h > 0 && x - 8 < cover.x + cover.w && x + w + 8 > cover.x && y - 8 < cover.y + cover.h && y + h + 8 > cover.y;
+        });
+      }
+      el.style.visibility = hide ? "hidden" : "";
+    });
+  });
+  return <div ref={ref} style={{ display: "contents" }}>{children}</div>;
+};
+
+const TypoScene: React.FC<{ beat: Beat; labels: Labels; content: boolean; cover: FrameRect | null }> = ({ beat, labels, content, cover }) => {
   const { t, fps } = labels;
   const variant = beat.typo;
   const items = beat.items ?? [];
@@ -644,7 +678,7 @@ const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({
   return (
     <Backing id="typo.backing" style={{ ...laneBox("typo.backing", "stage"), backgroundColor: NAVY_2, backgroundImage: "radial-gradient(ellipse at 50% 28%, rgba(242,179,76,0.20), transparent 60%), radial-gradient(rgba(245,241,232,0.13) 1.5px, transparent 1.5px), linear-gradient(160deg, #1B2440, #0E1220)", backgroundSize: "auto, 28px 28px, auto" }}>
       <div style={{ position: "absolute", inset: 20, borderRadius: 18, border: "1.5px solid rgba(242,179,76,0.35)", pointerEvents: "none" }} />
-      {current && <div style={{ ...laneBox("typo.content", "typo.backing"), display: "flex", flexDirection: "column", justifyContent: "center" }}>
+      {content && <CoverGuard cover={cover}><div style={{ ...laneBox("typo.content", "typo.backing"), display: "flex", flexDirection: "column", justifyContent: "center" }}>
         {variant === "card" && <div style={{ display: "flex", flexDirection: "column" }}>
           <TextField id="typo-title" lane="typo.content" size={76} style={{ fontWeight: 800, whiteSpace: "nowrap", ...enter(labels) }}>{beat.headline}</TextField>
           <div style={{ width: 140, height: CARD_RULE_H, borderRadius: 3, background: AMBER, margin: CARD_RULE_MARGIN }} />
@@ -685,7 +719,7 @@ const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({
             <TextField id="vs-conclusion" lane="typo.content" size={44} style={{ whiteSpace: "nowrap" }}>{beat.vs.conclusion}</TextField>
           </Backing>
         </div>}
-      </div>}
+      </div></CoverGuard>}
     </Backing>
   );
 };
@@ -695,6 +729,9 @@ const TypoScene: React.FC<{ beat: Beat; labels: Labels; current: boolean }> = ({
 type LiveStat = { stat: Stat; b: number; i: number };
 const liveStats = (beats: Beat[], t: number): LiveStat[] =>
   beats.flatMap((beat, b) => (beat.stats ?? []).map((stat, i) => ({ stat, b, i }))).filter(({ stat }) => t >= stat.at && t < stat.at + stat.dur).sort((a, b) => a.stat.at - b.stat.at).slice(0, 3);
+
+// E4: the latest end of any chip that is already over at time t (0 when none). The description line re-enters from that moment.
+export const lastStatEnd = (beats: Beat[], t: number): number => { let last = 0; for (const b of beats) for (const st of b.stats ?? []) { const e = st.at + st.dur; if (e <= t && e > last) last = e; } return last; };
 
 const StatRail: React.FC<{ live: LiveStat[]; t: number; fps: number }> = ({ live, t, fps }) => (
   <div style={{ ...laneBox("sub"), zIndex: 40, display: "flex", alignItems: "center", gap: 14 }}>
@@ -1078,7 +1115,7 @@ export const calculateYtNewsStyle01V4Metadata: CalculateMetadataFunction<YtNewsS
 };
 
 export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = (props) => {
-  const errs = checkEpisodeMinimal(props.episode, props.captions);
+  const errs = useMemo(() => checkEpisodeMinimal(props.episode, props.captions), [props.episode, props.captions]); // once per props, not once per frame
   if (errs.length) throw new Error("YtNewsStyle01V4 props invalid: " + errs.join("; "));
   const {qcPlan=false,qcMeasure=false}=props;
   const EPISODE=props.episode;const BEATS=EPISODE.beats;const VO_END_SEC=EPISODE.voEndSec;const CTA_T=EPISODE.ctaT;const CAPTION_PAGES=props.captions.pages;
@@ -1091,13 +1128,19 @@ export const YtNewsStyle01V4: React.FC<YtNewsStyle01V4Props> = (props) => {
   const lowerStart=beat.lower?entranceStartSec(beat.lower.at,plan,fps):0;
   const showLower=!!beat.lower&&t>=lowerStart&&t<beat.lower.at+beat.lower.dur;
   const ctaStart=entranceStartSec(CTA_T,plan,fps);
-  const layerOf=(l:SceneLayerPlan)=>{const b=BEATS[l.index],cur=l.labels;return <SceneLayer key={l.key} layer={l}>{l.kind==="S"?<MuseumScene beat={b} episode={EPISODE} statVisible={live.length>0} labels={labels} current={cur}/>:l.kind==="T"?<TypoScene beat={b} labels={labels} current={cur}/>:<WideScene beat={b} episode={EPISODE} labels={labels} current={cur}/>}</SceneLayer>;};
+  // E4: the description re-enters (short entrance) when the last stat chip has just ended, instead of popping in at full opacity.
+  const descLabels:Labels={...labels,startSec:Math.max(labels.startSec,lastStatEnd(BEATS,t))};
+  // E2: S->S (same origin) and W->W (same origin) keep one browser chrome: URL pill and credit do not re-run their entrance.
+  const chromeLabels:Labels=chromeContinuous(plan.prevIndex===null?null:BEATS[plan.prevIndex],beat)?{...labels,startSec:-1e6}:labels;
+  // E1: an outgoing T card renders its text in the finished state (no restart, no re-animation).
+  const finishedLabels:Labels={...labels,startSec:-1e6};
+  const layerOf=(l:SceneLayerPlan)=>{const b=BEATS[l.index],cur=l.labels;return <SceneLayer key={l.key} layer={l}>{l.kind==="S"?<MuseumScene beat={b} episode={EPISODE} statVisible={live.length>0} labels={labels} descLabels={descLabels} current={cur}/>:l.kind==="T"?<TypoScene beat={b} labels={cur?labels:finishedLabels} content={cur||l.finished} cover={!cur&&plan.kind==="P"&&plan.avatar.opacity>0?plan.avatar.rect:null}/>:<WideScene beat={b} episode={EPISODE} labels={labels} current={cur}/>}</SceneLayer>;};
   return <div data-qc-root style={{width:W,height:H,position:"relative",overflow:"hidden",background:NAVY}}>
     <QcProbe enabled={qcMeasure} plan={qcPlan} frame={frame} beat={beat} beatIndex={plan.index} episode={EPISODE} captions={props.captions}/>
     {!isEnd&&<>
       <Backdrop/>
-      {plan.stage.mounted&&<StageFrame key="stage" plan={plan.stage} kind={isZ(plan.kind)?plan.kind:(plan.outgoingKind??"S")} chromeBeat={isZ(plan.kind)?beat:null} episode={EPISODE} labels={labels}>{plan.layers.filter(l=>l.frame==="stage").map(layerOf)}</StageFrame>}
-      {plan.wide.mounted&&<WideFrame key="wide" plan={plan.wide} chromeBeat={plan.kind==="W"?beat:null} episode={EPISODE} labels={labels}>{plan.layers.filter(l=>l.frame==="wide").map(layerOf)}</WideFrame>}
+      {plan.stage.mounted&&<StageFrame key="stage" plan={plan.stage} kind={isZ(plan.kind)?plan.kind:(plan.outgoingKind??"S")} chromeBeat={isZ(plan.kind)?beat:null} episode={EPISODE} labels={chromeLabels}>{plan.layers.filter(l=>l.frame==="stage").map(layerOf)}</StageFrame>}
+      {plan.wide.mounted&&<WideFrame key="wide" plan={plan.wide} chromeBeat={plan.kind==="W"?beat:null} episode={EPISODE} labels={chromeLabels}>{plan.layers.filter(l=>l.frame==="wide").map(layerOf)}</WideFrame>}
       <Avatar key="avatar" episode={EPISODE} av={plan.avatar}/>
       <Header episode={EPISODE} beat={beat}/>
       {live.length>0&&<StatRail live={live} t={t} fps={fps}/>}

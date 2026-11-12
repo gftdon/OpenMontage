@@ -20,7 +20,7 @@ const FULL = LANES['avatar.full'], CARD = LANES.avatar;
 const sameRect = (r, l) => r.x === l.x && r.y === l.y && r.w === l.w && r.h === l.h && r.r === l.r;
 
 // §5 table, last column (labelDelay)
-const expectedDelay = (p, c) => (p === null ? 0 : (Z(p) && Z(c)) || (p === 'W' && c === 'W') || (p === 'P' && c === 'P') ? 0 : IN_F);
+const expectedDelay = (p, c) => (p === null ? 0 : p === 'T' && (c === 'T' || c === 'S') ? XF_F : (Z(p) && Z(c)) || (p === 'W' && c === 'W') || (p === 'P' && c === 'P') ? 0 : IN_F);
 
 test('constants: IN_F=14 (ceil(.55 s)), XF_F=9, OUT_F=9', () => {
   assert.deepEqual([IN_F, XF_F, OUT_F], [14, 9, 9]);

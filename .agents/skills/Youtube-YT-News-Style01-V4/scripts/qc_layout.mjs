@@ -367,6 +367,18 @@ async function exists(file) {
 }
 
 /**
+ * The bundler transforms the sources through esbuild's service: a child process (`esbuild --service=<v> --ping`) that is NOT
+ * released when bundle() returns and keeps this process alive after the last status line (observed: >4 min, killed by the
+ * pipeline's wrapper). esbuild.stop() ends it. `esbuild` resolves from the composer like @remotion/bundler does, so this is the
+ * same module instance the bundler used. Best effort: a composer without esbuild has nothing to stop.
+ */
+export async function stopEsbuild(composer, load = loadRemotion) {
+  let esbuild;
+  try { esbuild = load(composer, 'esbuild'); } catch { return false; }
+  try { await esbuild?.stop?.(); return typeof esbuild?.stop === 'function'; } catch { return false; }
+}
+
+/**
  * Build the bundle once per run into <runDir>/bundle (reused by every later invocation of the run).
  * The public directory comes from `makePublicDir()` (a staging dir with only fonts/ + <assetDir>/) and is
  * only created when a build is needed. The bundle is built into bundle.tmp and renamed, so a killed build
@@ -384,6 +396,7 @@ export async function ensureBundle({composer, runDir, makePublicDir, rebuild = f
   try {
     await bundle({entryPoint: path.join(composer, 'src', 'index.tsx'), publicDir, outDir: tmpDir});
   } finally {
+    await stopEsbuild(composer);
     // The bundle holds its own copy of public/; the staging dir (hardlinks, or copies across volumes) is no longer needed.
     if (await exists(path.join(publicDir, STAGE_MARKER))) await fs.rm(publicDir, {recursive: true, force: true});
   }
@@ -680,6 +693,23 @@ async function failWith(error, {out, state, startedMs, log, now}) {
   return EXIT.CRASH;
 }
 
+/**
+ * Leave the process. The exit code is set first (a clean event loop exits by itself); a safety timer then ends the process
+ * `graceMs` after the status line even if some handle is still alive (a browser, a child process, a server). It is unref'd, so it
+ * never keeps a healthy process running, and it fires long after stdout has been flushed. Anything still alive is named on stderr.
+ * @returns {NodeJS.Timeout|object} the timer (tests clear it)
+ */
+export function scheduleExit(code, {graceMs = 3000, exit = process.exit, warn = line => console.error(line), resources = () => process.getActiveResourcesInfo?.() ?? []} = {}) {
+  process.exitCode = code;
+  const timer = setTimeout(() => {
+    const alive = resources().filter(r => r !== 'Timeout');
+    warn(`QC_LAYOUT NOTE the process was still alive ${graceMs} ms after the result (${alive.join(',') || 'unknown handle'}); exiting with code ${code}`);
+    exit(code);
+  }, graceMs);
+  timer.unref?.();
+  return timer;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  run(process.argv.slice(2)).then(code => { process.exitCode = code; });
+  run(process.argv.slice(2)).then(code => { scheduleExit(code); }, error => { console.log(`QC_LAYOUT CRASH ${String(error?.stack ?? error).split('\n').slice(0, 6).join(' | ')}`); scheduleExit(EXIT.CRASH); });
 }

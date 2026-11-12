@@ -62,7 +62,7 @@ test('every invalid corpus file is rejected with its expected rule at its expect
 
 test('the invalid corpus keeps at least one proof per semantic rule', () => {
   const rules = new Set(listJson('invalid').map((f) => readJson(path.join(FX, 'invalid', f))._expect.rule));
-  for (const id of ['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S19']) {
+  for (const id of ['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S19', 'S20']) {
     assert.ok(rules.has(id), `no invalid file for ${id}`);
   }
   // the schema-level rules named in the task

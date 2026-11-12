@@ -8,23 +8,23 @@ const root = path.resolve(new URL('../../../../..', import.meta.url).pathname);
 const source = fs.readFileSync(path.join(root, 'remotion-composer/src/YtNewsStyle01V4.tsx'), 'utf8');
 const episode = JSON.parse(fs.readFileSync(path.join(root, 'remotion-composer/src/ytNewsStyle01V4Sample.json'), 'utf8'));
 const beats = episode.beats, fps = 25;
-const { layerPlan, sceneKind, IN_F, LANES, entranceStartSec } = await loadEngine();
+const { layerPlan, sceneKind, IN_F, XF_F, LANES, entranceStartSec } = await loadEngine();
 const kinds = beats.map(sceneKind);
 const Z = (k) => k === 'S' || k === 'T';
 const startOf = (i) => Math.ceil(beats[i].t * fps);
 const block = (name) => { const a = source.indexOf(`const ${name}:`); assert.ok(a >= 0, name); const b = source.indexOf('\nconst ', a + 10); return source.slice(a, b < 0 ? undefined : b); };
 
-test('labels of every P/W -> S/T/W and S/T -> P/W boundary wait IN_F (.55 s) after the beat starts; S/T->S/T and W->W do not wait', () => {
+test('labels of every P/W -> S/T/W and S/T -> P/W boundary wait IN_F (.55 s) after the beat starts; T->T and T->S wait XF_F (the incoming card is opaque first); S->S, S->T and W->W do not wait', () => {
   let delayed = 0, immediate = 0;
   for (let i = 1; i < beats.length; i++) {
     const p = layerPlan(startOf(i), beats, fps);
     const [a, b] = [kinds[i - 1], kinds[i]];
-    const wait = (Z(a) && Z(b)) || (a === 'W' && b === 'W') || (a === 'P' && b === 'P') ? 0 : IN_F;
+    const wait = a === 'T' && (b === 'T' || b === 'S') ? XF_F : (Z(a) && Z(b)) || (a === 'W' && b === 'W') || (a === 'P' && b === 'P') ? 0 : IN_F;
     assert.equal(p.labelDelayFrames, wait, `beat ${i} ${a}>${b}`);
     assert.equal(p.labelStartFrame, startOf(i) + wait);
-    if (wait) { delayed++; assert.ok(p.labelStartFrame / fps > beats[i].t + 0.5); } else immediate++;
+    if (wait) { delayed++; assert.ok(p.labelStartFrame / fps > beats[i].t + (wait === XF_F ? 0.3 : 0.5)); } else immediate++;
   }
-  assert.ok(delayed >= 30 && immediate >= 15, `delayed=${delayed} immediate=${immediate}`);
+  assert.ok(delayed >= 30 && immediate >= 8, `delayed=${delayed} immediate=${immediate}`);
   // the full-to-pip morph in particular: every P -> S/T boundary of the sample
   const pz = beats.filter((b, i) => i && kinds[i - 1] === 'P' && Z(kinds[i]));
   assert.ok(pz.length >= 12);
@@ -47,10 +47,10 @@ test('outgoing layers never carry labels; only the current layer does (headline,
     for (const l of p.layers) assert.equal(l.labels, l.role === 'current');
     assert.equal(p.layers.filter((l) => l.labels).length, p.kind === 'P' ? 0 : 1);
   }
-  for (const comp of ['MuseumScene', 'WideScene', 'TypoScene']) assert.match(block(comp), /current &&|\{current \&\&|current\b/, comp + ' must gate its text on `current`');
+  for (const comp of ['MuseumScene', 'WideScene']) assert.match(block(comp), /current &&|\{current \&\&|current\b/, comp + ' must gate its text on `current`');
   assert.ok(block('MuseumScene').includes('{current && <div'), 'museum headline/description gated');
   assert.ok(block('WideScene').includes('{current && <div'), 'wide headline gated');
-  assert.ok(block('TypoScene').includes('{current && <div'), 'typo content gated');
+  assert.ok(block('TypoScene').includes('{content && <CoverGuard'), 'typo content gated on `content` (the current layer, or an outgoing T card in its finished state)');
   // footage is tagged for the probe on the current layer only
   assert.equal((source.match(/data-qc-footage=\{current \? beat\.src : undefined\}/g) ?? []).length, 2);
 });
