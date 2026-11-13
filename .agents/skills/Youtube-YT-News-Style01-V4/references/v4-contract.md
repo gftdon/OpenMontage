@@ -199,7 +199,9 @@ THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
        snapshot taken BEFORE the agent's run, or the outside system's own archive.  Snapshot <A>/projects together with
        <A>/remotion-composer/public (at least the older projects' avatars), in the same layout (<S>/projects beside
        <S>/remotion-composer/public).  Without that public dir no older avatar is found and nothing is skipped: a legitimate
-       re-do of the same video is then compared against its own older project and may be flagged as a copy.
+       re-do of the same video is then compared against its own older project and may be flagged as a copy.  The snapshot must
+       dereference symlinks (cp -RL / rsync -L): a project whose avatar, or a directory on the way to it, points outside the
+       snapshot is searched, not skipped.
   --expect-avatar-sha256 is MANDATORY in --check (exit 4 without it, or when it is not 64 lowercase hex): the outside system
        takes it from the TASK (the avatar it ordered), never from the agent.  The avatar the episode names, <public>/<assetDir>/
        <avatarFile>, must be a regular file with exactly that sha256 (record `avatar`, exit 2 before any gate otherwise): an
@@ -210,9 +212,10 @@ THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
        certified_final_sha256 is null in every other check.json (a failure, a crash, a signal, a refused run lock).
 ```
 
-- `<C>` = clean checkout ของ commit ที่ pin (ติดตั้ง `remotion-composer/node_modules` แล้ว); โค้ด lock engine และ node_modules มาจากตรงนี้เสมอ · `<A>` = checkout ของ agent (finalize อ่านอย่างเดียว; `--project`/`--public-root` ชี้เข้าไปที่นี่) **ไม่ใช่ copy root ที่ปลอดภัย** · `<S>` = สำเนาที่ agent เขียนไม่ได้: snapshot ของ `<A>/projects` ที่ถ่าย**ก่อน**การรันของ agent พร้อม `<A>/remotion-composer/public` ในโครงเดียวกัน (`<S>/projects` อยู่ข้าง `<S>/remotion-composer/public`) หรือ archive ของระบบภายนอกเอง · `<PY>` = python >= 3.12 ของ venv ที่ระบบภายนอกควบคุมและมี numpy, PIL, pythainlp รันด้วย `-I` ไม่ใช่ `-S` (finalize ส่ง site-packages ของ venv นั้นให้ gate ภาษา Python ทุกตัวรัน `-I -S -B`)
+- `<C>` = clean checkout ของ commit ที่ pin (ติดตั้ง `remotion-composer/node_modules` แล้ว); โค้ด lock engine และ node_modules มาจากตรงนี้เสมอ · `<A>` = checkout ของ agent (finalize อ่านอย่างเดียว; `--project`/`--public-root` ชี้เข้าไปที่นี่) **ไม่ใช่ copy root ที่ปลอดภัย** · `<S>` = สำเนาที่ agent เขียนไม่ได้: snapshot ของ `<A>/projects` ที่ถ่าย**ก่อน**การรันของ agent พร้อม `<A>/remotion-composer/public` ในโครงเดียวกัน (`<S>/projects` อยู่ข้าง `<S>/remotion-composer/public`) หรือ archive ของระบบภายนอกเอง — snapshot ต้องทำแบบ dereference symlink (`cp -RL` / `rsync -L`): project ที่ avatar หรือโฟลเดอร์ระหว่างทางไปถึง avatar ชี้ออกนอก `<S>` จะถูกค้น ไม่ถูกข้าม ซึ่งอาจ flag การทำวิดีโอเดียวกันซ้ำที่ถูกต้อง (ล้มแบบปิด ต้องให้คนตัดสิน) · `<PY>` = python >= 3.12 ของ venv ที่ระบบภายนอกควบคุมและมี numpy, PIL, pythainlp รันด้วย `-I` ไม่ใช่ `-S` (finalize ส่ง site-packages ของ venv นั้นให้ gate ภาษา Python ทุกตัวรัน `-I -S -B`)
 - `--copy-root` **บังคับ**ใน `--check` และต้องชี้ `<S>/projects` ไม่ใช่ `<A>/projects`: ไม่ใส่ หรือชี้โฟลเดอร์ที่ไม่มี = exit 4 ก่อนรัน gate ใด; ตอนส่งมอบ flag นี้ถูกปฏิเสธ (ส่งมอบใช้โฟลเดอร์แม่ของ project กับ avatar ของตัวเอง)
 - `--expect-avatar-sha256` **บังคับ**ใน `--check`: ไม่ใส่ หรือไม่ใช่ hex ตัวพิมพ์เล็ก 64 ตัว = exit 4; ตอนส่งมอบ flag นี้ถูกปฏิเสธ; ค่ามาจาก **task** (avatar ที่สั่งทำ) ไม่เคยมาจาก agent; ถ้า avatar ที่ episode ระบุ (`<public>/<assetDir>/<avatarFile>`) ไม่ใช่ไฟล์จริงที่ sha256 ตรงค่านี้ = record `avatar` exit 2 ก่อนรัน gate ใด (episode ที่ก๊อปมาพร้อม avatar ของ project อื่นถูกปฏิเสธ)
+- avatar ที่ `<public>/<assetDir>/<avatarFile>` ต้องเป็นไฟล์จริง (regular file) **ทั้งตอนส่งมอบและใน `--check`**: symlink หรือไฟล์ที่ไม่ใช่ไฟล์จริง = record `avatar` exit 2 ก่อนรัน gate ใด; ข้อความบอกวิธีแก้ที่ไม่ลบอะไร: `cp` ไฟล์จริงไว้ข้าง link แล้ว `mv` สำเนาทับ link (`cp` ทับ link ตรง ๆ จะเขียนลงไฟล์ปลายทางของ link) แล้วส่งมอบใหม่; การเทียบ sha256 กับค่าจาก task ยังเป็นของ `--check` เท่านั้น
 - ผ่าน = exit 0 **และ** `certified_final_sha256` ใน `check.json` เท่ากับ sha256 ของไฟล์ที่ส่งมอบ (`delivered_path`) **และ** `avatar_sha256` == `expected_avatar_sha256`: `--check --deliver X` ต้องเป็นไฟล์จริง (ไม่ใช่ symlink) ที่ sha256 ตรง `renders/final.mp4` ที่ gate ตรวจและตรง receipt และ `bound_inputs` ของ receipt ต้องตรงกับ hash ปัจจุบัน; `certified_final_sha256` เป็น null ใน `check.json` ทุกไฟล์ที่ไม่ใช่การผ่าน (ล้ม, crash, signal, run lock ถูกปฏิเสธ)
 
 ## สิ่งที่ด่านไม่รับประกัน
