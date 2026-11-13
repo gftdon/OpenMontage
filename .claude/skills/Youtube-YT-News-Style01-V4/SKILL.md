@@ -47,7 +47,7 @@ $PY -c "import json,sys;json.dump({'endTime':round(float(sys.argv[1]),3)},open(s
 node "$SKILL/scripts/caption_join.mjs" --tokens $P/artifacts/word_timing/caption_pages.json --script $P/artifacts/script.txt --options $P/artifacts/caption-options.json --out $P/artifacts/caption-joined.json
 $PY "$SKILL/scripts/lint_captions.py" --script $P/artifacts/script.txt --pages $P/artifacts/caption-joined.json --source-script $P/artifacts/source_script.txt --report $P/qc/captions-lint.json
 ```
-ตรวจ: ทุกคำสั่งออก 0 (`timing_check` = 0 พิสูจน์ว่า timing วัดจากเสียงนี้ ไม่ใช่พิมพ์มือ; `lint_captions` = 0 คือไม่มีคำไทยถูกตัดกลางคำ) ล้มข้อใด → รันขั้นต้นน้ำใหม่หรือให้ขั้นล้ม ห้ามแก้ตัวเลขเวลา (`word_timing.sh` exit 5 ไม่ใช่ต้นน้ำที่รันซ้ำแก้ได้ → ให้ขั้นล้ม)
+ตรวจ: ทุกคำสั่งออก 0 (`timing_check` = 0 พิสูจน์ว่า timing วัดจากเสียงนี้ ไม่ใช่พิมพ์มือ; `lint_captions` = 0 คือไม่มีคำไทยถูกตัดกลางคำ — `คร่าว ๆ` / `มาก ๆ บน` และช่องว่างคั่นวลีที่ผู้เขียนใส่ถูกต้อง แต่ ๆ ที่ขึ้นต้นบรรทัด/หน้าคือล้ม; ล้ม = ขั้นล้ม ไม่แก้ script/captions) ล้มข้อใด → รันขั้นต้นน้ำใหม่หรือให้ขั้นล้ม ห้ามแก้ตัวเลขเวลา (`word_timing.sh` exit 5 ไม่ใช่ต้นน้ำที่รันซ้ำแก้ได้ → ให้ขั้นล้ม)
 
 **3. วางแผนภาพทีละบรรทัด script** — source ก่อน: จาก `survey_notes.md` + transcript หาว่า "ต้นฉบับแสดงสิ่งที่บรรทัดนี้พูดถึงตรงไหนของจอ" แล้วตัดให้สิ่งนั้นอยู่บนจอทั้ง beat
 `bash "$SKILL/scripts/cut_clips.sh" $P/assets/ytsource/source.mp4 $P/assets/ytsource/clips yt_<topic>:<start>:<end> ...` → `cp $P/assets/ytsource/clips/_cuts.json $P/artifacts/_cuts.json` → copy `yt_*.mp4` ไป `remotion-composer/public/<assetDir>/broll/`
