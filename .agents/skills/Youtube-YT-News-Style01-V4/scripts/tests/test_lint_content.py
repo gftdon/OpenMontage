@@ -1723,7 +1723,368 @@ class EpisodeCopiedCliTests(unittest.TestCase):
         outside = lc.copy_search_for(self.repo / 'elsewhere' / 'episode.json', self.script)
         self.assertIsNone(outside['own_project'])
         stray = self.repo / 'x' / 'scripts' / 'lint_content.py'
-        self.assertIsNone(lc.copy_search_for(self.repo / 'projects' / 'V1' / 'e.json', stray)['projects_dir'])
+        # the default projects-type root comes from the EPISODE's path (the parent of its own project), not from where the script lives
+        self.assertEqual((self.repo / 'projects').resolve(), lc.copy_search_for(self.repo / 'projects' / 'V1' / 'e.json', stray)['projects_dir'])
+        self.assertIsNone(lc.copy_search_for(self.repo / 'elsewhere' / 'V1' / 'e.json', stray)['projects_dir'])
+
+
+class CopyRootTests(unittest.TestCase):
+    """CF-A67 fix 1 (W2c): --copy-root / default root / --avatar / report.copy_search / exit 4. End to end in a temp tree:
+    <tmp>/repo/.claude/skills/Some-Skill/scripts/lint_content.py is the lint of a CLEAN checkout (no other project below repo/projects);
+    <tmp>/main/projects/* stands for the main checkout where the other episodes live."""
+
+    SYN = FIX / 'synthetic_v4_episode.json'
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name).resolve()
+        self.repo = self.tmp / 'repo'
+        scripts = self.repo / '.claude' / 'skills' / 'Some-Skill' / 'scripts'
+        scripts.mkdir(parents=True)
+        for f in ('lint_content.py', 'episode_data.py', 'content_thresholds.py'):
+            (scripts / f).write_bytes((SCRIPTS / f).read_bytes())
+        self.script = scripts / 'lint_content.py'
+        self.main_projects = self.tmp / 'main' / 'projects'
+        self.main_projects.mkdir(parents=True)
+
+    def put(self, projects_dir, project, v4=None, source=None):
+        """An episode (a copy of the synthetic one) at <projects_dir>/<project>/artifacts/episode.json; v4=(assetDir, avatarFile) rewrites those."""
+        data = json.loads(Path(source or self.SYN).read_text(encoding='utf-8'))
+        if v4:
+            data['assetDir'], data['avatarFile'] = v4
+        dst = Path(projects_dir) / project / 'artifacts' / 'episode.json'
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        return dst
+
+    def lint(self, beats, *extra):
+        report = self.tmp / 'report.json'
+        if report.exists():
+            report.unlink()
+        argv = [sys.executable, '-B', str(self.script), '--beats', str(beats), '--script', str(FIX / 'script.txt'), '--words', str(FIX / 'words_by_line.txt'),
+                '--line-starts', str(FIX / 'line_starts.json'), '--cuts', str(FIX / 'cuts.json'), '--source-transcript', str(FIX / 'source_transcript.txt'),
+                '--source-meta', str(FIX / 'source_meta.json'), '--source-timed', str(FIX / 'source_timed.json'), '--evidence', str(FIX / 'visual_evidence.json'),
+                '--schema-validator', str(FIX / 'schema_stub_valid.mjs'), '--report', str(report), *map(str, extra)]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        return proc, json.loads(report.read_text())
+
+    @staticmethod
+    def copied(rep):
+        return [i for i in rep['issues'] if i['code'] == 'episode-copied']
+
+    # ---- the root: why --copy-root exists (falsification) ----
+
+    def test_a_clean_checkout_does_not_see_the_copied_episode_without_copy_root_and_does_with_it(self):
+        original = self.put(self.main_projects, 'V1')                    # the episode that lives in the main checkout
+        mine = self.put(self.repo / 'projects', 'V2')                    # the agent's copy, in a clean checkout (no V1 below repo/projects)
+        proc, rep = self.lint(mine)
+        self.assertEqual([], self.copied(rep))                           # the hole: nothing to compare with
+        self.assertEqual(0, rep['metrics']['copy']['compared_files'])
+        self.assertEqual([str(self.repo / 'projects')], [r['path'] for r in rep['copy_search']['roots'] if r['kind'] == 'projects'])
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects)
+        self.assertEqual(1, proc.returncode)
+        hits = self.copied(rep)
+        self.assertEqual(1, len(hits))
+        self.assertIn(str(original), hits[0]['detail'])
+        self.assertEqual([str(self.main_projects)], [r['path'] for r in rep['copy_search']['roots'] if r['kind'] == 'projects'])
+
+    def test_default_root_is_the_parent_of_the_episodes_own_project_and_only_then(self):
+        v1 = self.put(self.repo / 'projects', 'V1')
+        mine = self.put(self.repo / 'projects', 'V2')
+        proc, rep = self.lint(mine)                                       # siblings are searched with no flag at all
+        self.assertEqual(1, proc.returncode)
+        self.assertIn(str(v1), self.copied(rep)[0]['detail'])
+        search = lc.copy_search_for(mine, self.script)
+        self.assertEqual([self.repo / 'projects'], search['projects_roots'])
+        self.assertEqual(('V2', self.repo / 'projects'), (search['own_project'], search['own_root']))
+        elsewhere = self.put(self.tmp / 'scratch', 'V3')                  # not below a directory named projects: no projects-type root
+        search = lc.copy_search_for(elsewhere, self.script)
+        self.assertEqual([], search['projects_roots'])
+        self.assertIsNone(search['projects_dir'])
+        self.assertEqual(self.tmp / 'x' / 'projects', Path(lc._default_projects_root(self.put(self.tmp / 'x' / 'projects', 'P'))))
+        nested = self.put(self.tmp / 'x' / 'projects' / 'P' / 'projects', 'Q')                 # the NEAREST ancestor named projects
+        self.assertEqual(str(self.tmp / 'x' / 'projects' / 'P' / 'projects'), lc._default_projects_root(nested))
+
+    def test_explicit_copy_roots_replace_the_default_and_are_all_searched(self):
+        self.put(self.repo / 'projects', 'V1')                            # a sibling in the default root: NOT searched once a root is given
+        second = self.tmp / 'second' / 'projects'
+        far = self.put(second, 'F1')
+        mine = self.put(self.repo / 'projects', 'V2')
+        proc, rep = self.lint(mine, '--copy-root', second)
+        self.assertEqual([str(second)], [r['path'] for r in rep['copy_search']['roots'] if r['kind'] == 'projects'])
+        self.assertIn(str(far), self.copied(rep)[0]['detail'])
+        self.assertEqual(1, rep['metrics']['copy']['compared_files'])      # V1 (default root) was not looked at
+        proc, rep = self.lint(mine, '--copy-root', second, '--copy-root', self.repo / 'projects', '--copy-root', second)
+        roots = [r['path'] for r in rep['copy_search']['roots'] if r['kind'] == 'projects']
+        self.assertEqual([str(second), str(self.repo / 'projects')], roots)    # repeatable; the same root twice is one root
+        self.assertEqual(2, rep['metrics']['copy']['compared_files'])
+
+    def test_the_own_project_is_skipped_only_in_the_root_that_holds_it(self):
+        mine = self.put(self.repo / 'projects', 'V2')
+        same_name = self.put(self.main_projects, 'V2')                    # ANOTHER folder that happens to be called V2
+        proc, rep = self.lint(mine, '--copy-root', self.repo / 'projects', '--copy-root', self.main_projects)
+        self.assertEqual(1, proc.returncode)
+        self.assertIn(str(same_name), self.copied(rep)[0]['detail'])
+        proc, rep = self.lint(mine, '--copy-root', self.repo / 'projects')        # alone in its own root: nothing to compare
+        self.assertEqual([], self.copied(rep))
+        self.assertEqual(0, rep['metrics']['copy']['compared_files'])
+
+    def test_a_missing_copy_root_exits_4_with_copy_root_missing(self):
+        mine = self.put(self.repo / 'projects', 'V2')
+        for bad in (self.tmp / 'nope', mine):                              # missing / a file
+            proc, rep = self.lint(mine, '--copy-root', bad)
+            self.assertEqual(4, proc.returncode, proc.stdout)
+            self.assertEqual(['copy-root-missing'], [i['code'] for i in rep['issues']])
+            self.assertEqual('error', rep['issues'][0]['severity'])
+            self.assertIn(str(bad), rep['issues'][0]['detail'])
+            self.assertFalse(rep['pass'])
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--copy-root', self.tmp / 'nope')      # one good, one bad: still 4
+        self.assertEqual(4, proc.returncode)
+        with self.assertRaises(lc.CopyRootError):
+            lc.copy_search_for(mine, self.script, copy_roots=[self.tmp / 'nope'])
+
+    # ---- the report ----
+
+    def test_report_copy_search_lists_every_root_with_kind_file_count_and_skips(self):
+        (self.repo / 'remotion-composer' / 'src').mkdir(parents=True)
+        (self.repo / 'remotion-composer' / 'src' / 'tokens.json').write_text('{"a": 1}')
+        self.put(self.main_projects, 'V1', source=FIX / 'episode_object.json')
+        (self.main_projects / 'V1' / 'artifacts' / 'words.json').write_text('{}')
+        (self.script.parents[1] / 'notes.json').write_text('{}')
+        mine = self.put(self.repo / 'projects', 'V2')
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects)
+        cs = rep['copy_search']
+        self.assertFalse(cs['incomplete'])
+        self.assertEqual(['skill', 'composer-src', 'projects'], [r['kind'] for r in cs['roots']])
+        skill, composer, projects = cs['roots']
+        self.assertEqual(str(self.script.parents[1]), skill['path'])
+        self.assertEqual(str(self.repo / 'remotion-composer' / 'src'), composer['path'])
+        self.assertEqual((1, 2), (composer['files'], projects['files']))
+        self.assertEqual(1, skill['files'])
+        for r in cs['roots']:
+            self.assertEqual([], r['skipped_same_avatar'])
+        self.assertEqual(cs['roots'], rep['metrics']['copy']['roots'])
+
+    def test_report_says_incomplete_when_the_walk_runs_out_of_time(self):
+        from functools import partial
+        from unittest import mock
+        self.put(self.main_projects, 'V1')
+        mine = self.put(self.repo / 'projects', 'V2')
+        argv = ['--beats', str(mine), '--script', str(FIX / 'script.txt'), '--words', str(FIX / 'words_by_line.txt'), '--line-starts', str(FIX / 'line_starts.json'),
+                '--cuts', str(FIX / 'cuts.json'), '--schema-validator', str(FIX / 'schema_stub_valid.mjs'), '--copy-root', str(self.main_projects),
+                '--report', str(self.tmp / 'inproc.json')]
+        orig = lc.check_copy
+        with mock.patch.object(lc, 'check_copy', partial(orig, budget=-1.0)), mock.patch('sys.stdout'):
+            code = lc.main(argv)
+        rep = json.loads((self.tmp / 'inproc.json').read_text())
+        self.assertEqual(1, code)
+        self.assertTrue(rep['copy_search']['incomplete'])
+        hit = [i for i in rep['issues'] if i['code'] == 'copy-search-incomplete']
+        self.assertEqual(1, len(hit))
+        low = hit[0]['detail'].lower()
+        self.assertIn('stop and report', low)
+        self.assertIn('cannot be certified', low)
+        for word in ('delete', 'remove', 'move '):                                              # the agent must not be told to touch other folders
+            self.assertNotIn(word, low)
+
+    # ---- --avatar ----
+
+    def avatar_case(self, project_kind, content=b'A' * 4096, ours=b'A' * 4096):
+        """Our avatar + one OTHER project holding a copy of the synthetic episode and an avatar with `content`.
+        project_kind: 'v4' (avatar in <checkout>/remotion-composer/public/<assetDir>/ named by its episode) or 'mp4' (an mp4 inside the project)."""
+        mine = self.put(self.repo / 'projects', 'V2')
+        avatar = self.repo / 'remotion-composer' / 'public' / 'mine' / 'avatar_source.mp4'
+        avatar.parent.mkdir(parents=True, exist_ok=True)
+        avatar.write_bytes(ours)
+        if project_kind == 'v4':
+            other = self.put(self.main_projects, 'V1', v4=('other-video', 'a.mp4'))
+            (self.tmp / 'main' / 'remotion-composer' / 'public' / 'other-video').mkdir(parents=True)
+            (self.tmp / 'main' / 'remotion-composer' / 'public' / 'other-video' / 'a.mp4').write_bytes(content)
+        else:
+            other = self.put(self.main_projects, 'V1', source=FIX / 'synthetic_v4_episode.json')
+            ep = json.loads(other.read_text())
+            del ep['schema']                                              # not a V4 episode: the avatar is "any *.mp4 in the project folder"
+            other.write_text(json.dumps(ep))
+            (self.main_projects / 'V1' / 'assets').mkdir()
+            (self.main_projects / 'V1' / 'assets' / 'avatar.mp4').write_bytes(content)
+            (self.main_projects / 'V1' / 'assets' / 'broll.mp4').write_bytes(b'x' * 10)
+        return mine, avatar, other
+
+    def test_a_project_with_the_same_avatar_is_skipped_in_a_projects_root_v4_and_mp4_layouts(self):
+        for kind in ('v4', 'mp4'):
+            with self.subTest(kind):
+                import shutil
+                shutil.rmtree(self.repo / 'remotion-composer', ignore_errors=True)
+                shutil.rmtree(self.main_projects.parent, ignore_errors=True)
+                self.main_projects.mkdir(parents=True)
+                mine, avatar, other = self.avatar_case(kind)
+                proc, rep = self.lint(mine, '--copy-root', self.main_projects)                      # without --avatar the same video is a copy
+                self.assertEqual(1, len(self.copied(rep)))
+                proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+                self.assertEqual([], self.copied(rep), rep['issues'])
+                projects = [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]
+                self.assertEqual(['V1'], projects['skipped_same_avatar'])
+                self.assertEqual(0, projects['files'])
+                self.assertEqual(0, rep['metrics']['copy']['compared_files'])
+
+    def test_the_avatar_identity_is_the_content_not_the_size(self):
+        for kind in ('v4', 'mp4'):
+            with self.subTest(kind):
+                import shutil
+                shutil.rmtree(self.repo / 'remotion-composer', ignore_errors=True)
+                shutil.rmtree(self.main_projects.parent, ignore_errors=True)
+                self.main_projects.mkdir(parents=True)
+                mine, avatar, other = self.avatar_case(kind, content=b'B' * 4096)                   # same size, other bytes: another video
+                proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+                self.assertEqual(1, len(self.copied(rep)))
+                self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
+
+    def non_v4_project(self, name='V1'):
+        """A project of ANOTHER video in the main checkout whose episode is a copy of the synthetic one but not a V4 episode, and no mp4 at all."""
+        other = self.put(self.main_projects, name)
+        ep = json.loads(other.read_text())
+        del ep['schema']
+        other.write_text(json.dumps(ep))
+        return other.parents[1]
+
+    def test_render_bundle_copies_of_our_avatar_do_not_identify_another_videos_project(self):
+        """Render bundles copy the whole remotion-composer/public, so another video's project can hold OUR avatar under renders/ or qc/."""
+        mine = self.put(self.repo / 'projects', 'V2')
+        avatar = self.repo / 'remotion-composer' / 'public' / 'mine' / 'avatar_source.mp4'
+        avatar.parent.mkdir(parents=True)
+        avatar.write_bytes(b'A' * 4096)
+        project = self.non_v4_project()
+        for rel in ('renders/render-bundle/public/x', 'qc/layout/runs/r/bundle/public/x'):
+            (project / rel).mkdir(parents=True)
+            (project / rel / 'avatar_source.mp4').write_bytes(b'A' * 4096)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual(1, len(self.copied(rep)))                                                  # still compared, so the copy is found
+        self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
+        # each of the three directory names alone is enough to exclude a path (anywhere below the project)
+        for name in ('public', 'render-bundle', 'bundle'):
+            with self.subTest(name):
+                lone = self.non_v4_project('V3-' + name)
+                (lone / 'deep' / name / 'x').mkdir(parents=True)
+                (lone / 'deep' / name / 'x' / 'a.mp4').write_bytes(b'A' * 4096)
+                search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar)
+                self.assertFalse(lc._same_avatar_project(lone, self.main_projects, search['avatar'], None))
+                import shutil
+                shutil.rmtree(lone)
+        # ...while an mp4 in an ordinary folder of the project still identifies it (rule b)
+        (project / 'assets').mkdir()
+        (project / 'assets' / 'avatar.mp4').write_bytes(b'A' * 4096)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual([], self.copied(rep))
+        self.assertEqual(['V1'], [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar'])
+
+    def test_a_non_v4_project_is_identified_by_the_avatar_in_composer_public_named_like_the_project(self):
+        mine = self.put(self.repo / 'projects', 'V2')
+        avatar = self.repo / 'remotion-composer' / 'public' / 'mine' / 'avatar_source.mp4'
+        avatar.parent.mkdir(parents=True)
+        avatar.write_bytes(b'A' * 4096)
+        self.non_v4_project('v1-slug')
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        (public / 'v1-slug').mkdir(parents=True)
+        (public / 'v1-slug' / 'avatar_source.mp4').write_bytes(b'A' * 4096)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual([], self.copied(rep), rep['issues'])
+        self.assertEqual(['v1-slug'], [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar'])
+        (public / 'v1-slug' / 'avatar_source.mp4').write_bytes(b'B' * 4096)                        # the same size, another video
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual(1, len(self.copied(rep)))
+        (public / 'v1-slug' / 'avatar_source.mp4').unlink()                                         # our avatar under ANOTHER slug does not count
+        (public / 'other-slug').mkdir()
+        (public / 'other-slug' / 'avatar_source.mp4').write_bytes(b'A' * 4096)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
+
+    def test_our_avatar_may_be_a_symlink_to_the_real_file(self):
+        """Round 2: the avatar handed to --avatar is a link into the task folder; candidates are never followed, OUR file is resolved once."""
+        import os
+        mine, avatar, other = self.avatar_case('mp4')
+        link = self.tmp / 'in' / 'avatar.mp4'
+        link.parent.mkdir()
+        os.symlink(str(avatar), str(link))
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', link)
+        self.assertEqual([], self.copied(rep), rep['issues'])
+        self.assertEqual(['V1'], [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar'])
+        (self.main_projects / 'V1' / 'assets' / 'avatar.mp4').write_bytes(b'B' * 4096)               # another video: the link changes nothing
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', link)
+        self.assertEqual(1, len(self.copied(rep)))
+
+    def test_only_a_file_of_the_same_size_is_hashed(self):
+        from unittest import mock
+        mine, avatar, other = self.avatar_case('mp4', content=b'B' * 100)                           # another size; broll.mp4 has yet another
+        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar)
+        with mock.patch.object(lc, '_file_digest', wraps=lc._file_digest) as digest:
+            self.assertFalse(lc._same_avatar_project(self.main_projects / 'V1', self.main_projects, search['avatar'], None))
+        digest.assert_not_called()
+        (self.main_projects / 'V1' / 'assets' / 'avatar.mp4').write_bytes(b'A' * 4096)
+        with mock.patch.object(lc, '_file_digest', wraps=lc._file_digest) as digest:
+            self.assertTrue(lc._same_avatar_project(self.main_projects / 'V1', self.main_projects, search['avatar'], None))
+        self.assertEqual(2, digest.call_count)                                                      # ours (once) + the candidate
+
+    def test_an_unknown_avatar_identity_is_never_skipped(self):
+        mine, avatar, other = self.avatar_case('v4')
+        import shutil
+        shutil.rmtree(self.tmp / 'main' / 'remotion-composer')                                      # the other project's avatar file is not there
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual(1, len(self.copied(rep)))
+        # a V4 episode that does not name an avatar file, and a project without any mp4
+        data = json.loads(other.read_text())
+        del data['avatarFile']
+        other.write_text(json.dumps(data))
+        (self.main_projects / 'V1' / 'assets').mkdir()
+        (self.main_projects / 'V1' / 'assets' / 'avatar.mp4').write_bytes(b'A' * 4096)             # an mp4 exists, but a V4 episode is "otherwise"-free
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
+        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=self.tmp / 'no-such-avatar.mp4')
+        self.assertIsNone(search['avatar'])                                                         # our own avatar unreadable: nothing can be skipped
+        issues, metrics = [], {}
+        lc.check_copy(ed.load_episode(self.SYN, vo_end=96.0), search, issues, metrics)
+        self.assertEqual(['episode-copied'], [i['code'] for i in issues])
+
+    def test_the_avatar_skip_never_applies_to_the_skill_dir_or_the_composer_src(self):
+        mine, avatar, other = self.avatar_case('mp4')
+        skill = self.script.parents[1]
+        (skill / 'fixtures').mkdir()
+        (skill / 'fixtures' / 'ep.json').write_bytes(self.SYN.read_bytes())
+        (skill / 'fixtures' / 'avatar.mp4').write_bytes(avatar.read_bytes())                        # the very same avatar inside the skill dir
+        (self.repo / 'remotion-composer' / 'src').mkdir(parents=True, exist_ok=True)
+        (self.repo / 'remotion-composer' / 'src' / 'sample.json').write_bytes(self.SYN.read_bytes())
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        hits = self.copied(rep)
+        self.assertEqual(1, len(hits))
+        self.assertTrue(hits[0]['detail'].startswith('this episode is a copy of '))
+        self.assertEqual({'skill': 1, 'composer-src': 1, 'projects': 0}, {r['kind']: r['files'] for r in rep['copy_search']['roots']})
+        self.assertEqual(2, rep['metrics']['copy']['compared_files'])                              # skill/fixtures/ep.json + src/sample.json (V1 skipped)
+        for r in rep['copy_search']['roots']:
+            if r['kind'] != 'projects':
+                self.assertEqual([], r['skipped_same_avatar'])
+
+    def test_hashing_counts_against_the_walk_budget(self):
+        mine, avatar, other = self.avatar_case('mp4')
+        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar)
+        past = __import__('time').monotonic() - 1.0
+        with self.assertRaises(lc._OutOfTime):
+            lc._same_avatar_project(self.main_projects / 'V1', self.main_projects, search['avatar'], past)
+        with self.assertRaises(lc._OutOfTime):
+            lc._file_digest(avatar, past)
+        stats = {'unreadable_dirs': 0, 'skipped_nonregular': 0, 'complete': True, 'unreadable_files': 0}
+        only_projects = {**search, 'skill_dir': None, 'composer_src': None}                         # no other walk that could hit the deadline
+        self.assertEqual([], list(lc.copy_candidates(only_projects, stats, past)))
+        self.assertFalse(stats['complete'])                                                         # the avatar step ran out of time: incomplete, not "found nothing"
+
+    def test_a_missing_avatar_file_is_an_input_error_exit_2(self):
+        mine = self.put(self.repo / 'projects', 'V2')
+        proc, rep = self.lint(mine, '--avatar', self.tmp / 'nope.mp4')
+        self.assertEqual(2, proc.returncode)
+        self.assertEqual('input', rep['issues'][0]['code'])
+        self.assertIn('--avatar', rep['issues'][0]['detail'])
+
 
 
 class LatinSeverityTests(unittest.TestCase):
@@ -1967,7 +2328,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual('yt-news-v4-content-lint', rep['schema'])
         self.assertEqual(1, rep['version'])
         self.assertTrue(rep['pass'])
-        self.assertEqual({'issues', 'metrics', 'thresholds', 'inputs', 'schema', 'version', 'pass'}, set(rep))
+        self.assertEqual({'issues', 'metrics', 'thresholds', 'inputs', 'schema', 'version', 'pass', 'copy_search'}, set(rep))
+        self.assertEqual({'roots', 'incomplete'}, set(rep['copy_search']))
+        self.assertFalse(rep['copy_search']['incomplete'])
+        self.assertEqual(['skill', 'composer-src'], [r['kind'] for r in rep['copy_search']['roots']])    # no projects/ above the fixture episode
         self.assertEqual(64, len(rep['inputs'][str(FIX / 'script.txt')]))
         self.assertIn('presenter', rep['metrics'])
         self.assertEqual({'editorial': 0, 'dataBearing': 0, 'warn': 0, 'error': 0}, rep['metrics']['latin'])

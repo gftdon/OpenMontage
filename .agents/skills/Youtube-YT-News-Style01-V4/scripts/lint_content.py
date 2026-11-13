@@ -15,9 +15,28 @@ Hardening (CF-A67, the lint is run by an unattended agent that may take any shor
 relevance file is never evidence; srcCrop trimming an edge by more than CROP_TRIM_MAX_PERCENT is an error; two evidence entries with
 the same `seen` text (after Unicode NFKC, removal of invisible characters and whitespace collapsing) are an error; an episode that shares
 COPY_MAX_SHARE of its beats (same media, headline and footage, compared after normalisation) with another episode-format file (the skill
-directory, or another project under <repo>/projects), or whose beats make up COPY_MAX_SHARE of that file, is an error (episode-copied; at
+directory, or another project in a projects-type root), or whose beats make up COPY_MAX_SHARE of that file, is an error (episode-copied; at
 least COPY_MIN_SAME beats). The episode itself must be a regular file inside its own project (episode-not-regular-file), and the search for
 copies must finish (copy-search-incomplete); the walk reads regular files only and never follows a link.
+
+Where the copy search looks (CF-A67 fix round 1; `projects/` is git-ignored, so a clean checkout has none of the other episodes):
+  --copy-root DIR   (repeatable) a projects-type root: every immediate sub-directory is one project and is searched whole. A root that is not
+                    an existing directory -> exit 4 + issue copy-root-missing (an environment failure, nothing was linted).
+  no --copy-root    the default projects-type root is the parent of the episode's OWN project: the nearest ancestor directory named
+                    `projects` of the episode path (as given, not resolved) with a project folder below it: <x>/projects/<project>/...
+                    An episode that does not lie under such a folder has no projects-type root.
+  always            this skill's directory and <checkout>/remotion-composer/src/*.json of the checkout this script lives in.
+  The episode's own project (in the root that holds it) and its own file are never compared against.
+  --avatar FILE     our avatar mp4. In projects-type roots ONLY a project whose avatar has the same content (sha256; only a file of the same
+                    size is hashed) is skipped: re-doing the same video is allowed. A project's avatar is located as follows: when
+                    <project>/artifacts/episode.json is a yt-news-v4-episode with assetDir + avatarFile, the file
+                    <root>/../remotion-composer/public/<assetDir>/<avatarFile>. Otherwise (a non-V4 project): (a) every *.mp4 directly in
+                    <root>/../remotion-composer/public/<project folder name>/ (the V2/V3 convention, assetDir = the project slug) and (b) every
+                    *.mp4 inside the project folder EXCEPT below a directory named `public`, `render-bundle` or `bundle` (render bundles copy the
+                    whole remotion-composer/public, so they hold the avatars of OTHER videos). An avatar that cannot be found / read is an
+                    unknown identity and the project is NOT skipped. Hashing counts against the walk budget.
+  The report carries copy_search = {roots: [{path, kind: skill|composer-src|projects, files, skipped_same_avatar: [project]}], incomplete}.
+Exit codes: 0 pass, 1 content errors, 2 an input is missing / unreadable (also --avatar), 4 a --copy-root is not a directory.
 
 What the evidence checks prove, plainly: that a subject term (a word of >= 4 characters, not a stopword) occurs in the ORIGINAL video's
 transcript or in the OCR of the frames at the time the clip was cut from. They do NOT prove that the picture matches the narration; that needs
@@ -858,6 +877,7 @@ def _frames_key(counts, t, src):
 
 EPISODE_SCHEMA_PREFIX = 'yt-news-v4-episode'
 COPY_SKIP_DIRS = {'node_modules', '.git', '__pycache__'}
+COPY_BUNDLE_DIRS = {'public', 'render-bundle', 'bundle'}   # a render bundle copies the whole remotion-composer/public: its mp4 files say nothing about THIS project
 COPY_CUTS_NAMES = ('_cuts.json', 'cuts.json')       # the clip table that sits next to an episode file (project artifacts/ or a fixture folder)
 COPY_FOOTAGE_OVERLAP = 0.5                          # two clips of the same source video count as the same footage when they overlap by this
                                                     # share of the shorter one (an agent that re-cuts a copied clip by a second keeps the footage)
@@ -1063,43 +1083,212 @@ def _lexical_project(beats_path, projects_dir):
     return own_project, own_file, problem
 
 
-def copy_search_for(beats_path, script_file=None):
-    """The roots the episode-copied check searches for the episode at `beats_path`: this skill's directory (the script's own, found from
-    __file__), and <repo>/projects when the skill sits in <repo>/.claude|.agents/skills/<skill>/scripts. `own_project` is the project folder
-    the episode itself lives in (never compared against), `own_file` the episode file, `own_problem` a reason why the episode is not a regular
-    file inside its own project (a symlink somewhere below projects/, or not a regular file) or None. The project is taken from the path as
-    given, NOT from where a symlink points: a symlinked episode must not make the project it points into "its own"."""
+class CopyRootError(ValueError):
+    """A --copy-root that does not exist or is not a directory (lint exit 4, issue copy-root-missing)."""
+
+
+class _OutOfTime(Exception):
+    """The walk budget ran out while locating / hashing an avatar."""
+
+
+def _default_projects_root(beats_path):
+    """The default projects-type root: the parent of the episode's own project = the NEAREST lexical ancestor directory named `projects`
+    that has a project folder and a file below it (<x>/projects/<project>/.../episode.json); None when the episode does not lie under one or
+    that directory does not exist. Taken from the path as given (symlinks not resolved), like _lexical_project."""
+    parts = Path(os.path.abspath(str(beats_path))).parts
+    for i in range(len(parts) - 3, 0, -1):
+        if parts[i] == 'projects':
+            root = os.path.join(*parts[:i + 1])
+            return root if os.path.isdir(root) else None
+    return None
+
+
+def _regular_size(path):
+    """Size of a regular file (a symlink is not one), None otherwise / when unreadable."""
+    try:
+        st = os.lstat(str(path))
+    except OSError:
+        return None
+    return st.st_size if stat.S_ISREG(st.st_mode) else None
+
+
+def copy_search_for(beats_path, script_file=None, copy_roots=None, avatar=None):
+    """The roots the episode-copied check searches for the episode at `beats_path` (see the module docstring): this skill's directory
+    (`skill_dir`, found from __file__), <checkout>/remotion-composer/src (`composer_src`, when the skill sits in
+    <checkout>/.claude|.agents/skills/<skill>/scripts) and the projects-type roots `projects_roots` (explicit `copy_roots`, or the default
+    root of _default_projects_root; `projects_dir` = the first one, kept for older callers). An explicit root that is not a directory raises
+    CopyRootError. `own_project` is the project folder the episode itself lives in, `own_root` the projects-type root that holds it (the
+    project is skipped in that root only), `own_file` the episode file, `own_problem` a reason why the episode is not a regular file inside its
+    own project (a symlink somewhere below the root, or not a regular file) or None. The project is taken from the path as given, NOT from
+    where a symlink points: a symlinked episode must not make the project it points into "its own". `avatar` = {path, size, sha256} of our
+    avatar mp4 or None (unreadable avatar: no project is skipped)."""
     here = Path(script_file or __file__).resolve()
     parents = here.parents
     skill_dir = parents[1]
-    projects_dir = None
-    if len(parents) > 4 and parents[2].name == 'skills' and parents[3].name in ('.claude', '.agents'):
-        cand = parents[4] / 'projects'
-        projects_dir = cand if cand.is_dir() else None
     composer_src = None
     if len(parents) > 4 and parents[2].name == 'skills' and parents[3].name in ('.claude', '.agents'):
         cand = parents[4] / 'remotion-composer' / 'src'
         composer_src = cand if cand.is_dir() else None
-    own_project, own_file, problem = _lexical_project(beats_path, projects_dir)
-    return {'skill_dir': skill_dir, 'projects_dir': projects_dir, 'own_file': own_file, 'own_project': own_project, 'own_problem': problem,
-            'composer_src': composer_src}
+    roots = []
+    if copy_roots:
+        seen = set()
+        for r in copy_roots:
+            if not Path(r).is_dir():
+                raise CopyRootError(str(r))
+            real = os.path.realpath(str(r))
+            if real not in seen:
+                seen.add(real)
+                roots.append(Path(real))
+    else:
+        default = _default_projects_root(beats_path)
+        if default:
+            roots.append(Path(os.path.realpath(default)))
+    results = [(r, _lexical_project(beats_path, r)) for r in roots]
+    anchored = [(r, res) for r, res in results if res[0] is not None]
+    if anchored:
+        own_root, (own_project, own_file, problem) = anchored[0]
+    else:
+        own_root, own_project = None, None
+        own_file, problem = results[0][1][1:] if results else _lexical_project(beats_path, None)[1:]
+    av = None
+    if avatar:
+        try:
+            st = os.stat(str(avatar))
+            if stat.S_ISREG(st.st_mode):
+                av = {'path': os.path.realpath(str(avatar)), 'size': st.st_size, 'sha256': None}     # OUR avatar may be a link (the task folder's); the hash opens the real file
+        except OSError:
+            av = None
+    return {'skill_dir': skill_dir, 'projects_dir': roots[0] if roots else None, 'projects_roots': roots, 'own_root': own_root,
+            'own_file': own_file, 'own_project': own_project, 'own_problem': problem, 'composer_src': composer_src, 'avatar': av}
+
+
+def _root_records(search):
+    """The `copy_search.roots` entries, in this order: the skill dir, the composer src, every projects-type root."""
+    recs = []
+    if search.get('skill_dir'):
+        recs.append({'path': str(search['skill_dir']), 'kind': 'skill', 'files': 0, 'skipped_same_avatar': []})
+    if search.get('composer_src'):
+        recs.append({'path': str(search['composer_src']), 'kind': 'composer-src', 'files': 0, 'skipped_same_avatar': []})
+    for r in _projects_roots(search):
+        recs.append({'path': str(r), 'kind': 'projects', 'files': 0, 'skipped_same_avatar': []})
+    return recs
+
+
+def _projects_roots(search):
+    roots = search.get('projects_roots')
+    if roots is None:
+        roots = [search['projects_dir']] if search.get('projects_dir') else []
+    return [r for r in roots if r and Path(r).is_dir()]
+
+
+def _file_digest(path, deadline=None):
+    """sha256 (hex) of a regular file, never following a symlink; None when it cannot be read. Raises _OutOfTime past `deadline`."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        h = hashlib.sha256()
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                raise _OutOfTime()
+            chunk = os.read(fd, 1 << 22)
+            if not chunk:
+                return h.hexdigest()
+            h.update(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _v4_avatar_ref(project):
+    """(assetDir, avatarFile) of <project>/artifacts/episode.json when it is a yt-news-v4-episode that names both, else None."""
+    try:
+        data = json.loads(_read_regular(Path(project) / 'artifacts' / 'episode.json').decode('utf-8'))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError, MemoryError):
+        return None
+    if not isinstance(data, dict) or not str(data.get('schema', '')).startswith(EPISODE_SCHEMA_PREFIX):
+        return None
+    d, f = data.get('assetDir'), data.get('avatarFile')
+    if isinstance(d, str) and d and isinstance(f, str) and f:
+        return d, f
+    return False                                       # a V4 episode without an avatar name: unknown identity (not the mp4 search)
+
+
+def _avatar_candidates(project, proot, size, deadline):
+    """The files that may be `project`'s avatar and have our avatar's size (an unknown avatar -> []); the rules are in the module docstring."""
+    ref = _v4_avatar_ref(project)
+    if ref is False:
+        return []
+    if ref:
+        d, f = ref
+        if os.path.isabs(d) or os.path.isabs(f) or '..' in Path(d).parts + Path(f).parts:
+            return []
+        p = Path(proot).parent / 'remotion-composer' / 'public' / d / f
+        return [p] if _regular_size(p) == size else []
+    found = []
+    slug_dir = Path(proot).parent / 'remotion-composer' / 'public' / Path(project).name       # rule (a): assetDir = the project slug
+    try:
+        names = sorted(os.listdir(str(slug_dir)))
+    except OSError:
+        names = []
+    for name in names:
+        p = os.path.join(str(slug_dir), name)
+        if name.lower().endswith('.mp4') and _regular_size(p) == size:
+            found.append(p)
+    for dirpath, dirnames, filenames in os.walk(str(project), followlinks=False):             # rule (b), bundle copies excluded
+        if deadline is not None and time.monotonic() > deadline:
+            raise _OutOfTime()
+        dirnames[:] = sorted(x for x in dirnames if x not in COPY_SKIP_DIRS and x not in COPY_BUNDLE_DIRS)
+        for name in sorted(filenames):
+            if name.lower().endswith('.mp4'):
+                p = os.path.join(dirpath, name)
+                if _regular_size(p) == size:
+                    found.append(p)
+    return found
+
+
+def _same_avatar_project(project, proot, avatar, deadline):
+    """True when one of the project's avatar candidates has the same sha256 as ours. Unknown / unreadable -> False (the project is searched)."""
+    for cand in _avatar_candidates(project, proot, avatar['size'], deadline):
+        if avatar.get('sha256') is None:
+            avatar['sha256'] = _file_digest(avatar['path'], deadline) or False
+        if avatar['sha256'] is False:
+            return False
+        if _file_digest(cand, deadline) == avatar['sha256']:
+            return True
+    return False
 
 
 def copy_candidates(search, stats, deadline=None):
-    """Every .json (regular files only) under the skill dir and under projects/<name>/ for every project but the episode's own, minus the
-    episode file itself. A project folder that is a symlink is not entered (counted in stats.skipped_nonregular)."""
-    roots = []
+    """Every .json (regular files only) under the skill dir, the composer src (not recursive) and, in every projects-type root, under
+    <root>/<project>/ for every project but the episode's own (in the root that holds it) and every project that has our avatar
+    (search['avatar'], see _same_avatar_project), minus the episode file itself. A project folder that is a symlink is not entered (counted in
+    stats.skipped_nonregular). Per root counters go to stats['roots'] (_root_records)."""
+    if stats.get('roots') is None:
+        stats['roots'] = _root_records(search)
+    recs = stats['roots']
+    rec_skill = next((r for r in recs if r['kind'] == 'skill'), None)
+    rec_composer = next((r for r in recs if r['kind'] == 'composer-src'), None)
+    rec_projects = [r for r in recs if r['kind'] == 'projects']
+    own_root = search.get('own_root', True)             # absent (older callers): the own project name applies to every root
+    own_real = os.path.realpath(str(own_root)) if own_root not in (None, True) else None
+    avatar = search.get('avatar')
+    roots = []                                          # [(directory, record)]
     if search.get('skill_dir'):
-        roots.append(Path(search['skill_dir']))
-    pdir = search.get('projects_dir')
-    if pdir and Path(pdir).is_dir():
+        roots.append((Path(search['skill_dir']), rec_skill))
+    for proot, rec in zip(_projects_roots(search), rec_projects):
+        own_here = search.get('own_project') if own_root is True or (own_real and os.path.realpath(str(proot)) == own_real) else None
         try:
-            children = sorted(Path(pdir).iterdir())
+            children = sorted(Path(proot).iterdir())
         except OSError:
             stats['unreadable_dirs'] += 1
             children = []
         for child in children:
-            if child.name == search.get('own_project'):
+            if child.name == own_here:
                 continue
             try:
                 mode = os.lstat(str(child)).st_mode
@@ -1109,13 +1298,13 @@ def copy_candidates(search, stats, deadline=None):
             if stat.S_ISLNK(mode):
                 stats['skipped_nonregular'] += 1
             elif stat.S_ISDIR(mode):
-                roots.append(child)
+                roots.append((child, rec, proot))
     own = search.get('own_file')
     own_abs = os.path.abspath(str(own)) if own else None
-    own_real = os.path.realpath(str(own)) if own and not search.get('own_problem') else None
+    own_file_real = os.path.realpath(str(own)) if own and not search.get('own_problem') else None
 
     def is_own(p):
-        return own_abs is not None and (os.path.abspath(p) == own_abs or (own_real is not None and os.path.realpath(p) == own_real))
+        return own_abs is not None and (os.path.abspath(p) == own_abs or (own_file_real is not None and os.path.realpath(p) == own_file_real))
     cdir = search.get('composer_src')
     if cdir:                                    # <repo>/remotion-composer/src/*.json, NOT recursive; problems here are never counted
         try:
@@ -1132,10 +1321,24 @@ def copy_candidates(search, stats, deadline=None):
             except OSError:
                 continue
             if not is_own(p):
+                if rec_composer is not None:
+                    rec_composer['files'] += 1
                 yield p
-    for root in roots:
+    for item in roots:
+        root, rec = item[0], item[1]
+        if len(item) == 3 and avatar:                   # a project of a projects-type root: skip it when it is the same video
+            try:
+                same = _same_avatar_project(root, item[2], avatar, deadline)
+            except _OutOfTime:
+                stats['complete'] = False
+                return
+            if same:
+                rec['skipped_same_avatar'].append(root.name)
+                continue
         for p in _json_files(root, stats, deadline):
             if not is_own(p):
+                if rec is not None:
+                    rec['files'] += 1
                 yield p
 
 
@@ -1181,13 +1384,14 @@ def check_copy(ep, search, issues, metrics, max_share=COPY_MAX_SHARE, cuts=None,
     clip table ({slug: {source_sha256, source_in, source_out}}), used to compare the footage instead of the clip's name. `search` None = not run.
     Two signals, either one fires the same issue (`signals` lists which): the beat signal above, and the headline signal (_headline_matches:
     same normalised headline, whatever the media / clip / footage; same share and minimum). Search roots: the skill dir, every other
-    projects/<name>/, and <repo>/remotion-composer/src/*.json (non-recursive; other JSON there is skipped silently).
+    <projects-type root>/<name>/ (copy_search_for; a project with our avatar is skipped), and <repo>/remotion-composer/src/*.json
+    (non-recursive; other JSON there is skipped silently). metrics.copy.roots = the per-root counters (the report's copy_search.roots).
     episode-not-regular-file (error): the episode is a symlink / not a regular file / below a symlink inside projects/ (search['own_problem']).
     copy-search-incomplete (error): the walk ran out of `budget` seconds (a search that did not finish proves nothing)."""
     mine = beat_triples(ep['beats'], cuts)
     m = {'searched': search is not None, 'compared_files': 0, 'unreadable_files': 0, 'unreadable_dirs': 0, 'skipped_nonregular': 0,
          'skipped_large': 0, 'files_seen': 0, 'parsed': 0, 'complete': True, 'seconds': 0.0,
-         'max_share': max_share, 'min_same': min_same, 'best_match': None}
+         'max_share': max_share, 'min_same': min_same, 'best_match': None, 'roots': _root_records(search) if search is not None else []}
     metrics['copy'] = m
     if search is None:
         return
@@ -1247,8 +1451,8 @@ def check_copy(ep, search, issues, metrics, max_share=COPY_MAX_SHARE, cuts=None,
     m['seconds'] = round(time.monotonic() - started, 3)
     if not m['complete']:
         issues.append(_issue('copy-search-incomplete', 'error', None, None, None,
-                             'the search for a copied episode did not finish within %.0f s (%d files looked at): remove the files that are not needed '
-                             'from the skill directory and from the other project folders, then run the check again' % (budget, m['files_seen'])))
+                             'the search for a copied episode did not finish within %.0f s (%d files looked at): stop and report this; the run cannot '
+                             'be certified until the copy search completes (do not change any file outside this project to make it finish)' % (budget, m['files_seen'])))
     if not results:
         return
     results.sort(key=lambda r: (not r['flag'], -r['share'], r['file']))
@@ -1347,8 +1551,22 @@ def main(argv=None):
     ap.add_argument('--legacy', action='store_true', help='V3 replay data: schema validator may be absent, legacy list/TSX accepted, '
                     'evidence not required (subject terms from the src slug)')
     ap.add_argument('--set', action='append', default=[], metavar='KEY=JSON', help='override a threshold for this run')
+    ap.add_argument('--copy-root', action='append', default=[], metavar='DIR',
+                    help='projects-type root of the episode-copied search (repeatable; every sub-directory is one project); '
+                    'default: the parent of the episode\'s own project. Not a directory -> exit 4')
+    ap.add_argument('--avatar', metavar='FILE', help='our avatar mp4: in --copy-root projects a project with the same avatar (sha256) is not compared '
+                    '(re-doing the same video is allowed)')
     ap.add_argument('--report', required=True)
     a = ap.parse_args(argv)
+    missing = [r for r in a.copy_root if not Path(r).is_dir()]
+    if missing:
+        msg = ('--copy-root %s does not exist or is not a directory: the search for a copied episode cannot run; stop and report this '
+               '(the check passes the projects folder of the checkout)' % ', '.join(missing))
+        report = {'schema': SCHEMA, 'version': VERSION, 'pass': False,
+                  'issues': [_issue('copy-root-missing', 'error', None, None, missing[0], msg)], 'metrics': {}, 'thresholds': {}, 'inputs': {}}
+        Path(a.report).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 4
     validator = Path(a.schema_validator) if a.schema_validator else Path(__file__).resolve().parent / 'episode_schema.mjs'
     paths = {k: getattr(a, k) for k in ('beats', 'script', 'words', 'line_starts', 'cuts', 'captions', 'source_transcript', 'source_meta', 'chapters',
                                         'relevance', 'evidence', 'frames_report', 'source_timed') if getattr(a, k)}
@@ -1386,6 +1604,8 @@ def main(argv=None):
                 schema_issues = [_issue('schema-validator-missing', 'error', None, None, str(validator), 'episode_schema.mjs not found; structural validation did not run')]
         elif not a.legacy:
             schema_issues = [_issue('schema', 'error', None, None, None, 'episode is not a V4 object JSON (%s); legacy formats need --legacy' % ep['format'])]
+        if a.avatar and not Path(a.avatar).is_file():
+            raise ed.EpisodeFormatError('--avatar %s is not a readable file' % a.avatar)
         hashes = {p: _sha(p) for p in paths.values()}
     except (ed.EpisodeFormatError, OSError, ValueError) as e:
         report = {'schema': SCHEMA, 'version': VERSION, 'pass': False,
@@ -1395,13 +1615,16 @@ def main(argv=None):
         return 2
     inp = Inputs(script_lines, tokens, line_starts, cuts, source, relevance, relevance_given=bool(a.relevance),
                  evidence=evidence, frames=frames, timed=timed, chapters=chapters, legacy=a.legacy,
-                 frames_given=bool(a.frames_report), frame_counts=frame_counts, copy_search=copy_search_for(a.beats))
+                 frames_given=bool(a.frames_report), frame_counts=frame_counts,
+                 copy_search=copy_search_for(a.beats, copy_roots=a.copy_root, avatar=a.avatar))
     issues, metrics = lint_content(ep, inp, thresholds)
     issues = schema_issues + issues
     metrics['schema'] = schema_summary
     metrics['issueCounts'] = count_codes(issues)
+    copy_m = metrics.get('copy') or {}
     report = {'schema': SCHEMA, 'version': VERSION, 'pass': not any(i['severity'] == 'error' for i in issues),
-              'issues': issues, 'metrics': metrics, 'thresholds': thresholds, 'inputs': hashes}
+              'issues': issues, 'metrics': metrics, 'thresholds': thresholds, 'inputs': hashes,
+              'copy_search': {'roots': copy_m.get('roots', []), 'incomplete': not copy_m.get('complete', True)}}
     out = json.dumps(report, ensure_ascii=False, indent=2)
     Path(a.report).write_text(out, encoding='utf-8')
     print(out)
