@@ -141,7 +141,7 @@ class WordTimingGateTests(ChainBase):
         self.assertEqual(set(tf.FAKE_FP) | {'params', 'code'}, set(fp))
         for k, v in fp.items():
             self.assertEqual(raw[k], v, k)
-        self.assertIn('artifacts/word_timing/word_timing.done.json', rc['self_reported'])
+        self.assertIn('projects/p1/artifacts/word_timing/word_timing.done.json', rc['self_reported'])     # FIX2 F2: the resolved path
         self.assertEqual({'path': RAW_REL, 'sha256': sha(self.raw)}, rc['bound_inputs']['word_raw'])
         rep = json.loads((self.rdir / 'word-timing.json').read_text())
         self.assertEqual(tf.WAV_INFO['wav_sha256'], rep['steps']['wav']['sha256'])

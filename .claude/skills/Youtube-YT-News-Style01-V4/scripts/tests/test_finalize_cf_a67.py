@@ -55,6 +55,8 @@ class Base(FinalizeBase):
         argv = list(argv)
         if '--check' in argv and '--copy-root' not in argv:       # --check needs a projects-type copy root (FIX1 item 2)
             argv += ['--copy-root', self.copy_root]
+        if '--check' in argv and '--expect-avatar-sha256' not in argv:     # ... and the task's avatar (FIX2 F1)
+            argv += ['--expect-avatar-sha256', self.task_avatar_sha(argv)]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             code = m.main([str(a) for a in argv])

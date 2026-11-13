@@ -73,6 +73,11 @@ if b.get('bg_child'):
 if b.get('signal'):
     os.kill(os.getpid(), signal.SIGKILL)
 report = arg('--report')
+if name == 'lint_content' and '--avatar' in a:      # the real lint's input rule (W2c): exit 2 = issue `input`
+    ad = arg('--asset-dir')
+    if not ad or not Path(ad).is_dir() or not os.path.abspath(arg('--avatar')).startswith(os.path.abspath(ad) + os.sep):
+        print('lint_content: input: --avatar needs --asset-dir <public>/<assetDir> holding its lexical path', file=sys.stderr)
+        sys.exit(2)
 if name == 'lint_content' and 'copy_search' not in b.get('report_extra', {}) and not b.get('no_copy_search'):
     roots = [a[i + 1] for i, x in enumerate(a) if x == '--copy-root']
     roots = roots[:len(roots) - b.get('drop_roots', 0)]
@@ -182,7 +187,7 @@ ALL_GATES = ['frames', 'final-av', 'final-pixels', 'mux-audio', 'loudness', 'mus
              'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions', 'script', 'derived']   # the gates of a delivery
 CHECK_ONLY = ['asr-recheck']                                     # --check only (registered first, own lane)
 ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration']
-CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS + ['delivered']          # --check: + the binding to the delivered file
+CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS + ['avatar', 'delivered']   # --check: + the task's avatar (FIX2 F1) + the binding to the delivered file
 STEM = {'beats': 'lint_beats', 'content': 'lint_content', 'captions': 'lint_captions', 'frames': 'frame_checks',
         'loudness': 'measure_loudness', 'timing': 'timing_check', 'final-pixels': 'qc_final_pixels', 'schema': 'episode_schema',
         'gate-integrity': 'gate_integrity', 'face-box': 'face_box'}
@@ -844,8 +849,25 @@ class FinalizeBase(unittest.TestCase):
         self._made = {p: sha(p) for p in (deliver, Path(str(deliver) + '.receipt.json'))}
         return deliver
 
-    def run_fin(self, *extra, patch=None, deliver=None, check_args=True, delivered=True):
-        """--check: adds `--copy-root <self.copy_root>` (unless given) and, unless delivered=False, (re)writes the delivered file +
+    def task_avatar_sha(self, argv):
+        """The outside system's --expect-avatar-sha256 for a --check of `argv`: the sha256 of the avatar the project's episode names
+        NOW (<public>/<assetDir>/<avatarFile>, default paths; --public-root when given).  A fixture without a readable avatar -> 64
+        zeros (the `avatar` record then refuses the run)."""
+        argv = [str(a) for a in argv]
+        def val(flag, default):
+            return argv[argv.index(flag) + 1] if flag in argv else default
+        project = Path(val('--project', 'projects/p1'))
+        project = project if project.is_absolute() else self.repo / project
+        public = Path(val('--public-root', self.repo / 'remotion-composer' / 'public'))
+        try:
+            ep = json.loads((project / 'artifacts' / 'episode.json').read_text())
+            return sha(public / ep['assetDir'] / ep['avatarFile'])
+        except Exception:  # noqa: BLE001 - no episode / no avatar: a sha no file has
+            return '0' * 64
+
+    def run_fin(self, *extra, patch=None, deliver=None, check_args=True, delivered=True, expect_avatar=True):
+        """--check: adds `--copy-root <self.copy_root>` and `--expect-avatar-sha256 <the episode's avatar>` (each unless given or
+        check_args=False; expect_avatar=False drops only the latter) and, unless delivered=False, (re)writes the delivered file +
         receipt of the CURRENT inputs first (make_delivered): --check certifies a delivered file."""
         m = self.module()
         if patch:
@@ -854,6 +876,8 @@ class FinalizeBase(unittest.TestCase):
         if '--check' in extra:
             if check_args and '--copy-root' not in extra:
                 extra += ['--copy-root', str(self.copy_root)]
+            if check_args and expect_avatar and '--expect-avatar-sha256' not in extra:
+                extra += ['--expect-avatar-sha256', self.task_avatar_sha(extra)]
             if delivered:
                 self.make_delivered(deliver)
         else:
@@ -967,11 +991,12 @@ class HappyAndGateTests(FinalizeBase):
         self.assertEqual(2, rc['version'])
         self.assertEqual('not a certification: valid only after finalize.py --check from a clean checkout of the pinned commit passes',
                          rc['certification'])
-        self.assertEqual(['artifacts/visual_evidence.json', 'artifacts/source_script.txt', 'assets/avatar.srt',
-                          'assets/ytsource/transcript.txt', 'assets/ytsource/chapters.txt', 'assets/ytsource/transcript_timed.json',
-                          'artifacts/relevance.json', '<music bed>.source.json', 'qc/final-review.md',
-                          'artifacts/word_timing/word_timing.done.json'],
-                         rc['self_reported'])           # FIX1 item 8; the done marker is progress information only (CF-A67 phase B)
+        self.assertEqual(['projects/p1/artifacts/visual_evidence.json', 'projects/p1/artifacts/source_script.txt', 'projects/p1/assets/avatar.srt',
+                          'projects/p1/assets/ytsource/transcript.txt', 'projects/p1/assets/ytsource/chapters.txt',
+                          'projects/p1/assets/ytsource/transcript_timed.json', 'projects/p1/artifacts/relevance.json',
+                          'projects/p1/assets/audio/bed.mp3.source.json', 'projects/p1/qc/final-review.md',
+                          'projects/p1/artifacts/word_timing/word_timing.done.json'],
+                         rc['self_reported'])           # FIX1 item 8 / FIX2 F2; the done marker is progress information only (CF-A67 phase B)
         ih = rc['input_hashes']
         avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
         self.assertEqual({'path': 'remotion-composer/public/ep1/avatar.mp4', 'sha256': sha(avatar)}, ih['avatar'])
@@ -2730,7 +2755,7 @@ class CheckStateAndInterruptTests(FinalizeBase):
     def popen(self, *extra):
         if '--check' in extra:                       # --check certifies a delivered file and needs a copy root (FIX1 items 1, 2)
             self.make_delivered()
-            extra = (*extra, '--copy-root', str(self.copy_root))
+            extra = (*extra, '--copy-root', str(self.copy_root), '--expect-avatar-sha256', self.task_avatar_sha(extra))
         return subprocess.Popen([*self.fin_cmd('-B'), '--project', 'projects/p1',
                                  '--deliver', str(self.deliver), *extra], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -4276,16 +4301,17 @@ class CopyRootTests(FinalizeBase):
         self.assertEqual(0, self.run_fin('--check', '--copy-root', str(self.copy_root), '--copy-root', str(other)), self.out)
         argv = self.argv_of('lint_content')
         avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
-        tail_ = argv[argv.index('--copy-root'):argv.index('--copy-root') + 6]
-        self.assertEqual(['--copy-root', str(self.copy_root), '--copy-root', str(other), '--avatar', str(avatar)], tail_)
+        tail_ = argv[argv.index('--copy-root'):argv.index('--copy-root') + 8]
+        self.assertEqual(['--copy-root', str(self.copy_root), '--copy-root', str(other), '--asset-dir', str(avatar.parent),
+                          '--avatar', str(avatar)], tail_)
         self.assertEqual([str(self.copy_root), str(other)], json.loads((self.rdir / 'check.json').read_text())['copy_roots'])
 
     def test_a_delivery_passes_the_projects_dir_and_the_avatar_and_needs_no_flag(self):
         self.assertEqual(0, self.run_fin(), self.out)
         argv = self.argv_of('lint_content')
         i = argv.index('--copy-root')
-        self.assertEqual(['--copy-root', str(self.repo / 'projects'), '--avatar',
-                          str(self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4')], argv[i:i + 4])
+        self.assertEqual(['--copy-root', str(self.repo / 'projects'), '--asset-dir', str(self.repo / 'remotion-composer' / 'public' / 'ep1'),
+                          '--avatar', str(self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4')], argv[i:i + 6])
         self.assertEqual(1, argv.count('--copy-root'))
         self.assertEqual([str(self.repo / 'projects')], self.receipt()['copy_roots'])
 
@@ -4342,10 +4368,13 @@ class SelfReportedTests(FinalizeBase):
     def test_every_agent_written_input_read_but_not_re_derived_is_listed(self):
         self.assertEqual(0, self.run_fin(), self.out)
         m = self.module()
-        want = ['artifacts/visual_evidence.json', 'artifacts/source_script.txt', 'assets/avatar.srt', 'assets/ytsource/transcript.txt',
-                'assets/ytsource/chapters.txt', 'assets/ytsource/transcript_timed.json', 'artifacts/relevance.json',
-                '<music bed>.source.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json']
+        want = ['projects/p1/artifacts/visual_evidence.json', 'projects/p1/artifacts/source_script.txt', 'projects/p1/assets/avatar.srt',
+                'projects/p1/assets/ytsource/transcript.txt', 'projects/p1/assets/ytsource/chapters.txt',
+                'projects/p1/assets/ytsource/transcript_timed.json', 'projects/p1/artifacts/relevance.json',
+                'projects/p1/assets/audio/bed.mp3.source.json', 'projects/p1/qc/final-review.md',
+                'projects/p1/artifacts/word_timing/word_timing.done.json']
         self.assertEqual(want, self.receipt()['self_reported'])
+        self.assertEqual(self.receipt()['music']['sidecar']['path'], want[7])        # the sidecar the mux verification read
         # each key is really READ by a gate (an input, an optional input or an argument template) or recorded (relevance)
         used = set()
         for g in m.GATES:
@@ -4354,6 +4383,184 @@ class SelfReportedTests(FinalizeBase):
         for k in m.SELF_REPORTED_KEYS:
             self.assertTrue(k in used or k == 'relevance', k)
         self.assertNotIn('script', m.SELF_REPORTED_KEYS)            # re-derived by the `script` gate
+
+    def test_an_overridden_path_is_the_file_the_receipt_names(self):
+        """FIX2 F2: finalize.json may move evidence (and the other overridable claims): the receipt names what THIS run read."""
+        (self.proj / 'artifacts' / 'moved').mkdir()
+        (self.proj / 'artifacts' / 'moved' / 'evidence.json').write_text('[]')
+        (self.proj / 'artifacts' / 'finalize.json').write_text(json.dumps({'evidence': 'artifacts/moved/evidence.json'}))
+        self.assertEqual(0, self.run_fin(), self.out)
+        sr = self.receipt()['self_reported']
+        self.assertEqual('projects/p1/artifacts/moved/evidence.json', sr[0])
+        self.assertNotIn('projects/p1/artifacts/visual_evidence.json', sr)
+        argv = self.argv_of('lint_content')
+        self.assertTrue(argv[argv.index('--evidence') + 1].endswith('moved/evidence.json'))
+
+
+# ---------------------------------------------------------------------------------------------- FIX2 F1: the task's avatar
+class AvatarBindingTests(FinalizeBase):
+    def check_doc(self):
+        return json.loads((self.rdir / 'check.json').read_text())
+
+    def avatar(self):
+        return self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+
+    def assertNoGateRan(self):
+        for stem in STEM.values():
+            self.assertFalse(self.ran(stem), stem)
+
+    def test_check_without_expect_avatar_sha256_is_exit_4_before_any_gate(self):
+        self.assertEqual(4, self.run_fin('--check', expect_avatar=False), self.out)
+        doc = self.check_doc()
+        self.assertIn('environment: expect-avatar-sha256: --check needs --expect-avatar-sha256 <64 lowercase hex>',
+                      ' | '.join(doc['reasons']))
+        self.assertEqual([], doc['gates'])
+        self.assertIsNone(doc['certified_final_sha256'])
+        self.assertIsNone(doc['expected_avatar_sha256'])
+        self.assertNoGateRan()
+
+    def test_a_malformed_expect_avatar_sha256_is_exit_4_before_any_gate(self):
+        good = sha(self.avatar())
+        for bad in (good.upper(), good[:63], good + '0', 'g' * 64, ' ' + good[1:], ''):
+            self.assertEqual(4, self.run_fin('--check', '--expect-avatar-sha256', bad), (bad, self.out))
+            self.assertIn('environment: expect-avatar-sha256: %r is not 64 lowercase hex digits' % bad,
+                          ' | '.join(self.check_doc()['reasons']))
+            self.assertIsNone(self.check_doc()['certified_final_sha256'])
+            self.assertNoGateRan()
+
+    def test_another_avatar_is_exit_2_with_its_own_record_before_any_gate(self):
+        """An episode copied from project P with P's assetDir/avatarFile: our avatar IS P's file, so the lint's same-avatar skip
+        would pass it.  The task's avatar sha256 (from the outside system) refuses it before any gate."""
+        good = sha(self.avatar())
+        wrong = hashlib.sha256(b'the avatar the task ordered').hexdigest()
+        self.assertEqual(2, self.run_fin('--check', '--expect-avatar-sha256', wrong), self.out)
+        doc = self.check_doc()
+        rec = self.gate(doc, 'avatar')
+        self.assertEqual(['avatar'], [g['name'] for g in doc['gates']])
+        self.assertEqual(('stale', 'verified', True), (rec['status'], rec['kind'], rec['required']))
+        self.assertIn("(sha256 %s) is not the task's avatar (expected sha256 %s)" % (good, wrong), rec['reason'])
+        self.assertEqual({'path': str(self.avatar()), 'sha256': good, 'expected_sha256': wrong}, rec['avatar'])
+        self.assertTrue(any(r.startswith('avatar: ') and wrong in r for r in doc['reasons']), doc['reasons'])
+        self.assertEqual((good, wrong), (doc['avatar_sha256'], doc['expected_avatar_sha256']))
+        self.assertIsNone(doc['certified_final_sha256'])
+        self.assertFalse(doc['would_deliver'])
+        self.assertNoGateRan()
+
+    def test_the_task_avatar_passes_and_check_json_names_both_shas(self):
+        good = sha(self.avatar())
+        self.assertEqual(0, self.run_fin('--check', '--expect-avatar-sha256', good), self.out)
+        doc = self.check_doc()
+        self.assertEqual((good, good), (doc['avatar_sha256'], doc['expected_avatar_sha256']))
+        rec = self.gate(doc, 'avatar')
+        self.assertEqual(('pass', 'verified'), (rec['status'], rec['kind']))
+        self.assertEqual({'path': str(self.avatar()), 'sha256': good, 'expected_sha256': good}, rec['avatar'])
+        self.assertEqual(sha(self.deliver), doc['certified_final_sha256'])
+
+    def test_a_symlinked_avatar_is_refused_in_check(self):
+        real = Path(self.tmp) / 'elsewhere' / 'avatar.mp4'
+        real.parent.mkdir()
+        shutil.move(str(self.avatar()), str(real))
+        self.avatar().symlink_to(real)
+        self.assertEqual(2, self.run_fin('--check', '--expect-avatar-sha256', sha(real)), self.out)
+        doc = self.check_doc()
+        self.assertIn('is not a regular file', self.gate(doc, 'avatar')['reason'])
+        self.assertIsNone(doc['avatar_sha256'])
+        self.assertNoGateRan()
+
+    def test_an_avatar_that_is_gone_is_refused_in_check(self):
+        self.avatar().unlink()
+        self.assertEqual(2, self.run_fin('--check', '--expect-avatar-sha256', '0' * 64), self.out)
+        self.assertIn('cannot read the avatar', self.gate(self.check_doc(), 'avatar')['reason'])
+        self.assertNoGateRan()
+
+    def test_lint_gets_the_lexical_asset_dir_and_avatar_never_their_realpath(self):
+        """A delivery (no avatar record): the symlinked avatar reaches the lint as <public>/<assetDir>/<avatarFile>, not its target."""
+        real = Path(self.tmp) / 'elsewhere' / 'avatar.mp4'
+        real.parent.mkdir()
+        shutil.copy(self.avatar(), real)
+        self.avatar().unlink()
+        self.avatar().symlink_to(real)
+        self.run_fin()
+        argv = self.argv_of('lint_content')
+        i = argv.index('--asset-dir')
+        self.assertEqual(['--asset-dir', str(self.avatar().parent), '--avatar', str(self.avatar())], argv[i:i + 4])
+        self.assertNotIn(str(real), argv)
+        self.assertNotIn(os.path.realpath(real), argv)
+
+    def test_a_sub_path_avatar_file_is_never_bound(self):
+        """finalize reads avatarFile only as a plain file name (no "/" or ".."): a sub-path is refused before any gate, so the
+        asset dir finalize hands the lint (--asset-dir <public>/<assetDir>) is always the episode's own."""
+        pub = self.avatar().parent
+        (pub / 'takes').mkdir()
+        shutil.move(str(self.avatar()), str(pub / 'takes' / 'avatar.mp4'))
+        self.edit(self.proj / 'artifacts' / 'episode.json', lambda d: d.update(avatarFile='takes/avatar.mp4'))
+        self.assertEqual(2, self.run_fin('--check', '--expect-avatar-sha256', sha(pub / 'takes' / 'avatar.mp4')), self.out)
+        self.assertIn('avatarFile missing, or holding "/" or ".."', self.gate(self.check_doc(), 'avatar')['reason'])
+        self.assertNoGateRan()
+
+    def test_lint_gets_the_lexical_asset_dir_when_the_asset_dir_is_a_symlink(self):
+        pub = self.avatar().parent
+        real = Path(self.tmp) / 'elsewhere-assets'
+        shutil.move(str(pub), str(real))
+        pub.symlink_to(real, target_is_directory=True)
+        self.run_fin('--check')
+        argv = self.argv_of('lint_content')
+        i = argv.index('--asset-dir')
+        self.assertEqual(['--asset-dir', str(pub), '--avatar', str(pub / 'avatar.mp4')], argv[i:i + 4])
+        self.assertNotIn(str(real), ' '.join(argv))
+
+    def test_lint_input_exit_2_is_a_class_2_input_failure(self):
+        self.behavior(lint_content={'exit': 2, 'pass': False})
+        self.assertEqual(2, self.run_fin('--check'), self.out)
+        self.assertEqual('bad-input', self.gate(self.check_doc(), 'content')['status'])
+
+    def test_expect_avatar_sha256_is_refused_in_a_delivery_and_in_preflight(self):
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.run_fin('--expect-avatar-sha256', sha(self.avatar()))
+        self.assertEqual(2, cm.exception.code)
+        self.assertIn('--expect-avatar-sha256 is a --check-only option', err.getvalue())
+        self.assertNotDelivered()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.module().main(['--preflight', '--expect-avatar-sha256', sha(self.avatar())])
+        self.assertEqual(2, cm.exception.code)
+        self.assertIn('--preflight takes only', err.getvalue())
+
+
+# ---------------------------------------------------------------------------------------------- FIX2 F3: certified is null unless exit 0
+class CertifiedNullTests(FinalizeBase):
+    def check_doc(self):
+        return json.loads((self.rdir / 'check.json').read_text())
+
+    def test_a_crash_writes_certified_null(self):
+        def patch(m):
+            def boom(*a, **k):
+                raise RuntimeError('kaboom')
+            m.run_verified = boom
+        self.assertEqual(4, self.run_fin('--check', patch=patch), self.out)
+        doc = self.check_doc()
+        self.assertEqual(('crashed', 4), (doc['status'], doc['exit_code']))
+        self.assertIn('certified_final_sha256', doc)
+        self.assertIsNone(doc['certified_final_sha256'])
+
+    def test_a_refused_run_lock_writes_certified_null(self):
+        def patch(m):
+            def held(*a, **k):
+                raise m.BadInput('another finalize run holds the lock')
+            m.acquire_run_lock = held
+        self.assertEqual(2, self.run_fin('--check', patch=patch), self.out)
+        doc = self.check_doc()
+        self.assertEqual(('finished', 2), (doc['status'], doc['exit_code']))
+        self.assertIn('certified_final_sha256', doc)
+        self.assertIsNone(doc['certified_final_sha256'])
+
+    def test_the_central_writer_never_certifies(self):
+        m = self.module()
+        m.CHECK_FILE['path'] = Path(self.tmp) / 'state.json'
+        for status in ('running', 'terminated', 'crashed', 'finished'):
+            m.write_check_state(status, 'now', exit_code=0, certified_final_sha256='a' * 64)
+            doc = json.loads((Path(self.tmp) / 'state.json').read_text())
+            self.assertIn('certified_final_sha256', doc)
+            self.assertIsNone(doc['certified_final_sha256'], status)
 
 
 if __name__ == '__main__':

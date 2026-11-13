@@ -32,8 +32,11 @@ lists (never $PATH), to absolute realpaths and the gates run with an environment
 THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
   /usr/bin/env -i <PY> -I <C>/.claude/skills/Youtube-YT-News-Style01-V4/scripts/finalize.py --check \
       --project <A>/projects/<slug> --public-root <A>/remotion-composer/public --deliver <the delivered .mp4> \
-      --copy-root <A>/projects [--copy-root <another projects-type dir> ...] --work-dir <empty or new dir>
-  <C>  a clean checkout of the pinned commit (remotion-composer/node_modules installed); <A> the agent's checkout (read only).
+      --copy-root <S>/projects [--copy-root <another trusted projects-type dir> ...] --work-dir <empty or new dir> \
+      --expect-avatar-sha256 <sha256 of the task's avatar mp4, 64 lowercase hex>
+  <C>  a clean checkout of the pinned commit (remotion-composer/node_modules installed).
+  <A>  the agent's checkout (finalize only reads it).  It is NOT a safe copy root: see "copy roots are TRUSTED input" below.
+  <S>  a copy of the projects the agent cannot write (a snapshot taken before its run, or the outside system's archive): below.
   <PY> a python >= 3.12 venv interpreter with numpy, PIL, pythainlp (e.g. the repo's .venv python), run with -I and WITHOUT -S:
        finalize hands that venv's site-packages (sysconfig purelib/platlib) to every python gate, which runs `<PY> -I -S -B`.
   env -i: nothing of the caller's environment is needed or passed on.  Every child gets an environment built from scratch:
@@ -44,9 +47,22 @@ THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
        lint_content.py compares this episode against them (+ this skill dir + <C>/remotion-composer/src).  A project whose avatar
        is the same file (sha256) is skipped as a re-do of this video: a V4 project's avatar is <root>/../remotion-composer/public/
        <assetDir>/<avatarFile> of its artifacts/episode.json, otherwise any *.mp4 in it; an unknown identity is never skipped.
+       finalize hands the lint our avatar as LEXICAL paths: --asset-dir <public>/<assetDir> --avatar <public>/<assetDir>/<avatarFile>.
+  copy roots are TRUSTED input: the same-avatar skip believes what it finds there.  Whoever can write a copy root, or the
+       <root>/../remotion-composer/public beside it where the older projects' avatars are looked up, can make an older project
+       look like a re-do of this video and so hide a copy of it.  Pass only copy roots the agent cannot write: a read-only
+       snapshot taken BEFORE the agent's run, or the outside system's own archive.  Snapshot <A>/projects together with
+       <A>/remotion-composer/public (at least the older projects' avatars), in the same layout (<S>/projects beside
+       <S>/remotion-composer/public).  Without that public dir no older avatar is found and nothing is skipped: a legitimate
+       re-do of the same video is then compared against its own older project and may be flagged as a copy.
+  --expect-avatar-sha256 is MANDATORY in --check (exit 4 without it, or when it is not 64 lowercase hex): the outside system
+       takes it from the TASK (the avatar it ordered), never from the agent.  The avatar the episode names, <public>/<assetDir>/
+       <avatarFile>, must be a regular file with exactly that sha256 (record `avatar`, exit 2 before any gate otherwise): an
+       episode copied from another project together with that project's avatar, or a re-render of an old project, is refused.
   PASS = exit 0 AND check.json `certified_final_sha256` == the sha256 of the delivered file (`delivered_path`): --check binds
        the result to that file (regular file, == renders/final.mp4 the gates checked == the receipt's claim, the receipt's
-       bound_inputs == the current hashes).
+       bound_inputs == the current hashes) and to the task's avatar (`avatar_sha256` == `expected_avatar_sha256`).
+       certified_final_sha256 is null in every other check.json (a failure, a crash, a signal, a refused run lock).
 
 Exit codes (precedence): 3 integrity > 4 tool/gate missing, crash or timeout > 2 stale/missing report or bad
 input > 1 quality failure; 0 delivered (or --check: everything would pass).
@@ -431,9 +447,9 @@ OPTIONAL_KEYS = {'source_transcript', 'source_timed', 'evidence', 'chapters', 'r
 # (source_timed.py output, never re-run by finalize); relevance.json: presence + sha256 only (RELEVANCE_NOTE); <music bed>
 # .source.json: its sha256 field is checked against the bed, its provenance (provider, track, url) is not; final-review.md:
 # the agent's own review; word_timing.done.json: word_timing.sh's progress note, never read for a verdict.
+# The receipt names the RESOLVED paths (finalize.json may move the overridable ones) + the music sidecar actually verified
+# (self_reported()).
 SELF_REPORTED_KEYS = ('evidence', 'source_script', 'srt', 'source_transcript', 'chapters', 'source_timed', 'relevance')
-SELF_REPORTED = tuple(DEFAULT_PATHS[k] for k in SELF_REPORTED_KEYS) + (
-    '<music bed>.source.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json')
 # overridable = inputs the agent (or the fetch step) produces; gate-owned outputs, receipts and the raw timing are never
 OVERRIDABLE = {'script', 'source_script', 'srt', 'words', 'line_starts', 'cuts', 'source_transcript', 'source_timed',
                'evidence', 'chapters'}
@@ -1143,7 +1159,9 @@ def build_command(gate, ctx, deps=None):
         for root in ctx.copy_roots:      # parent dir) + our avatar (a project with the SAME avatar file is a re-do, not a copy)
             argv += ['--copy-root', str(root)]
         if ctx.avatar is not None and ctx.avatar.is_file():
-            argv += ['--avatar', str(ctx.avatar)]
+            # LEXICAL paths (never realpath): <public>/<assetDir> and <public>/<assetDir>/<avatarFile>.  avatarFile may hold a
+            # sub-path, so lint takes the asset dir as its own flag instead of the avatar's dirname.
+            argv += ['--asset-dir', str(ctx.public / ctx.ep['asset_dir']), '--avatar', str(ctx.avatar)]
     for name in gate.get('need_dirs', []):
         d = getattr(ctx, name)
         if d is None or not d.is_dir():
@@ -3193,6 +3211,42 @@ def delivered_binding(ctx, deliver, receipt_p):
     return record(gate, 'pass', 0, '', kind='verified', extra={'delivered': info})
 
 
+def expected_avatar_problems(args):
+    """--check only: the sha256 of the task's avatar, from the outside system (MANDATORY).  -> messages (exit 4, before any gate)."""
+    v = getattr(args, 'expect_avatar_sha256', None)
+    if v is None:
+        return ['expect-avatar-sha256: --check needs --expect-avatar-sha256 <64 lowercase hex>, the sha256 of the avatar the TASK '
+                'ordered (from the outside system, never from the agent): without it a copied project\'s avatar would be accepted']
+    if not re.fullmatch(r'[0-9a-f]{64}', v):
+        return ['expect-avatar-sha256: %r is not 64 lowercase hex digits' % v]
+    return []
+
+
+def avatar_binding(ctx, expected):
+    """--check: the avatar the episode names, <public>/<assetDir>/<avatarFile> (lexical), must be a regular file (lstat) whose
+    sha256 is the task's.  -> record `avatar` (verified; pass, or stale = class 2) and the computed sha256 (or None)."""
+    gate = {'name': 'avatar', 'required': True}
+    info = {'path': str(ctx.avatar) if ctx.avatar is not None else None, 'sha256': None, 'expected_sha256': expected}
+    why = None
+    if ctx.avatar is None:
+        why = ('episode.json names no usable avatar (assetDir / avatarFile missing, or holding "/" or ".."): the task\'s avatar '
+               'cannot be bound')
+    else:
+        try:
+            if not stat.S_ISREG(os.lstat(ctx.avatar).st_mode):
+                why = 'the avatar %s is not a regular file (a symlink / directory is never accepted)' % ctx.avatar
+            else:
+                info['sha256'] = ctx.hash(ctx.avatar)
+                if info['sha256'] != expected:
+                    why = ('the avatar %s (sha256 %s) is not the task\'s avatar (expected sha256 %s): this episode is not made from '
+                           'the avatar the task ordered' % (ctx.avatar, info['sha256'], expected))
+        except OSError as e:
+            why = 'cannot read the avatar %s: %s' % (ctx.avatar, e)
+    if why:
+        return record(gate, 'stale', 2, why, kind='verified', extra={'avatar': info}), info['sha256']
+    return record(gate, 'pass', 0, '', kind='verified', extra={'avatar': info}), info['sha256']
+
+
 def copy_root_problems(args):
     """--check only: the projects-type roots the copy detector must search (MANDATORY; a clean checkout has no projects/ of its
     own, so without them a copied episode would pass).  -> messages (exit 4, before any gate)."""
@@ -3245,8 +3299,9 @@ def write_check_state(status, started_at, **extra):
     if path is None:
         return
     body = {'schema': CHECK_SCHEMA, 'version': CHECK_VERSION, 'skill': SKILL_DIR.name, 'composition': COMP, 'status': status,
-            'pid': os.getpid(), 'started_at': started_at, 'would_deliver': False}
+            'pid': os.getpid(), 'started_at': started_at, 'would_deliver': False, 'certified_final_sha256': None}
     body.update(extra)
+    body['certified_final_sha256'] = None       # a running marker, a crash, a signal, a refused lock: NEVER a certification
     try:
         write_json_atomic(path, body)
     except OSError as e:
@@ -3478,7 +3533,7 @@ def run(args):
         deliver_problem = 'cannot stat %s: %s' % (deliver, e)
 
     state = {'moved': None, 'check_path': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False,
-             'external': False, 'work_dir': None, 'work_dir_error': None, 'certified_sha': None}
+             'external': False, 'work_dir': None, 'work_dir_error': None, 'certified_sha': None, 'avatar_sha': None}
 
     def remaining_msg(phase):
         return 'time budget (%ds) exhausted during phase "%s"' % (budget, phase)
@@ -3535,6 +3590,7 @@ def run(args):
                         project=str(ctx.project) if ctx else None, public_root=str(ctx.public) if ctx else None,
                         delivered_path=str(deliver),
                         certified_final_sha256=state['certified_sha'] if code == 0 else None,
+                        avatar_sha256=state['avatar_sha'], expected_avatar_sha256=args.expect_avatar_sha256,
                         copy_roots=[str(Path(r).resolve()) for r in (args.copy_root or [])], copy_search=copy_search_of(records),
                         tools=tool_versions(tools), certification=CERTIFICATION, gates=[public(r, True) for r in records])
             rdir = None
@@ -3624,7 +3680,7 @@ def run(args):
     bad_env = [r for r in environment_checks(repo_root, args.composer, tools, [], preflight_only=False, public=public_dir(args, repo_root),
                                              deep=bool(args.check))
                if r['status'] == 'FAIL']
-    bad_roots = copy_root_problems(args) if args.check else []
+    bad_roots = (copy_root_problems(args) + expected_avatar_problems(args)) if args.check else []
     if bad_env or bad_roots:         # the very checks `finalize.py --preflight` prints: they can never disagree
         return finish(4, [], ['environment: %s: %s (nothing was run)' % (r['name'], r['detail']) for r in bad_env[:6]]
                       + ['environment: %s (nothing was run)' % m for m in bad_roots])
@@ -3654,6 +3710,11 @@ def run(args):
     try:
         if deliver_problem:
             return finish(2, [], ['bad input: ' + deliver_problem])
+        avatar_rec = None
+        if args.check:                  # the task's avatar, before any gate: another project's avatar makes everything else moot
+            avatar_rec, state['avatar_sha'] = avatar_binding(ctx, args.expect_avatar_sha256)
+            if avatar_rec['status'] != 'pass':
+                return finish(2, [avatar_rec], ['avatar: %s' % avatar_rec['reason']])
         if not args.check:
             # no stale failure / partial of an earlier attempt may sit beside the deliver path while this one runs.  A receipt is
             # kept ONLY when it is still the receipt of the mp4 beside it (a certified earlier delivery is never deleted here;
@@ -3699,6 +3760,7 @@ def run(args):
         vrecs, relevance, vinfo = run_verified(ctx, env, deadline)
         records += vrecs
         if args.check:                  # the result is bound to the delivered file (a check of the project alone certifies nothing)
+            records.append(avatar_rec)
             records.append(delivered_binding(ctx, deliver, receipt_p))
 
         # ---- 4. result
@@ -3748,6 +3810,16 @@ def run(args):
             release_run_lock(state['lock'])
 
 
+def self_reported(ctx, vinfo):
+    """The receipt's `self_reported` list: the agent's claims at the paths THIS run read (ctx.paths, after any finalize.json
+    override), the <bed>.source.json the mux verification read, the agent's final-review.md and word_timing.done.json."""
+    out = [ctx.rel(ctx.paths[k]) for k in SELF_REPORTED_KEYS]
+    sidecar = (((vinfo or {}).get('music') or {}).get('sidecar') or {}).get('path')
+    if sidecar:
+        out.append(sidecar)
+    return out + [ctx.rel(ctx.project / 'qc' / 'final-review.md'), ctx.rel(ctx.word_done)]
+
+
 def input_hashes(ctx):
     """The primary inputs and the agent's statements a delivery rests on, hashed now (receipt key `input_hashes`): the avatar the
     episode uses, script.txt, the avatar SRT, the source transcript / video, the cuts file, visual_evidence.json (a claim of the
@@ -3784,7 +3856,7 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
             raise OSError('copy verification failed (sha256 mismatch)')
         receipt = {'schema': RECEIPT_SCHEMA, 'version': RECEIPT_VERSION, 'skill': SKILL_DIR.name, 'composition': COMP,
                    'certification': CERTIFICATION,
-                   'self_reported': list(SELF_REPORTED),
+                   'self_reported': self_reported(ctx, vinfo),
                    'delivered': {'path': str(deliver), 'sha256': final_sha, 'bytes': partial.stat().st_size},
                    'requested_deliver_path': str(lexical),
                    'git_head': state['head'], 'lock_sha256': state['lock_sha'],
@@ -3880,15 +3952,22 @@ def main(argv=None):
     ap.add_argument('--copy-root', action='append', default=None, metavar='DIR',
                     help='--check only, MANDATORY there (repeatable): a projects-type dir whose sub-directories are other episodes; '
                          'the content lint compares this episode against them (a delivery uses the project\'s own parent dir)')
+    ap.add_argument('--expect-avatar-sha256', default=None, metavar='SHA256',
+                    help='--check only, MANDATORY there: the sha256 (64 lowercase hex) of the avatar the TASK ordered, given by the '
+                         'outside system; the avatar the episode names must be exactly that file')
     ap.add_argument('--work-dir', default=None,
                     help='--check only: where the fresh reports and check.json go (empty or new; default: a new temp dir, printed '
                          'at the end); nothing is written into the project or the public root')
     args = ap.parse_args(argv)
     if args.preflight:
-        if args.project or args.deliver or args.check or args.manifest or args.public_root or args.work_dir or args.copy_root:
+        if (args.project or args.deliver or args.check or args.manifest or args.public_root or args.work_dir or args.copy_root
+                or args.expect_avatar_sha256):
             ap.error('--preflight takes only --composer / --repo-root')
     elif not (args.project and args.deliver):
         ap.error('--project and --deliver are required (unless --preflight)')
+    elif args.expect_avatar_sha256 is not None and not args.check:
+        ap.error('--expect-avatar-sha256 is a --check-only option (the outside system names the task\'s avatar); a delivery takes '
+                 'no such flag')
     elif args.copy_root and not args.check:
         ap.error('--copy-root is a --check-only option (the outside system names the projects to compare against); a delivery '
                  'compares against the project\'s own parent dir')
