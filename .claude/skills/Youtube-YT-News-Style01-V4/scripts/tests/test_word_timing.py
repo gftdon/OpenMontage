@@ -42,6 +42,10 @@ if args == ['--fingerprint']:                    # the toolchain fingerprint sea
     if rc:
         print('ERROR: the fingerprint could not be read (stub)', file=sys.stderr)
         sys.exit(rc)
+    if mode('fingerprint_noise'):                    # a warning that differs on every call, on stderr only
+        n = int(mode('fingerprint_noise_n', '0')) + 1
+        open(os.path.join(HERE, 'stub_fingerprint_noise_n'), 'w').write(str(n))
+        print('warning: stub noise %d at %s' % (n, time.time()), file=sys.stderr)
     print(mode('fingerprint', '{"platform": {"release": "25.6.0"}}'))
     sys.exit(0)
 a = dict(zip(args[::2], args[1::2]))
@@ -270,6 +274,22 @@ class WordTimingTests(unittest.TestCase):
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertEqual(2, self.calls())
         self.assertEqual(key2, self.done()['key'])
+
+    def test_stderr_of_a_successful_fingerprint_never_changes_the_key(self):
+        """a warning that differs on every call must not restart the job forever: only stdout is hashed"""
+        self.stub('fingerprint_noise', 1)
+        self.assertEqual(0, self.call('--max-wait', '20').returncode)
+        key = self.done()['key']
+        self.assertEqual(1, self.calls())
+        for i in range(3):
+            t0 = time.time()
+            r = self.call('--max-wait', '2')
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertEqual(key, self.done()['key'])
+            self.assertIn('key:   %s' % key, r.stdout)
+            self.assertLess(time.time() - t0, 3)
+        self.assertEqual(1, self.calls())                                  # never decoded again
+        self.assertGreaterEqual(int((self.bin / 'stub_fingerprint_noise_n').read_text()), 4)   # the noise really differed on each call
 
     def test_a_failed_fingerprint_is_exit_4_never_unchanged(self):
         self.assertEqual(0, self.call('--max-wait', '20').returncode)

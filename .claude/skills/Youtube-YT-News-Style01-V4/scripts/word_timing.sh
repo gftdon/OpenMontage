@@ -203,9 +203,11 @@ fi
 # key: after an OS / ffmpeg / mlx / venv change the SAME command gets a new key, so the stale outputs below are removed and the job
 # re-transcribes (without it the old done file would keep answering "done" and finalize would keep refusing the old fingerprint).
 # If the fingerprint cannot be read that is exit 4 with its message, never "unchanged".
-FP="$(asr_py asr_transcribe.py --fingerprint 2>&1)"; RC=$?
+# Only STDOUT is hashed: a warning on stderr (which can differ on every call) must never change the key, or the job would restart
+# forever.  stderr is read only for the message of a failure (the call is repeated then, with stderr folded in).
+FP="$(asr_py asr_transcribe.py --fingerprint 2>/dev/null)"; RC=$?
 if [ $RC -ne 0 ] || [ -z "$FP" ]; then
-  echo "$FP" >&2
+  asr_py asr_transcribe.py --fingerprint 2>&1 >/dev/null | /usr/bin/head -c 4000 >&2
   echo "ERROR: the toolchain fingerprint could not be read (asr_run.sh asr_transcribe.py --fingerprint exit $RC). Nothing was downloaded or started; do not install or edit anything, stop and report." >&2
   exit 4
 fi
