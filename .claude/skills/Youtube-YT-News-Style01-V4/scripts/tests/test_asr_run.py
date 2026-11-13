@@ -326,6 +326,30 @@ class FalsificationTests(TreeCase):
             self.assertIn('pyvenv.cfg', r.stderr)
             f.unlink()
 
+    def test_a_python312_zip_is_refused_even_a_dangling_symlink(self):
+        """(ค) python imports from <prefix>/lib/python312.zip when it exists; the manifest lists files, not zips: the launcher refuses any entry there"""
+        zipf = self.t / 'py' / 'lib' / 'python312.zip'
+        self.assertFalse(os.path.lexists(zipf))
+        for kind in ('file', 'dangling symlink', 'directory'):
+            with self.subTest(kind=kind):
+                if kind == 'file':
+                    zipf.write_bytes(b'PK\x05\x06' + b'\x00' * 18)                        # an empty but valid zip
+                elif kind == 'dangling symlink':
+                    os.symlink(self.t / 'nowhere.zip', zipf)
+                else:
+                    zipf.mkdir()
+                self.addCleanup(lambda: shutil.rmtree(zipf) if zipf.is_dir() and not zipf.is_symlink() else (zipf.unlink() if os.path.lexists(zipf) else None))
+                r = self.run_launcher('asr_transcribe.py')
+                self.assertEqual((4, ''), (r.returncode, r.stdout), r.stderr)
+                self.assertIn('python312.zip exists', r.stderr)
+                self.assertIn(str(zipf), r.stderr)
+                self.assertEqual(4, self.run_launcher('--verify').returncode)
+                if kind == 'directory':
+                    shutil.rmtree(zipf)
+                else:
+                    zipf.unlink()
+        self.assertEqual(0, self.run_launcher('--verify').returncode)                      # removed again: fine
+
     def test_missing_manifest_python_or_venv_is_exit_4_with_the_setup_hint(self):
         saved = self.manifest.read_bytes()
         self.manifest.unlink()
@@ -408,6 +432,18 @@ class MutantTests(unittest.TestCase):
             (M.site / 'sitecustomize.py').write_text('x = 1\n')
             r = subprocess.run([BASH, str(M.launcher), 'asr_transcribe.py'], capture_output=True, text=True, env=clean_env())
             self.assertEqual(0, r.returncode, 'the mutant should have accepted the tampered tree: %s' % r.stderr)
+        finally:
+            shutil.rmtree(M.tmp, ignore_errors=True)
+
+    @unittest.skipUnless(HAVE_CHAIN, 'chain not present')
+    def test_without_the_zip_check_a_planted_python312_zip_is_accepted(self):
+        text = LAUNCHER_SRC.replace('if [ -e "$PYROOT/lib/python312.zip" ] || [ -L "$PYROOT/lib/python312.zip" ]; then', 'if false; then')
+        self.assertNotEqual(text, LAUNCHER_SRC)
+        M = self.mutant(text)
+        try:
+            (M.t / 'py' / 'lib' / 'python312.zip').write_bytes(b'PK\x05\x06' + b'\x00' * 18)
+            r = subprocess.run([BASH, str(M.launcher), 'asr_transcribe.py'], capture_output=True, text=True, env=clean_env())
+            self.assertEqual(0, r.returncode, 'the mutant should have accepted the planted zip: %s' % r.stderr)
         finally:
             shutil.rmtree(M.tmp, ignore_errors=True)
 

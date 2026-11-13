@@ -73,6 +73,11 @@ check_prerequisites() {
     [ -x "$PYBIN" ] || die "the pinned python $PYBIN is not there (brew upgrade?): $HINT"
     [ -d "$SITE" ] || die "the ASR venv $VENV_ROOT is not there: $HINT"
     [ ! -e "$PYROOT/bin/pyvenv.cfg" ] && [ ! -e "$PYROOT/pyvenv.cfg" ] || die "a pyvenv.cfg next to the python binary would redirect its prefix: $HINT"
+    # python puts <prefix>/lib/python312.zip on sys.path: a zip there would be imported from, and it is outside the manifest (which lists
+    # files, not zips): it must not exist (-L: a dangling symlink counts too)
+    if [ -e "$PYROOT/lib/python312.zip" ] || [ -L "$PYROOT/lib/python312.zip" ]; then
+        die "$PYROOT/lib/python312.zip exists: python would import modules from it and it is not covered by the manifest: $HINT"
+    fi
 }
 
 find_ffmpeg() {

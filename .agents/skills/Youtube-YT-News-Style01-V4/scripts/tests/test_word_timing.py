@@ -37,6 +37,13 @@ if args == ['--check']:
     if rc:
         print('ERROR: mlx_whisper/decoding.py sha256 does not match the pinned value (stub)', file=sys.stderr)
     sys.exit(rc)
+if args == ['--fingerprint']:                    # the toolchain fingerprint seam: stub_fingerprint holds what it prints, stub_fingerprint_rc its exit
+    rc = int(mode('fingerprint_rc', '0'))
+    if rc:
+        print('ERROR: the fingerprint could not be read (stub)', file=sys.stderr)
+        sys.exit(rc)
+    print(mode('fingerprint', '{"platform": {"release": "25.6.0"}}'))
+    sys.exit(0)
 a = dict(zip(args[::2], args[1::2]))
 out = a['--out-dir']
 open(os.path.join(out, 'calls.log'), 'a').write('started\n')
@@ -196,7 +203,7 @@ class WordTimingTests(unittest.TestCase):
         self.assertEqual(1, calls.count('asr_transcribe.py --wav'))
         self.assertEqual(1, calls.count('asr_align.py --raw'))
         self.assertLess(calls.index('asr_transcribe.py --wav'), calls.index('asr_align.py --raw'))
-        self.assertEqual({'asr_transcribe.py --check', 'asr_transcribe.py --wav', 'asr_align.py --raw'}, set(calls))
+        self.assertEqual({'asr_transcribe.py --check', 'asr_transcribe.py --fingerprint', 'asr_transcribe.py --wav', 'asr_align.py --raw'}, set(calls))
 
 
         t0 = time.time()
@@ -236,6 +243,48 @@ class WordTimingTests(unittest.TestCase):
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertNotEqual(key4, self.done()['key'])
         self.assertEqual(5, self.calls())
+
+    def test_a_changed_toolchain_fingerprint_makes_the_same_command_a_new_job(self):
+        """an OS / ffmpeg / mlx / venv update: the SAME arguments must re-transcribe (the old done file must not answer 'done' forever,
+        finalize would keep refusing the old fingerprint); an identical fingerprint is still an instant done"""
+        self.stub('fingerprint', '{"platform": {"release": "25.6.0"}}')
+        self.assertEqual(0, self.call('--max-wait', '20').returncode)
+        key1 = self.done()['key']
+        self.assertEqual(1, self.calls())
+        t0 = time.time()
+        r = self.call('--max-wait', '2')                                   # identical fingerprint: done at once, no decode
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(1, self.calls())
+        self.assertEqual(key1, self.done()['key'])
+        self.assertLess(time.time() - t0, 3)
+        (self.out / 'raw_asr.json').write_text('stale raw of the old toolchain\n')   # the re-run must replace it (done_ok looks at the pages only)
+        self.stub('fingerprint', '{"platform": {"release": "25.7.0"}}')   # the OS was updated
+        r = self.call('--max-wait', '20')
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(2, self.calls())                                  # re-transcribed
+        key2 = self.done()['key']
+        self.assertNotEqual(key1, key2)
+        self.assertNotIn('stale raw', (self.out / 'raw_asr.json').read_text())
+        self.assertEqual(sha(self.out / 'caption_pages.json'), self.done()['output_sha256'])
+        r = self.call('--max-wait', '2')                                   # and the new fingerprint is an instant done again
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(2, self.calls())
+        self.assertEqual(key2, self.done()['key'])
+
+    def test_a_failed_fingerprint_is_exit_4_never_unchanged(self):
+        self.assertEqual(0, self.call('--max-wait', '20').returncode)
+        self.assertEqual(1, self.calls())
+        self.stub('fingerprint_rc', 4)
+        r = self.call('--max-wait', '2')                                   # a done file for the old key exists: still not an answer
+        self.assertEqual(4, r.returncode, r.stdout + r.stderr)
+        self.assertIn('the fingerprint could not be read (stub)', r.stderr)
+        self.assertIn('toolchain fingerprint could not be read', r.stderr)
+        self.assertEqual(1, self.calls())
+        self.stub('fingerprint_rc', 0)
+        self.stub('fingerprint', '')                                       # an empty answer is not a fingerprint either
+        r = self.call('--max-wait', '2')
+        self.assertEqual(4, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(1, self.calls())
 
     def test_job_that_dies_exits_1_with_log_tail_and_a_retry_runs(self):
         self.stub('result', 'crash')

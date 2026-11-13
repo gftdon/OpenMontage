@@ -35,9 +35,14 @@ Provenance — behaviour-preserving copies (read-only reference files, not impor
   .claude/skills/karaoke_subtitle_v2/scripts/extract_timing.py
       sha256 2d209578364e68a6e7cad24f2464734ac36e121936d3fc36b7e8e54bb4933a73
       -> page format + build_chunks arguments (max_words=4, max_chars=24, pause=0.42)
-  The ONLY behavioural change: apply_script also returns per-character `anchored` flags (True = the character's start
-  time comes from a difflib match with a whisper character, False = interpolated / clamped) for the defect reports.
-  Verified 2026-11-13: on the same raw words the old chain and this file write byte-identical pages.
+  Two behavioural changes, both deliberate:
+  (1) apply_script also returns per-character `anchored` flags (True = the character's start time comes from a difflib match
+      with a whisper character, False = interpolated / clamped) for the defect reports;
+  (2) fix round 1: the `end` of a MATCHED character is its raw whisper end (never past the next character's start), not the next
+      character's start, so a real pause stays a gap in the pages (build_chunks' own `pause` rule then also splits pages at it).
+      Unmatched / interpolated / clamped characters keep the reference rule (end = next start).
+  Verified 2026-11-13 (before change 2): on the same raw words the old chain and this file wrote byte-identical pages; now they
+  differ exactly where a matched character is followed by a pause (tests/fixtures/a67/timing/vendored_equiv_*).
 """
 import sys
 
@@ -145,7 +150,8 @@ def apply_script(result, lines):
 
     -> (result, anchored).  anchored[k] is True when the k-th non-space script character got its start time from a
     difflib matching block (a real whisper character), False when it was interpolated between anchors or clamped.
-    anchored is None when the input is unusable (no timing or no script text) and `result` is returned unchanged."""
+    anchored is None when the input is unusable (no timing or no script text) and `result` is returned unchanged.
+    Deviation from the reference (documented, tested): the `end` of a matched character is its raw whisper end, not the next start."""
     asr = _asr_char_timeline(result)
     correct = " ".join(l.strip() for l in lines if l.strip())
     if not asr or not correct:
@@ -164,10 +170,12 @@ def apply_script(result, lines):
     # linearly interpolate the gaps and clamp to non-decreasing.
     times = [None] * (M + 1)
     anchored = [False] * M
+    raw_end = [None] * M                      # fix round 1 (item 4): the raw end of the whisper character a script character matched
     sm = difflib.SequenceMatcher(None, asr_str, align_str, autojunk=False)
     for blk in sm.get_matching_blocks():
         for k in range(blk.size):
             times[blk.b + k] = asr[blk.a + k][1]
+            raw_end[blk.b + k] = asr[blk.a + k][2]
             anchored[blk.b + k] = True
     if times[0] is None:
         times[0] = asr[0][1]
@@ -192,7 +200,14 @@ def apply_script(result, lines):
             t = times[min(k, M)]
             words.append({"word": c, "start": float(t), "end": float(t)})
         else:
-            words.append({"word": c, "start": float(times[k]), "end": float(times[k + 1])})
+            end = times[k + 1]
+            if anchored[k] and raw_end[k] is not None:
+                # A MATCHED character keeps its raw end (never past the next character's start): a real pause after a word then stays
+                # a gap in the pages instead of being absorbed into the word before it (the reference set every end to the next
+                # start, so a 1.2 s pause made a 3-letter word "slow" and the job failed for ever).  Unmatched / interpolated /
+                # clamped characters keep the reference rule.
+                end = min(max(raw_end[k], times[k]), times[k + 1])
+            words.append({"word": c, "start": float(times[k]), "end": float(end)})
             k += 1
     print(f"  ✓ aligned {len(lines)} script line(s) onto whisper timing "
           f"({M} correct chars vs {len(asr)} ASR chars)")

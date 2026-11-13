@@ -760,6 +760,24 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(['x: 1 (production) != true (this machine)'], at.compare_fingerprint({'x': 1}, {'x': True}))
         self.assertEqual(['x: {"a": 1} (production) != null (this machine)'], at.compare_fingerprint({'x': {'a': 1}}, {'x': None}))
 
+    def test_an_os_update_adds_one_explicit_hint_line_and_nothing_else_does(self):
+        """item 9: platform.release / platform.mac_ver differ -> ONE extra last line; the leaf lines and the failure condition are unchanged"""
+        base = _fp()
+        for leaves in ({'release': '99.0'}, {'mac_ver': '99.1'}, {'release': '99.0', 'mac_ver': '99.1'}):
+            cur = _fp(platform=dict(ENV['platform'], **leaves))
+            lines = at.compare_fingerprint(base, cur)
+            self.assertEqual(len(leaves) + 1, len(lines), lines)
+            self.assertEqual(at.OS_UPDATE_HINT, lines[-1])
+            self.assertEqual(1, lines.count(at.OS_UPDATE_HINT))
+            for k in leaves:
+                self.assertTrue(any(l.startswith('platform.%s: ' % k) and ' (production) != ' in l for l in lines), lines)
+        self.assertEqual('hint: the OS was updated after this word timing was made \u2014 redo the word timing step and deliver again', at.OS_UPDATE_HINT)
+        for leaves in ({'cpu': 'Other M9'}, {'machine': 'x86_64'}, {'system': 'Linux'}):                      # other platform leaves: no hint
+            lines = at.compare_fingerprint(base, _fp(platform=dict(ENV['platform'], **leaves)))
+            self.assertEqual(1, len(lines))
+            self.assertNotIn(at.OS_UPDATE_HINT, lines)
+        self.assertEqual([], at.compare_fingerprint(base, _fp()))                                           # identical: still empty, no hint
+
     def test_a_changed_chain_file_hash_or_param_is_a_difference(self):
         cur = _fp(code={n: '0' * 64 for n in at.CODE_FILES})
         self.assertEqual(len(at.CODE_FILES), len(at.compare_fingerprint(_fp(), cur)))
@@ -796,6 +814,58 @@ class ModelBlobTests(unittest.TestCase):
             info, problems = at.check_environment(hub=hub, mlx_pkg=self.pkg(d), venv=False, blobs={'config.json': '1' * 40, 'weights.npz': '2' * 64})
             self.assertEqual({'config.json': '1' * 40, 'weights.npz': '2' * 64}, info['model']['files'])
             self.assertFalse([p for p in problems if 'model file' in p or 'local HF cache' in p], problems)
+
+    PINS = {'config.json': '1' * 40, 'weights.npz': '2' * 64}
+    CONFIG_SHA = hashlib.sha256(b'{}').hexdigest()                                    # the fake hub's config.json content
+
+    def env(self, d, hub, **kw):
+        kw.setdefault('blobs', self.PINS)
+        kw.setdefault('config_sha256', self.CONFIG_SHA)
+        pkg = Path(d) / 'mlx_whisper'
+        return at.check_environment(hub=hub, mlx_pkg=pkg if pkg.exists() else self.pkg(d), venv=False, **kw)
+
+    def test_a_stray_file_in_the_snapshot_is_refused_by_name(self):
+        """item 7: a weights.safetensors next to weights.npz (or any other file) changes what the decoder loads"""
+        for name in ('weights.safetensors', 'tokenizer.json', 'config.json.orig', 'extra'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                hub, snap = self.hub(d)
+                _, problems = self.env(d, hub)
+                self.assertEqual([], [p for p in problems if 'snapshot' in p and 'pinned' in p], problems)      # the control: clean snapshot
+                (snap / name).write_text('x')
+                _, problems = self.env(d, hub)
+                self.assertTrue(any('not pinned: %s' % name in p for p in problems), problems)
+
+    def test_the_repo_readme_and_gitattributes_are_allowed_only_as_their_pinned_blobs(self):
+        with tempfile.TemporaryDirectory() as d:
+            hub, snap = self.hub(d)
+            blobs = snap.parent.parent / 'blobs'
+            for name, blob in (('README.md', '3' * 40), ('.gitattributes', '4' * 40)):
+                (blobs / blob).write_text('x')
+                (snap / name).symlink_to('../../blobs/' + blob)
+            extras = {'README.md': '3' * 40, '.gitattributes': '4' * 40}
+            _, problems = self.env(d, hub, extras=extras)
+            self.assertEqual([], [p for p in problems if 'not pinned:' in p or 'snapshot file' in p], problems)
+            _, problems = self.env(d, hub, extras=dict(extras, **{'README.md': '9' * 40}))                  # another blob than the pinned one
+            self.assertTrue(any('snapshot file README.md is not the pinned blob' in p for p in problems), problems)
+            _, problems = self.env(d, hub, extras={'README.md': '3' * 40})                                  # .gitattributes is not in the allowed set
+            self.assertTrue(any('not pinned: .gitattributes' in p for p in problems), problems)
+        self.assertEqual({'.gitattributes', 'README.md'}, set(at.MODEL_SNAPSHOT_EXTRAS))                    # what the real snapshot holds besides the two
+
+    def test_config_json_content_is_hashed_every_time(self):
+        with tempfile.TemporaryDirectory() as d:
+            hub, snap = self.hub(d)
+            _, problems = self.env(d, hub)
+            self.assertEqual([], [p for p in problems if 'config.json' in p], problems)
+            blob = Path(os.path.realpath(snap / 'config.json'))
+            blob.write_text('{"n_mels": 80}')                                          # same blob NAME, other content
+            _, problems = self.env(d, hub)
+            self.assertTrue(any('config.json content hashes to %s' % hashlib.sha256(b'{"n_mels": 80}').hexdigest() in p for p in problems), problems)
+            _, problems = self.env(d, hub, config_sha256='0' * 64)
+            self.assertTrue(any('not the pinned %s' % ('0' * 64) in p for p in problems), problems)
+        self.assertEqual(64, len(at.MODEL_CONFIG_SHA256))
+        real = Path(at.HF_HUB) / 'models--mlx-community--whisper-large-v3-mlx' / 'snapshots' / at.MODEL_SNAPSHOT / 'config.json'
+        if real.exists():
+            self.assertEqual(at.MODEL_CONFIG_SHA256, hashlib.sha256(real.read_bytes()).hexdigest())      # the pin is the real file's content
 
     def test_regular_file_in_the_snapshot_is_null_and_a_problem(self):
         for kw, name in (({'link_weights': False}, 'weights.npz'), ({'link_config': False}, 'config.json')):
@@ -971,6 +1041,34 @@ class ClosureTests(unittest.TestCase):
         self.assertEqual(3, len(problems), problems)
         for name in mods:
             self.assertTrue(any(p.startswith('module %s was loaded from' % name) for p in problems), (name, problems))
+
+    def test_python_zip_on_sys_path_is_allowed_only_while_the_file_is_absent(self):
+        """item 3: python puts <prefix>/lib/python312.zip on sys.path even when it does not exist (the real run does: a first version
+        that refused the entry failed every correct job).  A file, directory or symlink there is code outside the manifest: refused."""
+        root = Path(self.tmp.name) / 'prefix' / 'lib'
+        stdlib = root / ('python%d.%d' % sys.version_info[:2])
+        (stdlib / 'lib-dynload').mkdir(parents=True)
+        zipname = root / ('python%d%d.zip' % sys.version_info[:2])
+        paths = [str(zipname), str(stdlib), str(stdlib / 'lib-dynload')]
+        with mock.patch.object(at.sysconfig, 'get_path', lambda name, *a, **k: str(stdlib)):
+            self.assertEqual([], at.closure_problems(self.info, modules={}, paths=paths))            # absent: the default sys.path
+            for kind in ('file', 'directory', 'dangling symlink'):
+                with self.subTest(kind=kind):
+                    if kind == 'file':
+                        zipname.write_bytes(b'PK')
+                    elif kind == 'directory':
+                        zipname.mkdir()
+                    else:
+                        zipname.symlink_to(root / 'nowhere')
+                    try:
+                        problems = at.closure_problems(self.info, modules={}, paths=paths)
+                    finally:
+                        if zipname.is_dir() and not zipname.is_symlink():
+                            zipname.rmdir()
+                        else:
+                            zipname.unlink()
+                    self.assertEqual(1, len(problems), problems)
+                    self.assertIn(str(zipname), problems[0])
 
     def test_sys_path_may_only_hold_the_stdlib_the_site_dir_and_this_skill(self):
         stdlib = at.sysconfig.get_path('stdlib')

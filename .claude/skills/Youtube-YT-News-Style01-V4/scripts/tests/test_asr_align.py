@@ -15,6 +15,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import asr_align as aa  # noqa: E402
+import timing_defects as td  # noqa: E402
 
 FIXTURES = SCRIPTS / 'tests' / 'fixtures' / 'a67' / 'timing'
 # how the chain is started (asr_align.py refuses otherwise): the Cellar python that asr_run.sh pins, directly (these tests are not
@@ -127,14 +128,31 @@ class FrozenEquivalenceTests(unittest.TestCase):
     """raw + script -> pages bytes, produced ONCE with the reference chain (make_karaoke_sub.apply_script + karaoke_lib.build_chunks
     + extract_timing's page format; fixtures/a67/timing/vendored_equiv_*, synthetic text).  Runs on every machine, so the fidelity of
     the vendored copies does not depend on the read-only reference files being present."""
-    def test_vendored_chain_writes_the_frozen_reference_bytes(self):
+    def test_the_chain_writes_the_frozen_matched_end_bytes(self):
+        """pins the pages byte for byte, INCLUDING the documented deviation of fix round 1: a matched character keeps its raw end"""
         raw = json.loads((FIXTURES / 'vendored_equiv_raw.json').read_text(encoding='utf-8'))
         lines = aa.read_script_lines(str(FIXTURES / 'vendored_equiv_script.txt'))
         pages, _ = aa.align(raw, lines)
-        expected = (FIXTURES / 'vendored_equiv_pages.json').read_bytes()
+        expected = (FIXTURES / 'vendored_equiv_pages_matched_ends.json').read_bytes()
         self.assertEqual(expected, aa.pages_text(pages).encode('utf-8'))
         self.assertGreater(len(pages), 10)                                    # not a trivial fixture: pauses, merges, interpolation
         self.assertEqual(hashlib.sha256((FIXTURES / 'vendored_equiv_script.txt').read_bytes()).hexdigest(), raw['script_sha256'])
+
+    def test_everything_but_the_matched_ends_is_still_the_reference(self):
+        """vendored_equiv_pages.json = what the reference chain wrote (frozen).  The only intended difference: ends.  Same words in the
+        same order, every start identical, every end <= the reference end (and >= its start); some ends differ (the deviation is live)."""
+        raw = json.loads((FIXTURES / 'vendored_equiv_raw.json').read_text(encoding='utf-8'))
+        lines = aa.read_script_lines(str(FIXTURES / 'vendored_equiv_script.txt'))
+        ref = json.loads((FIXTURES / 'vendored_equiv_pages.json').read_text(encoding='utf-8'))
+        pages, _ = aa.align(raw, lines)
+        flat = lambda pp: [w for p in pp for w in p['words']]
+        r, n = flat(ref), flat(pages)
+        self.assertEqual([(w['w'], w['s']) for w in r], [(w['w'], w['s']) for w in n])
+        self.assertTrue(all(w['s'] <= x['e'] <= w['e'] for w, x in zip(r, n)))
+        self.assertGreater(sum(1 for w, x in zip(r, n) if w['e'] != x['e']), 10)
+        # starts / words are not the only thing kept: pages hold <= MAX_WORDS words and are sorted
+        self.assertTrue(all(len(p['words']) <= aa.MAX_WORDS for p in pages))
+        self.assertEqual(sorted(p['start'] for p in pages), [p['start'] for p in pages])
 
     def test_a_changed_vendored_function_would_break_the_fixture(self):
         raw = json.loads((FIXTURES / 'vendored_equiv_raw.json').read_text(encoding='utf-8'))
@@ -145,13 +163,13 @@ class FrozenEquivalenceTests(unittest.TestCase):
             pages, _ = aa.align(raw, lines)
         finally:
             aa.MAX_WORDS = keep
-        self.assertTrue((FIXTURES / 'vendored_equiv_pages.json').read_bytes() != aa.pages_text(pages).encode('utf-8'))
+        self.assertTrue((FIXTURES / 'vendored_equiv_pages_matched_ends.json').read_bytes() != aa.pages_text(pages).encode('utf-8'))
 
     def test_a_changed_alignment_logic_would_break_the_fixture_too(self):
         """N9: not only the pagination constants: the pause rule, the page width and the character timeline that the script is aligned onto are covered too"""
         raw = json.loads((FIXTURES / 'vendored_equiv_raw.json').read_text(encoding='utf-8'))
         lines = aa.read_script_lines(str(FIXTURES / 'vendored_equiv_script.txt'))
-        frozen = (FIXTURES / 'vendored_equiv_pages.json').read_bytes()
+        frozen = (FIXTURES / 'vendored_equiv_pages_matched_ends.json').read_bytes()
         self.assertEqual(frozen, aa.pages_text(aa.align(json.loads(json.dumps(raw)), lines)[0]).encode('utf-8'))      # the control: unmutated = equal
         orig_timeline = aa._asr_char_timeline
         mutants = {
@@ -194,13 +212,71 @@ class VendoredEquivalenceTests(unittest.TestCase):
         res = self.mk.apply_script({'segments': raw['segments']}, lines)
         return aa.pages_text(aa.chunks_to_pages(self.kl.build_chunks(res, max_words=4, max_chars=24, pause=0.42)))
 
-    def test_same_bytes_as_the_reference_chain(self):
+    def test_same_words_and_starts_as_the_reference_chain_and_only_the_matched_ends_differ(self):
         cases = [(thai_raw(), THAI_LINES), (thai_raw(misspell=True), THAI_LINES),
                  (raw_of(timed(LATIN, dur=0.2, gap=0.5)), [' '.join(LATIN)]),            # pause breaks
                  (raw_of(timed(['abc', 'def', 'ghi'])), ['abc xyz ghi', 'jkl'])]           # interpolation + clamp at the end
+        flat = lambda pp: [w for p in pp for w in p['words']]
         for raw, lines in cases:
             with self.subTest(lines=lines[0]):
-                self.assertEqual(self.old_text(raw, lines), aa.pages_text(aa.align(raw, lines)[0]))
+                ref = flat(json.loads(self.old_text(raw, lines)))
+                new = flat(aa.align(raw, lines)[0])
+                self.assertEqual([(w['w'], w['s']) for w in ref], [(w['w'], w['s']) for w in new])
+                self.assertTrue(all(w['s'] <= x['e'] <= w['e'] for w, x in zip(ref, new)))
+
+
+class PauseTests(unittest.TestCase):
+    """fix round 1, item 4: a real pause after a short word must stay a gap.  The reference set every end to the next start, so the
+    word before a >= 1 s pause became 'slow' (or, at ~4 s, 'too long'), the repair rung could not fix it and the job ended in exit 5."""
+    WORDS = ['วันนี้', 'ทีมงาน', 'ใน', 'ห้อง', 'ทดสอบ', 'ระบบ', 'ใหม่', 'ครับ']
+
+    def raw_with_pause(self, pause):
+        out, t = [], 0.5
+        for i, w in enumerate(self.WORDS):
+            out.append((w, round(t, 2), round(t + 0.31, 2)))
+            t += 0.31 + (pause if w == 'ใน' else 0.07)
+        raw = raw_of(out)
+        raw['audio']['duration'] = out[-1][2] + 0.2
+        return raw, out
+
+    def check(self, pause):
+        raw, timed_words = self.raw_with_pause(pause)
+        pages, anchors = aa.align(raw, [' '.join(self.WORDS)])
+        words = [w for p in pages for w in p['words']]
+        self.assertEqual(self.WORDS, [w['w'] for w in words])
+        i = self.WORDS.index('ใน')
+        _, s, e = timed_words[i]
+        self.assertEqual(round(e, 3), words[i]['e'])                                       # the raw end, not the absorbed one (whisper's leading space takes the first third of a word's time)
+        self.assertGreaterEqual(words[i]['s'], s)
+        self.assertGreaterEqual(words[i + 1]['s'] - words[i]['e'], pause)                  # the gap is in the pages
+        silences = [(e + 0.02, words[i + 1]['s'] - 0.02)]
+        self.assertEqual([], td.find_defects(pages, raw, silences))                         # nothing to repair, nothing that fails for ever
+        # control: the reference's absorbed end WOULD be flagged (so this test fails without the fix)
+        absorbed = json.loads(json.dumps(pages))
+        for p in absorbed:
+            for k, w in enumerate(p['words']):
+                if w['w'] == 'ใน':
+                    w['e'] = words[i + 1]['s']
+                    p['end'] = max(p['end'], w['e']) if k == len(p['words']) - 1 else p['end']
+        codes = {d['code'] for d in td.find_defects(absorbed, raw, silences)}
+        if pause >= 3.0:                                  # (at 1.2 s the absorbed word is still under word-slow's 1.5 s; the gap assertion above is the test)
+            self.assertTrue(codes & {'word-slow', 'word-too-long'}, codes)
+        return pages
+
+    def test_a_short_word_before_a_1_2_s_pause(self):
+        pages = self.check(1.2)
+        self.assertTrue(any(p['words'][-1]['w'] == 'ใน' for p in pages))                  # build_chunks' own pause rule splits the page there
+
+    def test_a_short_word_before_a_3_8_s_pause(self):
+        self.check(3.8)
+
+    def test_unmatched_characters_keep_the_reference_rule(self):
+        """a misspelled word is interpolated, not matched: its end stays the next character's start (no silent behaviour change there)"""
+        raw = raw_of(timed(['abc', 'def', 'ghi'], dur=0.2, gap=0.5))
+        pages, anchors = aa.align(raw, ['abc xyz ghi'])
+        words = {w['w']: w for p in pages for w in p['words']}
+        self.assertEqual(words['xyz']['e'], words['ghi']['s'])                              # interpolated: contiguous
+        self.assertLess(words['abc']['e'], words['xyz']['s'] - 0.1)                         # matched 'abc': its raw end, a real gap before xyz
 
 
 @unittest.skipUnless(HAVE_CHAIN, 'the pinned python / the V4 ASR venv are not on this machine')

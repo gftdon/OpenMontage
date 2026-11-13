@@ -174,6 +174,15 @@ MODEL_BLOBS = {
     'config.json': '2c626df3c540bdc0287b11725441d10e1af73680',
     'weights.npz': '05ff791ce3630fae47e7c51004e9666204d786246ec07cac6110af768099b40d',
 }
+# config.json is small: its CONTENT is hashed on every run (normal mode and --check) and compared with this sha256.
+MODEL_CONFIG_SHA256 = '34982ce6ae286095000f82ae9583b3431639e8b092bf60c961f203745e6500e3'
+# The snapshot dir holds exactly these files and no other (a stray weights.safetensors, an extra config, a tokenizer file ... would
+# change what the decoder loads).  The first two are the loaded ones (MODEL_BLOBS); the last two are the repo's README and
+# .gitattributes, which the decoder never reads, pinned by blob name only so that the real snapshot is not refused.
+MODEL_SNAPSHOT_EXTRAS = {
+    '.gitattributes': 'a6344aac8c09253b3b630fb776ae94478aa0275b',
+    'README.md': 'aa6058f979bed0dce9307e6e2ce8c0764824f855',
+}
 # What the chain executes from outside this skill (the Cellar python, its stdlib, the 26 distributions of the V4 venv, measured
 # 2026-11-13: 1,681 modules loaded by a real decode) is pinned by asr_venv.manifest and checked by asr_run.sh, outside python.
 RAW_SCHEMA = asr_align.RAW_SCHEMA
@@ -349,9 +358,15 @@ def closure_problems(info, modules=None, paths=None):
         except ValueError:
             pass
         out.append('module %s was loaded from %s, which is neither the stdlib, the ASR venv nor a chain script' % (name, real))
-    allowed = {stdlib, stdlib / 'lib-dynload', stdlib.parent / ('python%d%d.zip' % sys.version_info[:2]), site, Path(os.path.realpath(HERE))}
+    allowed = {stdlib, stdlib / 'lib-dynload', site, Path(os.path.realpath(HERE))}
+    # python always puts <prefix>/lib/python3NN.zip on sys.path, whether or not the file exists.  Absent = harmless (nothing to
+    # import); present = code outside the manifest, which asr_run.sh already refuses, and so does this check.
+    zipname = stdlib.parent / ('python%d%d.zip' % sys.version_info[:2])
     for entry in (sys.path if paths is None else paths):
-        if Path(os.path.realpath(entry)) not in allowed:
+        real_entry = Path(os.path.realpath(entry))
+        if real_entry == zipname and not os.path.lexists(entry):
+            continue
+        if real_entry not in allowed:
             out.append('sys.path holds %s (not the stdlib, the ASR venv site-packages or this skill)' % entry)
     return out
 
@@ -374,13 +389,17 @@ def weights_problems(snap, blobs=None):
     return []
 
 
-def check_environment(hub=HF_HUB, mlx_pkg=None, venv=True, blobs=None, deep=False):
+def check_environment(hub=HF_HUB, mlx_pkg=None, venv=True, blobs=None, deep=False, config_sha256=None, extras=None):
     """-> (env_info for raw_asr.json, problems).  Loads no model and runs no decoder.  hub / mlx_pkg / venv=False / blobs: unit
     tests only (the CLI and run_ladder always use the defaults: the fixed cache dir, the installed mlx_whisper package, the
-    manifest, MODEL_BLOBS).  deep=True also hashes the weights content (--check --deep).
+    manifest, MODEL_BLOBS, MODEL_CONFIG_SHA256, MODEL_SNAPSHOT_EXTRAS; config_sha256 / extras are unit-test hooks too).  deep=True also
+    hashes the weights content (--check --deep).  The snapshot dir must hold exactly the pinned files (item 7), and config.json's
+    content is hashed every time.
     env_info['snapshot_dir'] / ['site_dir'] are for running the model and closure_problems only; fingerprint() never carries
     them (they are paths)."""
     blobs = MODEL_BLOBS if blobs is None else blobs
+    config_sha256 = MODEL_CONFIG_SHA256 if config_sha256 is None else config_sha256
+    extras = MODEL_SNAPSHOT_EXTRAS if extras is None else extras
     problems, files, version = [], {}, None
     if mlx_pkg is None:
         spec = importlib.util.find_spec('mlx_whisper')
@@ -414,6 +433,23 @@ def check_environment(hub=HF_HUB, mlx_pkg=None, venv=True, blobs=None, deep=Fals
         problems.append('speech model %s snapshot %s is not in the local HF cache (%s); not downloading' % (MODEL_ID, MODEL_SNAPSHOT, snap))
     mfiles, p = model_files(snap, hub)
     problems += p
+    if snap.is_dir():
+        for name in sorted(os.listdir(snap)):
+            if name in blobs:
+                continue
+            if name in extras:                          # not loaded by the decoder: allowed, but only as the pinned blob
+                target = os.path.realpath(snap / name)
+                if os.path.basename(target) != extras[name]:
+                    problems.append('snapshot file %s is not the pinned blob %s: restore the HF cache from the original download' % (name, extras[name]))
+                continue
+            problems.append('the model snapshot holds a file that is not pinned: %s (a stray weights / config / tokenizer file would change what '
+                            'the decoder loads); remove nothing yourself: restore the HF cache from the original download' % name)
+        cfg = snap / 'config.json'
+        if cfg.is_file():
+            got = sha_file(cfg)
+            if got != config_sha256:
+                problems.append('model config.json content hashes to %s, not the pinned %s (the decoder reads its hyper-parameters from it): '
+                                'restore the HF cache from the original download, do not edit the pin' % (got, config_sha256))
     for name, want in sorted(blobs.items()):
         got = mfiles.get(name)
         if got is not None and got != want:
@@ -469,9 +505,13 @@ def _show(v):
     return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True)
 
 
+OS_UPDATE_HINT = ('hint: the OS was updated after this word timing was made — redo the word timing step and deliver again')
+
+
 def compare_fingerprint(recorded, current):
     """-> one line per differing leaf, e.g. 'mlx.version: 0.31.2 (production) != 0.31.3 (this machine)'; [] = same.  A key
-    present on one side only is a difference (fail closed)."""
+    present on one side only is a difference (fail closed).  When platform.release / platform.mac_ver differ, ONE more last line
+    (OS_UPDATE_HINT) says to redo the word timing and deliver again."""
     out = []
 
     def walk(path, a, b):
@@ -484,6 +524,8 @@ def compare_fingerprint(recorded, current):
         elif a is _MISSING or b is _MISSING or type(a) is not type(b) or a != b:
             out.append('%s: %s (production) != %s (this machine)' % (path or 'fingerprint', _show(a), _show(b)))
     walk('', recorded, current)
+    if any(l.startswith(('platform.release:', 'platform.mac_ver:')) for l in out):
+        out.append(OS_UPDATE_HINT)                       # one extra line; the failure condition is unchanged (the leaves above already differ)
     return out
 
 

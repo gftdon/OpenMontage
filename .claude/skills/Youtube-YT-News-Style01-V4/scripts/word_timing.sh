@@ -31,7 +31,9 @@
 #                            trusts this file
 #   word_timing.failed.json  {rung,reason,regions,defects,key} when the timing is still defective after the ladder
 #
-# Job key = sha256(audio sha256, script sha256, sha256 of asr_transcribe.py, asr_align.py, timing_defects.py, asr_run.sh, asr_venv.manifest).
+# Job key = sha256(audio sha256, script sha256, sha256 of asr_transcribe.py, asr_align.py, timing_defects.py, asr_run.sh, asr_venv.manifest,
+#                 sha256 of the CURRENT `asr_run.sh asr_transcribe.py --fingerprint` output).  So after an OS / ffmpeg / mlx / venv update the
+#                 same command is a new job: the old outputs are removed and the audio is transcribed again.  An unreadable fingerprint = exit 4.
 #   done file with this key + output present        -> print paths, exit 0 at once
 #   job.json names a LIVE pid with this key         -> wait for it
 #   live job with ANOTHER key in this out_dir       -> exit 3 (use --cancel or another out_dir)
@@ -197,13 +199,25 @@ if [ $RC -ne 0 ]; then
   exit 4
 fi
 
+# The CURRENT toolchain fingerprint (OS release, ffmpeg, mlx, venv manifest, ... = the identity fields of raw_asr.json) is part of the
+# key: after an OS / ffmpeg / mlx / venv change the SAME command gets a new key, so the stale outputs below are removed and the job
+# re-transcribes (without it the old done file would keep answering "done" and finalize would keep refusing the old fingerprint).
+# If the fingerprint cannot be read that is exit 4 with its message, never "unchanged".
+FP="$(asr_py asr_transcribe.py --fingerprint 2>&1)"; RC=$?
+if [ $RC -ne 0 ] || [ -z "$FP" ]; then
+  echo "$FP" >&2
+  echo "ERROR: the toolchain fingerprint could not be read (asr_run.sh asr_transcribe.py --fingerprint exit $RC). Nothing was downloaded or started; do not install or edit anything, stop and report." >&2
+  exit 4
+fi
+
 KEY="$(sha_str "$(sha_file "$AUDIO")
 $(sha_file "$SCRIPT")
 $(sha_file "$TRANSCRIBE")
 $(sha_file "$ALIGN")
 $(sha_file "$DEFECTS_PY")
 $(sha_file "$LAUNCHER")
-$(sha_file "$MANIFEST")")"
+$(sha_file "$MANIFEST")
+$(sha_str "$FP")")"
 
 /bin/mkdir -p "$OUT" || { echo "ERROR: cannot create $OUT" >&2; exit 2; }
 
