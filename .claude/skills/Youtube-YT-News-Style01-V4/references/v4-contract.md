@@ -177,8 +177,11 @@ receipt ของ finalize ไม่ใช่ใบรับรอง (`certific
 THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
   /usr/bin/env -i <PY> -I <C>/.claude/skills/Youtube-YT-News-Style01-V4/scripts/finalize.py --check \
       --project <A>/projects/<slug> --public-root <A>/remotion-composer/public --deliver <the delivered .mp4> \
-      --copy-root <A>/projects [--copy-root <another projects-type dir> ...] --work-dir <empty or new dir>
-  <C>  a clean checkout of the pinned commit (remotion-composer/node_modules installed); <A> the agent's checkout (read only).
+      --copy-root <S>/projects [--copy-root <another trusted projects-type dir> ...] --work-dir <empty or new dir> \
+      --expect-avatar-sha256 <sha256 of the task's avatar mp4, 64 lowercase hex>
+  <C>  a clean checkout of the pinned commit (remotion-composer/node_modules installed).
+  <A>  the agent's checkout (finalize only reads it).  It is NOT a safe copy root: see "copy roots are TRUSTED input" below.
+  <S>  a copy of the projects the agent cannot write (a snapshot taken before its run, or the outside system's archive): below.
   <PY> a python >= 3.12 venv interpreter with numpy, PIL, pythainlp (e.g. the repo's .venv python), run with -I and WITHOUT -S:
        finalize hands that venv's site-packages (sysconfig purelib/platlib) to every python gate, which runs `<PY> -I -S -B`.
   env -i: nothing of the caller's environment is needed or passed on.  Every child gets an environment built from scratch:
@@ -189,14 +192,28 @@ THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
        lint_content.py compares this episode against them (+ this skill dir + <C>/remotion-composer/src).  A project whose avatar
        is the same file (sha256) is skipped as a re-do of this video: a V4 project's avatar is <root>/../remotion-composer/public/
        <assetDir>/<avatarFile> of its artifacts/episode.json, otherwise any *.mp4 in it; an unknown identity is never skipped.
+       finalize hands the lint our avatar as LEXICAL paths: --asset-dir <public>/<assetDir> --avatar <public>/<assetDir>/<avatarFile>.
+  copy roots are TRUSTED input: the same-avatar skip believes what it finds there.  Whoever can write a copy root, or the
+       <root>/../remotion-composer/public beside it where the older projects' avatars are looked up, can make an older project
+       look like a re-do of this video and so hide a copy of it.  Pass only copy roots the agent cannot write: a read-only
+       snapshot taken BEFORE the agent's run, or the outside system's own archive.  Snapshot <A>/projects together with
+       <A>/remotion-composer/public (at least the older projects' avatars), in the same layout (<S>/projects beside
+       <S>/remotion-composer/public).  Without that public dir no older avatar is found and nothing is skipped: a legitimate
+       re-do of the same video is then compared against its own older project and may be flagged as a copy.
+  --expect-avatar-sha256 is MANDATORY in --check (exit 4 without it, or when it is not 64 lowercase hex): the outside system
+       takes it from the TASK (the avatar it ordered), never from the agent.  The avatar the episode names, <public>/<assetDir>/
+       <avatarFile>, must be a regular file with exactly that sha256 (record `avatar`, exit 2 before any gate otherwise): an
+       episode copied from another project together with that project's avatar, or a re-render of an old project, is refused.
   PASS = exit 0 AND check.json `certified_final_sha256` == the sha256 of the delivered file (`delivered_path`): --check binds
        the result to that file (regular file, == renders/final.mp4 the gates checked == the receipt's claim, the receipt's
-       bound_inputs == the current hashes).
+       bound_inputs == the current hashes) and to the task's avatar (`avatar_sha256` == `expected_avatar_sha256`).
+       certified_final_sha256 is null in every other check.json (a failure, a crash, a signal, a refused run lock).
 ```
 
-- `<C>` = clean checkout ของ commit ที่ pin (ติดตั้ง `remotion-composer/node_modules` แล้ว); โค้ด lock engine และ node_modules มาจากตรงนี้เสมอ · `<A>` = checkout ของ agent (อ่านอย่างเดียว; `--project`/`--public-root` ชี้เข้าไปที่นี่) · `<PY>` = python >= 3.12 ของ venv ที่ระบบภายนอกควบคุมและมี numpy, PIL, pythainlp รันด้วย `-I` ไม่ใช่ `-S` (finalize ส่ง site-packages ของ venv นั้นให้ gate ภาษา Python ทุกตัวรัน `-I -S -B`)
-- `--copy-root` **บังคับ**ใน `--check`: ไม่ใส่ หรือชี้โฟลเดอร์ที่ไม่มี = exit 4 ก่อนรัน gate ใด; ตอนส่งมอบ flag นี้ถูกปฏิเสธ (ส่งมอบใช้โฟลเดอร์แม่ของ project กับ avatar ของตัวเอง)
-- ผ่าน = exit 0 **และ** `certified_final_sha256` ใน `check.json` เท่ากับ sha256 ของไฟล์ที่ส่งมอบ (`delivered_path`): `--check --deliver X` ต้องเป็นไฟล์จริง (ไม่ใช่ symlink) ที่ sha256 ตรง `renders/final.mp4` ที่ gate ตรวจและตรง receipt และ `bound_inputs` ของ receipt ต้องตรงกับ hash ปัจจุบัน
+- `<C>` = clean checkout ของ commit ที่ pin (ติดตั้ง `remotion-composer/node_modules` แล้ว); โค้ด lock engine และ node_modules มาจากตรงนี้เสมอ · `<A>` = checkout ของ agent (finalize อ่านอย่างเดียว; `--project`/`--public-root` ชี้เข้าไปที่นี่) **ไม่ใช่ copy root ที่ปลอดภัย** · `<S>` = สำเนาที่ agent เขียนไม่ได้: snapshot ของ `<A>/projects` ที่ถ่าย**ก่อน**การรันของ agent พร้อม `<A>/remotion-composer/public` ในโครงเดียวกัน (`<S>/projects` อยู่ข้าง `<S>/remotion-composer/public`) หรือ archive ของระบบภายนอกเอง · `<PY>` = python >= 3.12 ของ venv ที่ระบบภายนอกควบคุมและมี numpy, PIL, pythainlp รันด้วย `-I` ไม่ใช่ `-S` (finalize ส่ง site-packages ของ venv นั้นให้ gate ภาษา Python ทุกตัวรัน `-I -S -B`)
+- `--copy-root` **บังคับ**ใน `--check` และต้องชี้ `<S>/projects` ไม่ใช่ `<A>/projects`: ไม่ใส่ หรือชี้โฟลเดอร์ที่ไม่มี = exit 4 ก่อนรัน gate ใด; ตอนส่งมอบ flag นี้ถูกปฏิเสธ (ส่งมอบใช้โฟลเดอร์แม่ของ project กับ avatar ของตัวเอง)
+- `--expect-avatar-sha256` **บังคับ**ใน `--check`: ไม่ใส่ หรือไม่ใช่ hex ตัวพิมพ์เล็ก 64 ตัว = exit 4; ตอนส่งมอบ flag นี้ถูกปฏิเสธ; ค่ามาจาก **task** (avatar ที่สั่งทำ) ไม่เคยมาจาก agent; ถ้า avatar ที่ episode ระบุ (`<public>/<assetDir>/<avatarFile>`) ไม่ใช่ไฟล์จริงที่ sha256 ตรงค่านี้ = record `avatar` exit 2 ก่อนรัน gate ใด (episode ที่ก๊อปมาพร้อม avatar ของ project อื่นถูกปฏิเสธ)
+- ผ่าน = exit 0 **และ** `certified_final_sha256` ใน `check.json` เท่ากับ sha256 ของไฟล์ที่ส่งมอบ (`delivered_path`) **และ** `avatar_sha256` == `expected_avatar_sha256`: `--check --deliver X` ต้องเป็นไฟล์จริง (ไม่ใช่ symlink) ที่ sha256 ตรง `renders/final.mp4` ที่ gate ตรวจและตรง receipt และ `bound_inputs` ของ receipt ต้องตรงกับ hash ปัจจุบัน; `certified_final_sha256` เป็น null ใน `check.json` ทุกไฟล์ที่ไม่ใช่การผ่าน (ล้ม, crash, signal, run lock ถูกปฏิเสธ)
 
 ## สิ่งที่ด่านไม่รับประกัน
 
@@ -219,12 +236,13 @@ THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
 - transcript / chapters / title / description ของต้นฉบับ (`transcript.txt`, `transcript_timed.json`, `chapters.txt`): มาจาก survey ของ agent ไม่ได้เทียบกับ YouTube — evidence ที่อิง transcript ดีเท่าไฟล์นั้น · `assets/ytsource/source.mp4`: ไม่พิสูจน์ว่าเป็นวิดีโอ YouTube ที่อ้าง (ไม่มีการดาวน์โหลดเทียบ) และการเลือกช่วงตัดเป็นของ agent
 - `cuts`: ผูก clip ที่ถูกแสดงกับ `_cuts.json` + `source.mp4` ด้วย hash และเทียบภาพที่ 3 จุดต่อ beat (ต้น/กลาง/ท้ายช่วงที่แสดง) ไม่ใช่ทุกเฟรม
 - `face-box`: macOS Vision บน 40 เฟรมคงที่ (ใบหน้าที่ใหญ่สุดของเฟรม = พิธีกร) ใช้ได้เฉพาะ macOS; เฟรมที่ไม่ได้สุ่มไม่ถูกวัด
-- `episode-copied`: จับ beat/headline ที่ซ้ำหลัง normalise (NFKC, ตัวอักษรล่องหน) เท่านั้น — headline ที่เรียบเรียงใหม่หรือใช้ homoglyph หลบได้ และค้นเฉพาะ root ที่ระบุ (skill dir, `remotion-composer/src/*.json`, projects-type root: project พี่น้องตอนส่งมอบ / `--copy-root` ใน `--check`)
+- `episode-copied`: จับ beat/headline ที่ซ้ำหลัง normalise (NFKC, ตัวอักษรล่องหน) เท่านั้น — headline ที่เรียบเรียงใหม่หรือใช้ homoglyph หลบได้ และค้นเฉพาะ root ที่ระบุ (skill dir, `remotion-composer/src/*.json`, projects-type root: project พี่น้องตอนส่งมอบ / `--copy-root` ใน `--check` ซึ่งต้องเป็น `<S>` ที่ agent เขียนไม่ได้)
 - การเขียนไฟล์นอก `projects/<slug>/` กับ `remotion-composer/public/<assetDir>/` (เช่น `/tmp`, `~/.claude`) และการแก้ library ไม่มี gate ใดตรวจ; finalize หาเครื่องมือจากรายการตายตัว (node ก่อนจาก `<home>/.local/bin/node`) และสร้าง env ใหม่ ไม่ใช้ PATH/env ของผู้เรียก (python gate รัน `-I -S` พร้อม site-packages ที่ระบุ; finalize เองรัน `-I` ไม่ใช่ `-S`; `check.json` บันทึก tool กับ `sys.prefix`) แต่ตอนส่งมอบยังเป็น self-check เพราะรันบนเครื่องและ repo ของ agent — ใบรับรองคือ `finalize.py --check` จาก clean checkout ของ commit ที่ pin โดยระบบภายนอกเท่านั้น
 - agent ที่เป็นผู้ใช้เดียวกับเจ้าของ `~/.cache` แก้ ASR venv / HF cache ได้: `asr_run.sh` จับไฟล์ที่ `asr_venv.manifest` ครอบคลุมก่อนรันทุกครั้ง แต่ไม่ครอบคลุม shared library ของ brew นอก python root, ffmpeg (อยู่ใน fingerprint ไม่ได้ pin) และช่วงแข่งระหว่างตรวจกับ exec — ที่เหลือจับได้โดย watcher ภายนอก/immutability เท่านั้น (CF-A68)
 - gate venv (numpy / PIL / pythainlp ใน `.venv` ของ repo ที่รัน finalize) **ไม่ถูกตรวจ**: agent ผู้ใช้เดียวกันแก้แพ็กเกจเหล่านั้นได้ — ทางปิดคือระบบภายนอกรัน `--check` ด้วย venv ของตัวเองที่ agent แก้ไม่ได้ (CF-A68); watcher รอบสองครอบคลุม `.venv` นี้
 - `gates_lock.py` ส่ง env ของผู้เรียก (ยกเว้น `NODE_*` / `GIT_*`) ให้ child node/git — มีผลเฉพาะนอก `env -i` จึงเป็นอีกเหตุผลที่การส่งมอบเป็น self-check
-- clean checkout ไม่มี `remotion-composer/public` ตัวแทนการข้าม same-avatar จึงระบุ project เก่าไม่ได้: การทำวิดีโอเดียวกันซ้ำที่ถูกต้องอาจถูก flag ถ้ามี episode V4 ของวิดีโอเดียวกันอยู่ใน copy root — ล้มแบบปิด (fail closed) ต้องให้คนตัดสิน
+- same-avatar skip ระบุ project เก่าจาก `<copy root>/../remotion-composer/public/<assetDir>/<avatarFile>` (ไม่ได้มาจาก `<C>`): ถ้า public ข้าง copy root ไม่มี avatar ของ project เก่า (เช่น snapshot เฉพาะ `projects/`) จะไม่มีอะไรถูกข้าม และการทำวิดีโอเดียวกันซ้ำที่ถูกต้องอาจถูก flag `episode-copied` เทียบกับ project เก่าของตัวเอง — ล้มแบบปิด (fail closed) ต้องให้คนตัดสิน
+- same-avatar skip เชื่อ copy root: ใครเขียน copy root หรือ public ที่อยู่ข้างมันได้ ทำให้ project เก่าดูเหมือนการทำซ้ำของวิดีโอนี้และซ่อนสำเนาของมันได้ — ปิดได้เฉพาะด้วย copy root ที่ agent เขียนไม่ได้ (`<S>`); `--expect-avatar-sha256` แยกต่างหากปฏิเสธ episode ที่ก๊อปมาพร้อม avatar ของ project อื่น
 - ตัวอักษรที่จับคู่ไม่ได้หรือประมาณเวลาใน `asr_align.py` ยังดูดช่วงหยุดที่ตามมา (เฉพาะตัวที่จับคู่ได้เท่านั้นที่คงเวลาจบจริง)
 - Trust boundary: a run that edits a gate file, regenerates `gates.lock.json` and commits, or that forges a receipt, cannot be detected locally (`test_finalize.py` `test_KNOWN_LIMITATION_…`). It is closed only by the consumer of the delivery receipt pinning `lock_sha256` and `finalize_sha256` out of band, outside the repo (CF-A68); `git_head` in the receipt is informational only (it moves with unrelated commits).
 - Loop seams: the approved bed (176.05 s) fades during its last ~2 s and `mux_av.sh` loops it, so at every loop seam (about every 176 s) the music drops to near silence for ~2 s and starts again. No gate measures this; it is accepted by the lead (same behaviour as the bed used before).
