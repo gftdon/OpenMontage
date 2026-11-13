@@ -186,8 +186,8 @@ STUB_FILES = {'lint_beats.py': PY_STUB, 'lint_content.py': PY_STUB, 'lint_captio
 ALL_GATES = ['frames', 'final-av', 'final-pixels', 'mux-audio', 'loudness', 'music-presence', 'face-box', 'cuts', 'word-timing',
              'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions', 'script', 'derived']   # the gates of a delivery
 CHECK_ONLY = ['asr-recheck']                                     # --check only (registered first, own lane)
-ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration']
-CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS + ['avatar', 'delivered']   # --check: + the task's avatar (FIX2 F1) + the binding to the delivered file
+ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration', 'avatar']   # avatar: FIX3 G1
+CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS + ['delivered']   # --check: + the binding to the delivered file (`avatar` adds the task's sha)
 STEM = {'beats': 'lint_beats', 'content': 'lint_content', 'captions': 'lint_captions', 'frames': 'frame_checks',
         'loudness': 'measure_loudness', 'timing': 'timing_check', 'final-pixels': 'qc_final_pixels', 'schema': 'episode_schema',
         'gate-integrity': 'gate_integrity', 'face-box': 'face_box'}
@@ -4474,18 +4474,18 @@ class AvatarBindingTests(FinalizeBase):
         self.assertNoGateRan()
 
     def test_lint_gets_the_lexical_asset_dir_and_avatar_never_their_realpath(self):
-        """A delivery (no avatar record): the symlinked avatar reaches the lint as <public>/<assetDir>/<avatarFile>, not its target."""
-        real = Path(self.tmp) / 'elsewhere' / 'avatar.mp4'
-        real.parent.mkdir()
-        shutil.copy(self.avatar(), real)
-        self.avatar().unlink()
-        self.avatar().symlink_to(real)
+        """A delivery: with the asset dir a symlink (the avatar itself must be a regular file since FIX3 G1, see AvatarFileRuleTests),
+        the lint gets <public>/<assetDir> and <public>/<assetDir>/<avatarFile> as written, never the link's target."""
+        pub = self.avatar().parent
+        real = Path(self.tmp) / 'elsewhere-assets'
+        shutil.move(str(pub), str(real))
+        pub.symlink_to(real, target_is_directory=True)
         self.run_fin()
         argv = self.argv_of('lint_content')
         i = argv.index('--asset-dir')
-        self.assertEqual(['--asset-dir', str(self.avatar().parent), '--avatar', str(self.avatar())], argv[i:i + 4])
-        self.assertNotIn(str(real), argv)
-        self.assertNotIn(os.path.realpath(real), argv)
+        self.assertEqual(['--asset-dir', str(pub), '--avatar', str(self.avatar())], argv[i:i + 4])
+        self.assertNotIn(str(real), ' '.join(argv))
+        self.assertNotIn(os.path.realpath(real), ' '.join(argv))
 
     def test_a_sub_path_avatar_file_is_never_bound(self):
         """finalize reads avatarFile only as a plain file name (no "/" or ".."): a sub-path is refused before any gate, so the
@@ -4524,6 +4524,107 @@ class AvatarBindingTests(FinalizeBase):
             self.module().main(['--preflight', '--expect-avatar-sha256', sha(self.avatar())])
         self.assertEqual(2, cm.exception.code)
         self.assertIn('--preflight takes only', err.getvalue())
+
+
+# ---------------------------------------------------------------------------------------------- FIX3 G1: ONE avatar-file rule, both modes
+class AvatarFileRuleTests(FinalizeBase):
+    """The avatar at the lexical path <public>/<assetDir>/<avatarFile> must be a regular file (lstat) in a delivery AND in --check,
+    decided by one function (avatar_file_problem).  A delivery that passes with a linked avatar would fail every --check later."""
+    def avatar(self):
+        return self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+
+    def check_doc(self):
+        return json.loads((self.rdir / 'check.json').read_text())
+
+    def link_avatar(self):
+        """What an agent does against SKILL.md: `ln -s` the downloaded avatar into the asset dir instead of copying it."""
+        real = Path(self.tmp) / 'downloads' / 'avatar.mp4'
+        real.parent.mkdir()
+        shutil.copy(self.avatar(), real)
+        self.avatar().unlink()
+        self.avatar().symlink_to(real)
+        return real
+
+    def assertNoGateRan(self):
+        for stem in STEM.values():
+            self.assertFalse(self.ran(stem), stem)
+
+    def test_a_delivery_refuses_a_symlinked_avatar_before_any_gate_with_a_fix_the_agent_can_act_on(self):
+        real = self.link_avatar()
+        before = sha(real)
+        self.assertEqual(2, self.run_fin(), self.out)
+        f = self.failed()
+        self.assertEqual(['avatar'], [g['name'] for g in f['gates']])
+        rec = self.gate(f, 'avatar')
+        self.assertEqual(('bad-input', 'verified'), (rec['status'], rec['kind']))
+        why = rec['reason']
+        self.assertIn('the avatar %s is not a regular file: it is a symlink' % self.avatar(), why)
+        self.assertIn('cp, not ln -s', why)
+        self.assertIn('mv %s %s' % (shlex.quote(str(self.avatar()) + '.copy'), shlex.quote(str(self.avatar()))), why)
+        self.assertIn('deliver again', why)
+        self.assertNotRegex(why, r'\brm\b|delete|unlink|remove')         # never tells the agent to delete anything
+        self.assertTrue(any(r == 'avatar: ' + why for r in f['reasons']), f['reasons'])
+        self.assertIn(why, self.out)
+        self.assertNoGateRan()
+        self.assertNotDelivered()
+        self.assertTrue(self.avatar().is_symlink())                     # finalize itself changed nothing
+        self.assertEqual(before, sha(real))
+
+    def test_doing_what_the_message_says_makes_the_delivery_pass(self):
+        real = self.link_avatar()
+        self.assertEqual(2, self.run_fin(), self.out)
+        copy = Path(str(self.avatar()) + '.copy')
+        shutil.copyfile(real, copy)                                      # cp <the avatar mp4> <avatar>.copy
+        os.replace(copy, self.avatar())                                  # mv <avatar>.copy <avatar>: replaces only the link
+        self.assertTrue(real.is_file())
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertEqual('pass', self.gate(self.receipt(), 'avatar')['status'])
+
+    def test_a_delivery_refuses_a_directory_at_the_avatar_path(self):
+        self.avatar().unlink()
+        self.avatar().mkdir()
+        self.assertEqual(2, self.run_fin(), self.out)
+        rec = self.gate(self.failed(), 'avatar')
+        self.assertIn('the avatar %s is not a regular file (a directory)' % self.avatar(), rec['reason'])
+        self.assertNoGateRan()
+
+    def test_check_refuses_a_symlinked_avatar_with_the_same_record_as_a_delivery(self):
+        real = self.link_avatar()
+        self.assertEqual(2, self.run_fin(), self.out)
+        delivery = self.gate(self.failed(), 'avatar')
+        self.assertEqual(2, self.run_fin('--check', '--expect-avatar-sha256', sha(real)), self.out)
+        doc = self.check_doc()
+        rec = self.gate(doc, 'avatar')
+        self.assertEqual((delivery['status'], delivery['reason']), (rec['status'], rec['reason']))
+        self.assertIsNone(doc['avatar_sha256'])                          # never hashed through the link
+        self.assertIsNone(doc['certified_final_sha256'])
+        self.assertNoGateRan()
+
+    def test_one_function_decides_in_both_modes(self):
+        def patch(m):
+            m.avatar_file_problem = lambda ctx: ('not-regular', 'SENTINEL: the one avatar rule')
+        self.assertEqual(2, self.run_fin(patch=patch), self.out)
+        self.assertEqual('SENTINEL: the one avatar rule', self.gate(self.failed(), 'avatar')['reason'])
+        self.assertEqual(2, self.run_fin('--check', patch=patch), self.out)
+        self.assertEqual('SENTINEL: the one avatar rule', self.gate(self.check_doc(), 'avatar')['reason'])
+
+    def test_a_regular_avatar_passes_both_modes_and_both_records_name_it(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        rec = self.gate(self.receipt(), 'avatar')
+        self.assertEqual(('pass', 'verified', {'path': str(self.avatar())}), (rec['status'], rec['kind'], rec['avatar']))
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        rec = self.gate(self.check_doc(), 'avatar')
+        self.assertEqual(('pass', sha(self.avatar())), (rec['status'], rec['avatar']['sha256']))
+
+    def test_a_missing_avatar_in_a_delivery_is_still_reported_by_the_gates_that_read_it(self):
+        """Only a path that holds something other than the file stops a delivery early; a missing avatar keeps its gate records
+        (timing / music-presence say what is missing) and the avatar record says it too."""
+        self.avatar().unlink()
+        self.assertEqual(2, self.run_fin(), self.out)
+        f = self.failed()
+        self.assertEqual('bad-input', self.gate(f, 'timing')['status'])
+        rec = self.gate(f, 'avatar')
+        self.assertEqual(('bad-input', 'cannot read the avatar %s: it does not exist' % self.avatar()), (rec['status'], rec['reason']))
 
 
 # ---------------------------------------------------------------------------------------------- FIX2 F3: certified is null unless exit 0

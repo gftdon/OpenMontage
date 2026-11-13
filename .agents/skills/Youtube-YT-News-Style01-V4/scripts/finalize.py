@@ -54,7 +54,9 @@ THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
        snapshot taken BEFORE the agent's run, or the outside system's own archive.  Snapshot <A>/projects together with
        <A>/remotion-composer/public (at least the older projects' avatars), in the same layout (<S>/projects beside
        <S>/remotion-composer/public).  Without that public dir no older avatar is found and nothing is skipped: a legitimate
-       re-do of the same video is then compared against its own older project and may be flagged as a copy.
+       re-do of the same video is then compared against its own older project and may be flagged as a copy.  The snapshot must
+       dereference symlinks (cp -RL / rsync -L): a project whose avatar, or a directory on the way to it, points outside the
+       snapshot is searched, not skipped.
   --expect-avatar-sha256 is MANDATORY in --check (exit 4 without it, or when it is not 64 lowercase hex): the outside system
        takes it from the TASK (the avatar it ordered), never from the agent.  The avatar the episode names, <public>/<assetDir>/
        <avatarFile>, must be a regular file with exactly that sha256 (record `avatar`, exit 2 before any gate otherwise): an
@@ -3222,29 +3224,70 @@ def expected_avatar_problems(args):
     return []
 
 
-def avatar_binding(ctx, expected):
-    """--check: the avatar the episode names, <public>/<assetDir>/<avatarFile> (lexical), must be a regular file (lstat) whose
-    sha256 is the task's.  -> record `avatar` (verified; pass, or stale = class 2) and the computed sha256 (or None)."""
-    gate = {'name': 'avatar', 'required': True}
-    info = {'path': str(ctx.avatar) if ctx.avatar is not None else None, 'sha256': None, 'expected_sha256': expected}
-    why = None
-    if ctx.avatar is None:
-        why = ('episode.json names no usable avatar (assetDir / avatarFile missing, or holding "/" or ".."): the task\'s avatar '
-               'cannot be bound')
-    else:
+AVATAR_FIX_IT_KINDS = ('link', 'not-regular')       # something other than the file is at the avatar path: a delivery stops there
+
+
+def avatar_file_problem(ctx):
+    """THE avatar-file rule (FIX3 G1), decided here and nowhere else, for a delivery AND for --check: the avatar the episode
+    names, at the LEXICAL path <public>/<assetDir>/<avatarFile>, must be a regular file (lstat: a symlink is never followed and
+    never hashed through).  -> None, or (kind, message): kind 'link' / 'not-regular' (something other than the file itself is at
+    that path; the message tells the agent how to fix it without deleting anything), 'missing', 'none' (episode.json names no
+    usable avatar), 'unreadable'."""
+    p = ctx.avatar
+    if p is None:
+        return 'none', ('episode.json names no usable avatar (assetDir / avatarFile missing, or holding "/" or ".."): the avatar '
+                        'cannot be checked')
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        return 'missing', 'cannot read the avatar %s: it does not exist' % p
+    except OSError as e:
+        return 'unreadable', 'cannot read the avatar %s: %s' % (p, e)
+    if stat.S_ISLNK(st.st_mode):
         try:
-            if not stat.S_ISREG(os.lstat(ctx.avatar).st_mode):
-                why = 'the avatar %s is not a regular file (a symlink / directory is never accepted)' % ctx.avatar
-            else:
-                info['sha256'] = ctx.hash(ctx.avatar)
-                if info['sha256'] != expected:
-                    why = ('the avatar %s (sha256 %s) is not the task\'s avatar (expected sha256 %s): this episode is not made from '
-                           'the avatar the task ordered' % (ctx.avatar, info['sha256'], expected))
+            target = os.readlink(p)
         except OSError as e:
-            why = 'cannot read the avatar %s: %s' % (ctx.avatar, e)
-    if why:
-        return record(gate, 'stale', 2, why, kind='verified', extra={'avatar': info}), info['sha256']
-    return record(gate, 'pass', 0, '', kind='verified', extra={'avatar': info}), info['sha256']
+            target = '? (%s)' % e
+        copy = str(p) + '.copy'
+        return 'link', ('the avatar %s is not a regular file: it is a symlink (-> %s), and finalize never follows a link.  '
+                        'Copy the avatar file itself (cp, not ln -s) into %s/ next to the link and rename the copy over it: '
+                        'cp %s %s && mv %s %s '
+                        '(mv replaces only the link; a plain cp onto the link would write into the file it points to), then '
+                        'deliver again' % (p, target, p.parent, shlex.quote(os.path.realpath(p)), shlex.quote(copy),
+                                           shlex.quote(copy), shlex.quote(str(p))))
+    if not stat.S_ISREG(st.st_mode):
+        return 'not-regular', ('the avatar %s is not a regular file (%s): put the avatar mp4 file itself at that path in %s/ '
+                               '(cp, not ln -s), then deliver again'
+                               % (p, 'a directory' if stat.S_ISDIR(st.st_mode) else 'a special file', p.parent))
+    return None
+
+
+def avatar_record(ctx, expected=None):
+    """Record `avatar` (verified; avatar_file_problem is the rule in both modes).  A delivery (expected None): the file rule.
+    --check: the file rule + its sha256 == the task's (`expected`; --check only).  -> (record, sha256 or None, problem kind or
+    None); a problem is class 2 (bad-input; another avatar than the task's: stale)."""
+    gate = {'name': 'avatar', 'required': True}
+    path = str(ctx.avatar) if ctx.avatar is not None else None
+    info = {'path': path} if expected is None else {'path': path, 'sha256': None, 'expected_sha256': expected}
+
+    def rec(status, why, kind=None, inputs=None):
+        return (record(gate, status, 0 if status == 'pass' else 2, why, kind='verified', inputs=inputs, extra={'avatar': info}),
+                info.get('sha256'), kind)
+
+    problem = avatar_file_problem(ctx)
+    if problem:
+        return rec('bad-input', problem[1], problem[0])
+    try:
+        sha256 = ctx.hash(ctx.avatar)            # a regular file (lstat above): its own bytes, never a link's target
+    except OSError as e:
+        return rec('bad-input', 'cannot read the avatar %s: %s' % (ctx.avatar, e), 'unreadable')
+    if expected is None:
+        return rec('pass', '', inputs={ctx.rel(ctx.avatar): sha256})
+    info['sha256'] = sha256
+    if info['sha256'] != expected:
+        return rec('stale', 'the avatar %s (sha256 %s) is not the task\'s avatar (expected sha256 %s): this episode is not made from '
+                            'the avatar the task ordered' % (ctx.avatar, info['sha256'], expected), 'other-avatar')
+    return rec('pass', '', inputs={ctx.rel(ctx.avatar): sha256})
 
 
 def copy_root_problems(args):
@@ -3710,11 +3753,6 @@ def run(args):
     try:
         if deliver_problem:
             return finish(2, [], ['bad input: ' + deliver_problem])
-        avatar_rec = None
-        if args.check:                  # the task's avatar, before any gate: another project's avatar makes everything else moot
-            avatar_rec, state['avatar_sha'] = avatar_binding(ctx, args.expect_avatar_sha256)
-            if avatar_rec['status'] != 'pass':
-                return finish(2, [avatar_rec], ['avatar: %s' % avatar_rec['reason']])
         if not args.check:
             # no stale failure / partial of an earlier attempt may sit beside the deliver path while this one runs.  A receipt is
             # kept ONLY when it is still the receipt of the mp4 beside it (a certified earlier delivery is never deleted here;
@@ -3723,6 +3761,12 @@ def run(args):
                 remove_quiet(p)
             if not certified_pair(deliver, receipt_p):
                 remove_quiet(receipt_p)
+        # the avatar file, ONE rule in both modes (FIX3 G1), before any gate.  --check stops on any avatar problem (and on another
+        # avatar than the task's: everything else is moot); a delivery stops when something other than the file is at the avatar
+        # path (it would pass here and fail every --check), and leaves a missing avatar to the gates that read it.
+        avatar_rec, state['avatar_sha'], avatar_kind = avatar_record(ctx, args.expect_avatar_sha256 if args.check else None)
+        if avatar_rec['status'] != 'pass' and (args.check or avatar_kind in AVATAR_FIX_IT_KINDS):
+            return finish(2, [avatar_rec], ['avatar: %s' % avatar_rec['reason']])
         purge_pycache(SKILL_DIR)
         ctx.tmp = private_tmp(ctx.reports / 'gate-tmp')
         env = gate_env(tools, ctx.tmp)
@@ -3759,8 +3803,8 @@ def run(args):
             return finish(4, records, [remaining_msg('post-verification')])
         vrecs, relevance, vinfo = run_verified(ctx, env, deadline)
         records += vrecs
+        records.append(avatar_rec)          # both modes (FIX3 G1)
         if args.check:                  # the result is bound to the delivered file (a check of the project alone certifies nothing)
-            records.append(avatar_rec)
             records.append(delivered_binding(ctx, deliver, receipt_p))
 
         # ---- 4. result
