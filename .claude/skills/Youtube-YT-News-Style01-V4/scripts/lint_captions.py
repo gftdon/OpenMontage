@@ -19,6 +19,22 @@ Checks
   midword-page-break    consecutive caption pages that join Thai|Thai at a non-boundary
                         (no whitespace or a plain space between them; a script line break
                         is a real boundary and is skipped), or a Thai|Thai whitespace/line break inside one page's displayText
+                        (also: a page or display line that starts with the mai yamok, see below)
+
+One rule for every Thai|Thai junction (thai_junction_ok, used by lint_script and lint_pages).
+kind "space" = whitespace inside a line/page; kind "break" = a new caption page or a line break inside a page.
+Decided in this order:
+  1. the right side starts with the mai yamok (ๆ, U+0E46): "space" passes, "break" FAILS (ๆ may never
+     start a page, a display line or a script line);
+  2. the left side ends with ๆ: pass (a space or break after ๆ is a normal boundary, "มาก ๆ บน");
+  3. ICU or newmm finds a boundary in the joined text: pass;
+  4. the junction coincides with whitespace that exists in the SOURCE script at that position, and newmm
+     tokenising each side SEPARATELY gives, on EACH side, a token touching the junction that is a
+     pythainlp.corpus.thai_words() entry longer than one character ("ว่า|การ", "แล้ว|ไป"): pass. Without
+     --source-script, or where the source has no whitespace there (an engine broke a page mid-word), rule 4
+     is not available. Accepted risk: a typo IN THE SOURCE whose halves are both words ("แส ดง") passes;
+     that is the script step's fault, the edit step cannot change the source;
+  5. otherwise FAIL ("ระ|บบ": "บบ" is not a word).
 
 Exit: 0 pass, 1 issues, 2 bad/missing input, 4 required tool missing.
 """
@@ -36,6 +52,8 @@ CODES = ["midword-space", "space-not-in-source", "source-stream-mismatch", "midw
 WINDOW = 25
 _HEADING = re.compile(r"^\s*Part\s*\d+\s*:?\s*$", re.IGNORECASE)
 _SKIP = set("“”\"„«»→←➜⇒")
+MAI_YAMOK = "ๆ"   # U+0E46, Thai repetition mark; deliberately the ONLY character with rules 1 and 2
+_LINE_BREAKS = "\n\r\v\f\x85\u2028\u2029"
 
 _NODE_JS = r"""
 const a = JSON.parse(require('fs').readFileSync(0, 'utf8'));
@@ -138,6 +156,70 @@ def thai_gaps(text: str):
     return gaps
 
 
+def junction_gaps(text: str):
+    """(start, end, kind) of every whitespace run in text that is a junction to judge: Thai|Thai, or any run
+    (even a missing one at the very start) that is followed by ๆ. kind is "break" when the run holds a line
+    break or sits at the start of the text (a new page / script line), else "space"."""
+    out = []
+    n = len(text)
+    if text[:1] == MAI_YAMOK:
+        out.append((0, 0, "break"))
+    i = 0
+    while i < n:
+        if text[i].isspace():
+            j = i
+            while j < n and text[j].isspace():
+                j += 1
+            if j < n:
+                thai_pair = i > 0 and is_thai(text[i - 1]) and is_thai(text[j])
+                if thai_pair or text[j] == MAI_YAMOK:
+                    brk = i == 0 or any(c in _LINE_BREAKS for c in text[i:j])
+                    out.append((i, j, "break" if brk else "space"))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+_DICT = None
+
+
+def _thai_dictionary():
+    global _DICT
+    if _DICT is None:
+        from pythainlp.corpus import thai_words
+        _DICT = thai_words()
+    return _DICT
+
+
+def _edge_token(text: str, last: bool) -> str:
+    from pythainlp.tokenize import word_tokenize
+    toks = [x for x in word_tokenize(text, engine="newmm", keep_whitespace=False) if x]
+    return (toks[-1] if last else toks[0]) if toks else ""
+
+
+def _is_dictionary_word(tok: str) -> bool:
+    return len(tok) > 1 and tok in _thai_dictionary()
+
+
+def thai_junction_ok(left: str, right: str, kind: str, bsets=None, src_ok: bool = False) -> bool:
+    """The single rule for a Thai|Thai junction (see the module docstring). left/right are the text on
+    each side with the whitespace between them removed; kind is "space" or "break". bsets optionally holds
+    boundary_sets() results keyed by left + right, so a caller can batch the ICU call. src_ok says that the
+    junction coincides with whitespace that exists in the source script (rule 4 is only available then)."""
+    if right[:1] == MAI_YAMOK:
+        return kind == "space"
+    if left[-1:] == MAI_YAMOK:
+        return True
+    joined = left + right
+    b = bsets.get(joined) if bsets is not None else None
+    if b is None:
+        b = boundary_sets([joined])[joined]
+    if len(left) in b:
+        return True
+    return src_ok and _is_dictionary_word(_edge_token(left, True)) and _is_dictionary_word(_edge_token(right, False))
+
+
 def _show(text: str) -> str:
     return text.replace("\n", "⏎")
 
@@ -151,18 +233,55 @@ def _source_clean(source_text: str) -> str:
     return "\n".join(l for l in s.split("\n") if l.strip() and not _HEADING.match(l))
 
 
+def _junction_detail(left, right, kind, where):
+    if right[:1] == MAI_YAMOK and kind == "break":
+        return f"ๆ starts a {where}: it must stay glued to the word before it"
+    return None
+
+
+def _source_whitespace(source_text):
+    """(kept-character stream of the source, set of stream offsets k with whitespace between kept char k-1 and k)."""
+    src = _source_clean(source_text)
+    sk = _kept(src)
+    src_ws = set()
+    for k in range(1, len(sk)):
+        if any(ch.isspace() for ch in src[sk[k - 1][1] + 1:sk[k][1]]):
+            src_ws.add(k)
+    return "".join(c for c, _ in sk), src_ws
+
+
+def _script_stream(lines):
+    """(kept-character stream of the script lines, per line (base offset, {position: kept offset}))."""
+    stream, per_line = [], []
+    for line in lines:
+        kept = _kept(line)
+        per_line.append((len(stream), {orig: k for k, (_, orig) in enumerate(kept)}))
+        stream.extend(c for c, _ in kept)
+    return "".join(stream), per_line
+
+
 def lint_script(lines, source_text=None):
-    """Lint project script lines (list of str). Returns issue dicts."""
-    issues, probes = [], []   # probes: (line_no, gap_start, gap_end, probe_text)
+    """Lint project script lines (list of str). Returns issue dicts. Rule 4 of thai_junction_ok needs source_text."""
+    issues, probes = [], []   # probes: (line_no, s, e, kind, left, right)
     for idx, line in enumerate(lines, 1):
-        for s, e in thai_gaps(line):
-            probes.append((idx, s, e, line[:s] + line[e:]))
-    bsets = boundary_sets([p[3] for p in probes])
-    for idx, s, e, probe in probes:
-        if s not in bsets[probe]:
+        for s, e, kind in junction_gaps(line):
+            probes.append((idx, s, e, kind, line[:s], line[e:]))
+    bsets = boundary_sets([p[4] + p[5] for p in probes])
+    src_stream = src_ws = stream = per_line = None
+    if source_text is not None:
+        src_stream, src_ws = _source_whitespace(source_text)
+        stream, per_line = _script_stream(lines)
+    for idx, s, e, kind, left, right in probes:
+        src_ok = False
+        if src_ws is not None and stream == src_stream:
+            base, pos_to_k = per_line[idx - 1]
+            k = pos_to_k.get(e)
+            src_ok = k is not None and (base + k) in src_ws
+        if not thai_junction_ok(left, right, kind, bsets, src_ok):
             line = lines[idx - 1]
             issues.append({"code": "midword-space", "line": idx, "t": None,
-                           "detail": "whitespace splits a Thai word (no ICU/newmm boundary after removing it)",
+                           "detail": _junction_detail(left, right, kind, "script line")
+                           or "whitespace splits a Thai word (no ICU/newmm boundary, and not two dictionary words at source whitespace)",
                            "context": _show(line[max(0, s - 15):e + 15])})
     if source_text is not None:
         issues.extend(_space_not_in_source(lines, source_text))
@@ -171,24 +290,15 @@ def lint_script(lines, source_text=None):
 
 
 def _space_not_in_source(lines, source_text):
-    src = _source_clean(source_text)
-    sk = _kept(src)
-    src_stream = "".join(c for c, _ in sk)
-    src_ws = set()   # stream offsets k with whitespace between kept char k-1 and k
-    for k in range(1, len(sk)):
-        if any(ch.isspace() for ch in src[sk[k - 1][1] + 1:sk[k][1]]):
-            src_ws.add(k)
-    stream, gaps = [], []   # gaps: (line_no, offset, s, e)
+    src_stream, src_ws = _source_whitespace(source_text)
+    stream, per_line = _script_stream(lines)
+    gaps = []   # (line_no, offset, s, e)
     for idx, line in enumerate(lines, 1):
-        base = len(stream)
-        kept = _kept(line)
-        stream.extend(c for c, _ in kept)
-        pos_to_k = {orig: k for k, (_, orig) in enumerate(kept)}
+        base, pos_to_k = per_line[idx - 1]
         for s, e in thai_gaps(line):
             k = pos_to_k.get(e)
             if k is not None:
                 gaps.append((idx, base + k, s, e))
-    stream = "".join(stream)
     if stream != src_stream:
         i = 0
         while i < min(len(stream), len(src_stream)) and stream[i] == src_stream[i]:
@@ -225,13 +335,26 @@ def _body(p):
     return d if isinstance(d, str) else p.get("text", "").strip()
 
 
-def lint_pages(pages):
-    probes = []   # (page_no, t, kind, probe_text, pos, context)
+def lint_pages(pages, source_text=None):
+    """Lint caption pages. Rule 4 of thai_junction_ok needs source_text: the pages' kept-character stream must
+    equal the source's, and the junction must sit on whitespace that the source has at that offset."""
+    probes = []   # (page_no, t, kind, left, right, context, where, detail_kind, src_ok)
+    texts = [pg.get("text") if isinstance(pg.get("text"), str) else _body(pg) for pg in pages]
+    src_ws, base = None, [0]
+    for tx in texts:
+        base.append(base[-1] + len(_kept(tx)))
+    if source_text is not None:
+        src_stream, ws_set = _source_whitespace(source_text)
+        if "".join(c for tx in texts for c, _ in _kept(tx)) == src_stream:
+            src_ws = ws_set
     for i, p in enumerate(pages):
         body = _body(p)
-        for s, e in thai_gaps(body):
-            probes.append((i + 1, p.get("start"), "displayText whitespace/line break inside page",
-                           body[:s] + body[e:], s, _show(body[max(0, s - 15):e + 15])))
+        for s, e, kind in junction_gaps(body):
+            where = "caption page" if body[:s].strip() == "" else "display line"
+            k = base[i] + len(_kept(body[:s]))
+            probes.append((i + 1, p.get("start"), kind, body[:s], body[e:], _show(body[max(0, s - 15):e + 15]),
+                           where, "displayText whitespace/line break inside page",
+                           src_ws is not None and k in src_ws))
         if i == 0:
             continue
         prev = pages[i - 1]
@@ -247,16 +370,20 @@ def lint_pages(pages):
             continue
         if "\n" in ws:
             continue   # a script line break is a real boundary; de-spacing it would be a false positive
+        if nbody[0] == MAI_YAMOK:
+            continue   # a page that starts with ๆ is already judged (and reported) by its own junction_gaps above
         tail, head = pbody[-WINDOW:], nbody[:WINDOW]
         kind = "page break across whitespace" if ws else "page break with no whitespace"
-        probes.append((i + 1, p.get("start"), kind, tail + head, len(tail),
-                       _show(tail + ("|" + _show(ws) + "|" if ws else "|") + head)))
-    bsets = boundary_sets([pr[3] for pr in probes])
+        probes.append((i + 1, p.get("start"), "break", tail, head,
+                       _show(tail + ("|" + _show(ws) + "|" if ws else "|") + head), "caption page", kind,
+                       bool(ws) and src_ws is not None and base[i] in src_ws))
+    bsets = boundary_sets([pr[3] + pr[4] for pr in probes])
     issues = []
-    for page_no, t, kind, probe, pos, ctx in probes:
-        if pos not in bsets[probe]:
+    for page_no, t, kind, left, right, ctx, where, label, src_ok in probes:
+        if not thai_junction_ok(left, right, kind, bsets, src_ok):
             issues.append({"code": "midword-page-break", "page": page_no, "t": t,
-                           "detail": f"{kind}: junction is not a Thai word boundary (ICU or newmm)",
+                           "detail": _junction_detail(left, right, kind, where)
+                           or f"{label}: junction is not a Thai word boundary (ICU or newmm) and not two dictionary words at source whitespace",
                            "context": ctx})
     issues.sort(key=lambda x: (x["page"], x["code"]))
     return issues
@@ -294,7 +421,7 @@ def main(argv=None) -> int:
     try:
         tools = check_tools()
         lines = [l for l in script.replace("\r\n", "\n").split("\n") if l.strip()]
-        issues = lint_script(lines, source) + lint_pages(pages)
+        issues = lint_script(lines, source) + lint_pages(pages, source)
     except ToolMissing as e:
         print(f"ERROR: required tool missing: {e}", file=sys.stderr)
         return 4
