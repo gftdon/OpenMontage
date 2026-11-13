@@ -3,8 +3,10 @@
 Coordinates: every srcCrop / --crop / crop-propose box is in pixels of a 1920x1080 source frame and is
 scaled to the real file resolution; the synthetic files here are 640x360 or 1280x720 on purpose.
 """
+import hashlib
 import importlib.util
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -125,6 +127,8 @@ def setUpModule():
 
 
 def tearDownModule():
+    if RealOcrMixin._ocr is not None:
+        RealOcrMixin._ocr.close()
     if Media.dir:
         shutil.rmtree(Media.dir, ignore_errors=True)
 
@@ -277,19 +281,19 @@ class OcrBatchTests(unittest.TestCase):
         try:
             fc.shutil.which = lambda name, *a, **k: None
             with self.assertRaises(fc.ToolMissing):
-                fc.VisionOcr(cache_dir=Media.dir / "nocache")(["/x.jpg"])
+                fc.VisionOcr()(["/x.jpg"])
         finally:
             fc.shutil.which = real_which
 
 
 class RealOcrMixin:
-    """One compiled Vision OCR binary shared by the OCR tests."""
+    """One Vision OCR runner shared by the OCR tests (it compiles once into its own private temp dir)."""
     _ocr = None
 
     @classmethod
     def ocr(cls):
         if RealOcrMixin._ocr is None:
-            RealOcrMixin._ocr = fc.VisionOcr(cache_dir=Media.dir / "ocrcache")
+            RealOcrMixin._ocr = fc.VisionOcr()
         return RealOcrMixin._ocr
 
 
@@ -317,8 +321,77 @@ class WatermarkTests(RealOcrMixin, unittest.TestCase):
 
     def test_cli_exit_1(self):
         rc = fc.main(["watermark", "--video", str(Media.dir / "wm.mp4"), "--in", "0", "--out", "4", "--frames-dir",
-                      str(Media.dir / "wfr3"), "--cache-dir", str(Media.dir / "ocrcache")])
+                      str(Media.dir / "wfr3")])
         self.assertEqual(1, rc)
+
+
+@unittest.skipUnless(HAVE_SWIFT, "swift is not installed: Vision OCR tests skipped (CLI must exit 4, see OcrBatchTests)")
+class NoCachedExecutableTests(unittest.TestCase):
+    """CF-A67 A5: an executable found in a cache directory is never run (an unattended agent can plant one there)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ocr-plant-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._tempdir = fc.tempfile.tempdir
+        self.addCleanup(setattr, fc.tempfile, "tempdir", self._tempdir)
+
+    def plant(self, cache_dir):
+        """A fake OCR program at the exact name the old code looked up (ocr_vision-<sha16 of the source>): it says every frame has
+        no text and leaves a marker file when it runs."""
+        sha = hashlib.sha256(fc.SWIFT_SRC.read_bytes()).hexdigest()[:16]
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        marker = self.tmp / ("RAN-" + cache_dir.name)
+        exe = cache_dir / f"ocr_vision-{sha}"
+        exe.write_text('#!/bin/sh\necho ran > "%s"\nwhile read p; do printf \'{"path":"%%s","ok":true,"lines":[]}\\n\' "$p"; done < "$2"\n'
+                       % marker)
+        exe.chmod(0o755)
+        return marker
+
+    def test_a_planted_binary_in_the_default_cache_is_never_run_and_the_real_ocr_finds_the_watermark(self):
+        fc.tempfile.tempdir = str(self.tmp)            # gettempdir() -> self.tmp: the old default cache was <tmp>/yt-news-v4-ocr-cache
+        marker = self.plant(self.tmp / "yt-news-v4-ocr-cache")
+        rc = fc.main(["watermark", "--video", str(Media.dir / "wm.mp4"), "--in", "0", "--out", "4", "--frames-dir", str(self.tmp / "fr")])
+        self.assertEqual(1, rc)                        # the planted program would have reported "no text" (exit 0)
+        self.assertFalse(marker.exists(), "a cached executable was run")
+
+    def test_the_cache_dir_option_is_gone(self):
+        marker = self.plant(self.tmp / "cache")
+        for argv in (["watermark", "--video", str(Media.dir / "wm.mp4"), "--in", "0", "--out", "4", "--frames-dir", str(self.tmp / "fr"),
+                      "--cache-dir", str(self.tmp / "cache")],
+                     ["cutaways", "--beats", str(self.tmp / "b.json"), "--media-root", str(Media.dir), "--frames-dir", str(self.tmp / "fr"),
+                      "--cache-dir", str(self.tmp / "cache")]):
+            self.assertEqual(2, fc.main(argv))
+        self.assertFalse(marker.exists())
+
+    def test_the_binary_lives_in_a_private_fresh_dir_that_is_deleted(self):
+        made = []
+        real = fc.tempfile.mkdtemp
+
+        def spy(*a, **k):
+            d = real(*a, **k)
+            made.append(d)
+            return d
+
+        fc.tempfile.mkdtemp = spy
+        self.addCleanup(setattr, fc.tempfile, "mkdtemp", real)
+        r = fc.VisionOcr()
+        frame = self.tmp / "f.jpg"
+        ff("-i", str(Media.dir / "wm.mp4"), "-frames:v", "1", str(frame))
+        out = r([frame])
+        self.assertTrue(out[str(frame)]["ok"])
+        if shutil.which("swiftc"):
+            self.assertEqual("compiled-fresh", r.mode)
+            self.assertEqual(str(r.build_dir), made[0])
+            self.assertEqual(0o700, os.stat(made[0]).st_mode & 0o777)
+            self.assertTrue((Path(made[0]) / "ocr_vision").is_file())
+            self.assertEqual(str(Path(made[0]) / "ocr_vision"), r._cmd[0])
+        r.close()
+        self.assertTrue(made and not any(Path(d).exists() for d in made))
+        # main() closes its runner: nothing it built is left behind
+        made.clear()
+        self.assertEqual(1, fc.main(["watermark", "--video", str(Media.dir / "wm.mp4"), "--in", "0", "--out", "4",
+                                     "--frames-dir", str(self.tmp / "fr2")]))
+        self.assertTrue(made and not any(Path(d).exists() for d in made))
 
 
 @unittest.skipUnless(HAVE_SWIFT, "swift is not installed: Vision OCR tests skipped (CLI must exit 4, see OcrBatchTests)")

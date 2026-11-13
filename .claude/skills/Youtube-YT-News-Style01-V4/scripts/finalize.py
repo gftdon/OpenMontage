@@ -3,15 +3,31 @@
 
   finalize.py --project projects/<slug> --deliver <output.mp4> [--composer remotion-composer]
               [--repo-root <git top level>] [--manifest <json>] [--check]
+  finalize.py --check --project </abs/agent/projects/slug> --public-root </abs/agent/remotion-composer/public>
+              [--work-dir <empty or new dir>] --deliver <output.mp4> ...          (clean-checkout check, see below)
 
 Order of work: (1) integrity of the gate files (gates_lock, exit 3), (2) the gates are RUN fresh (long ones
-first), (3) the reports of the long jobs (layout sweep, render, mux, relevance, final duration) are VERIFIED by
-hash binding, (4) only if every one of them passes the final mp4 is copied to --deliver and a delivery receipt is
-written.  There is deliberately NO flag and NO environment variable that skips or downgrades a gate.
+first), (3) the reports of the long jobs (layout sweep, render, mux, final duration) are VERIFIED by hash binding,
+(4) only if every one of them passes the final mp4 is copied to --deliver and a delivery receipt is written.  There
+is deliberately NO flag and NO environment variable that skips or downgrades a gate.
 
-ONE deadline covers the whole invocation (TOTAL_BUDGET_SEC, lock/git checks + gates + verification + copy); when it
-runs out the command ends with exit 4 and a FAILED file that names the phase.  The tools (node, ffmpeg, ffprobe, git,
-swift) are resolved once to absolute realpaths and the gates run with a fixed minimal PATH.
+PRINCIPLE (CF-A67): what finalize decides is recomputed from primary inputs (avatar, script, source video, final mp4,
+clips) with the tools under the lock.  Files the agent writes (reports, receipts, markers, evidence, caches) are claims;
+where finalize still has to read one (the layout sweep report, the render / mux receipts, visual_evidence.json) it binds
+it by hashes it computes itself.  A delivery receipt is NOT a certification (its `certification` field says so).
+
+CLEAN-CHECKOUT CHECK (`--check` only): an outside system runs finalize from a clean checkout of a pinned commit after
+the agent's session ended.  `--public-root` names the agent's remotion-composer/public (media of the episode + fonts),
+`--project` may then be an absolute path anywhere; code, lock, engine and node_modules always come from the RUNNING
+checkout.  In this mode (also whenever a --check project lies outside the repository) nothing is written into the
+project or the public root: fresh reports and check.json go to --work-dir (default: a new temp dir, printed at the
+end) and the agent's own qc/finalize/* files are never read.  A real delivery refuses --public-root / --work-dir and
+a project outside the repository (exit 2).
+
+ONE deadline covers the whole invocation (TOTAL_BUDGET_SEC for a delivery, CHECK_TOTAL_BUDGET_SEC for --check; lock/git
+checks + gates + verification + copy); when it runs out the command ends with exit 4 and a FAILED file (--check:
+check.json) that names the phase.  The tools (node, ffmpeg, ffprobe, git, swift) are resolved once to absolute
+realpaths and the gates run with a fixed minimal PATH.
 
 Exit codes (precedence): 3 integrity > 4 tool/gate missing, crash or timeout > 2 stale/missing report or bad
 input > 1 quality failure; 0 delivered (or --check: everything would pass).
@@ -19,15 +35,18 @@ A relative --project is resolved against the repository root (git top level of t
 the current directory.  --composer must be <repo root>/remotion-composer (anything else is exit 3).
 """
 import argparse
+import ast
 import atexit
 import concurrent.futures
 import datetime
 import hashlib
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import pwd
 import re
 import shlex
 import shutil
@@ -39,6 +58,7 @@ import tempfile
 import threading
 import time
 import traceback
+import wave
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / 'scripts'
@@ -46,12 +66,24 @@ LOCK_FILE = SCRIPTS_DIR / 'gates.lock.json'
 
 COMP = 'YtNewsStyle01V4'                  # the single composition; there is no --comp
 RECEIPT_SCHEMA = 'yt-news-v4-delivery-receipt'
+# version 2 (CF-A67): + certification, self_reported, input_hashes, relevance {...} (replaces relevance_status).  Readers of
+# older receipts (certified_pair) only use schema + delivered.sha256, which every version carries.
+RECEIPT_VERSION = 2
 FAILED_SCHEMA = 'yt-news-v4-finalize-failed'
 CHECK_SCHEMA = 'yt-news-v4-finalize-check'
+CHECK_VERSION = 2                          # version 2: + mode / work_dir / public_root, relevance {...} (replaces relevance_status)
+CERTIFICATION = ('not a certification: valid only after finalize.py --check from a clean checkout of the pinned commit passes')
+# claims of the agent that no gate re-derives (visual_evidence.json is read by the content lint as the agent's statement of what
+# each source beat shows; final-review.md is the agent's own review; word_timing.done.json is word_timing.sh's progress note, never
+# read for a verdict).  Paths relative to the project.
+SELF_REPORTED = ('artifacts/visual_evidence.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json')
+RELEVANCE_NOTE = 'not used as evidence (stock/AI footage is not allowed in unattended mode)'
 # One deadline for the whole invocation; unattended commands are killed after ~10 min.  The gates may only use the
 # time up to TOTAL - POST_RESERVE; the rest is kept for verification + delivery.  A delivery copy is only started
-# with DELIVER_RESERVE_SEC left.  Worst case wall time = TOTAL_BUDGET_SEC + the 5 s kill grace of one child.
+# with DELIVER_RESERVE_SEC left.  Worst case wall time = budget + the 5 s kill grace of one child.
 TOTAL_BUDGET_SEC = 450
+# `--check` (also the clean-checkout check of the outside system) has its own constant budget; phase B adds a transcription lane
+CHECK_TOTAL_BUDGET_SEC = 600
 POST_RESERVE_SEC = 90
 DELIVER_RESERVE_SEC = 20
 GIT_TIMEOUT_SEC = 20
@@ -73,7 +105,55 @@ PY_MODULES = ('numpy', 'PIL', 'pythainlp')          # the gates run under THIS i
 COMPOSER_PACKAGES = ('remotion', '@remotion/bundler', '@remotion/renderer')
 # the exact files YtNewsStyle01V4.tsx loads (render-blocking; a failed load cancels the render), relative to <composer>/public
 FONT_FILES = ('fonts/Kanit-Bold.ttf', 'fonts/Kanit-ExtraBold.ttf')
-WHISPER_DEFAULT_MODEL = 'mlx-community/whisper-large-v3-mlx'      # word_timing.sh default
+
+
+def passwd_home():
+    """The home directory of the account running finalize, from the passwd entry (never $HOME, never Path.home())."""
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+# word timing (CF-A67 phases B + C): the chain word_timing.sh runs (asr_transcribe.py -> raw_asr.json, asr_align.py ->
+# caption_pages.json) is re-checked from its PRIMARY inputs (the avatar audio, script.txt, the raw words); word_timing.done.json is
+# never read for a verdict.  The chain's python is reached ONLY through its launcher: `/bin/bash <SCRIPTS_DIR>/asr_run.sh <script>
+# ...` (asr_cmd), which verifies asr_venv.manifest (interpreter, stdlib, venv) from outside python and execs the pinned python with
+# -I -S -B under env -i; finalize knows no interpreter or venv path of the chain.  timing_defects.py (stdlib only, not a launcher
+# script) runs under finalize's OWN interpreter: sys.executable DEFECTS_FLAGS (-S: no site-packages, so it cannot pick up a
+# third-party module).  Every child gets asr_env() (= asr_transcribe.minimal_env, built from scratch, never os.environ).
+ASR_SETUP_HINT = 'run `bash %s/scripts/setup_asr_venv.sh` — a human, not the agent; do not install anything'
+ASR_RUN = SCRIPTS_DIR / 'asr_run.sh'       # the launcher of the certified checkout; tests point this seam at a fake launcher FILE
+SYSTEM_BASH = '/bin/bash'                  # never a bash from $PATH
+DEFECTS_FLAGS = ('-I', '-S', '-B', '-X', 'pycache_prefix=/var/empty')
+ASR_LANG = 'en_US.UTF-8'                   # = asr_transcribe.ENV_LANG
+ASR_TMPDIR = '/var/empty'                  # = asr_transcribe.ENV_TMPDIR (the chain writes only into its --out / --out-dir)
+# first executable wins, $PATH is never searched (= asr_transcribe.FFMPEG_CANDIDATES and the loop in word_timing.sh): the wav finalize
+# extracts must come from the same ffmpeg binary the chain used (the fingerprint names it)
+CHAIN_FFMPEG_CANDIDATES = ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg')
+CHAIN_CODE_FILES = ('asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'asr_run.sh')   # = asr_transcribe.CODE_FILES (raw `code`)
+# asr_transcribe.PARAMS as raw_asr.json stores it (tuples become lists); a test reads PARAMS from the script source and compares
+ASR_PARAMS = {'language': 'th', 'temperature': [0.0], 'condition_on_previous_text': False, 'word_timestamps': True}
+RAW_ASR_SCHEMA, RAW_ASR_VERSION = 'yt-news-v4-raw-asr', 1
+WAV_RATE = 16000
+# the exact extraction of word_timing.sh step 1 (word_timing.sh:69); measured on the proof avatar 2026-11-13: two extractions were
+# byte-identical (20,713,516 B, 0.72 / 0.40 s), and on the four new-chain audios the result equals raw.audio.wav_sha256 and the
+# chain's own vo16k.wav (0.39 .. 0.71 s each)
+WAV_EXTRACT = ('-v', 'error', '-y', '-i', '{avatar}', '-vn', '-map_metadata', '-1', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+               '-fflags', '+bitexact', '-flags:a', '+bitexact', '{wav}')
+TOOLCHAIN_MSG = 'the transcription toolchain differs from production'
+CHECK_TIMEOUT_MSG = ('timeout: --check did not finish within %d s — re-run when no render / GPU job is running (this is not a content '
+                     'failure)')
+ASR_ENV_CHECK_LIMIT = 120                  # `asr_run.sh asr_transcribe.py --check [--deep]` (environment check, every mode)
+# audio binding of the RAW words (`word-timing` gate).  Silences and the interior margins come from timing_check.py THRESHOLDS
+# (silence_noise_db, silence_min_s, silenceInteriorLeadS, silenceInteriorTrailS, maxInSilenceShare; loaded from its source, never
+# copied).  Rules (lead decision 2026-11-13):
+#   (a) raw words >= BIND_MIN_WORD_S lying inside a silence's interior [start + lead, end - trail]: share <= maxInSilenceShare (0.5 %)
+#   (b) speech gaps / overlong raw words: timing_defects.py raw rules (raw-gap, raw-word-too-long; it gets --wav), no rule here
+#   (c) speech (outside the silences) before the first raw word and after the last <= BIND_EDGE_SPEECH_MAX_S
+# Measured on the four new-chain audios (V261111 647 s, clip2 337 s, V261110_002 418 s, V261110_001 496 s): (a) 0 of 4133 / 2223 /
+# 2528 / 3365 words = 0.000 % (the LITERAL "wholly inside a silence" gave 0.80 .. 1.86 %: every hit lay within 0.4 s of a silence
+# edge); (c) before 0.00 s on all four, after 0.18 / 0.46 / 0.29 / 0.14 s.  Negatives: all raw times +1.0 s -> (a) 1.16 .. 3.28 %,
+# (c) 1.00 s before; the raw of another audio -> (a) 1.03 .. 2.73 %.
+BIND_MIN_WORD_S = 0.05
+BIND_EDGE_SPEECH_MAX_S = 0.75
 # music-presence gate (fresh, on renders/final.mp4): the mean volume of the final file just after the voice ends.
 # Measured on real files, window voEnd+0.5 ... +2.5 s (ffmpeg volumedetect mean_volume): four finals WITH music -27.3, -27.6,
 # -29.4, -29.5 dB; a correct mix whose window falls on the fading last 2 s of the LOOPED approved bed -56.1, -60.9, -61.8 dB (worst
@@ -94,6 +174,36 @@ MUX_BED_VOLUME = 0.22
 MUX_RECEIPT_VERSION = 2                    # mux receipts carry total / vo_end / bed_volume since version 2
 MUX_EPISODE_TOLERANCE = 0.01
 MUSIC_PRESENCE_END_MARGIN = 0.1           # the window stops this far before the end of the file
+# mux-audio (fresh gate): the AUDIO of the final is rebuilt from the avatar + the bed + episode total/voEndSec exactly as mux_av.sh
+# does (mix graph below, loudnorm pass 1 -> linear pass 2, AAC 192k) and compared with the final's audio.  Measured on the proof run
+# V261111_001 (2026-11-13, ffmpeg 8.1.1): two rebuilds were BYTE-IDENTICAL to the final's audio stream (decoded residual 0, the SNR
+# clamp 360.8 dB); negatives: bed volume 0.30 -> 28.79 dB, 0.50 -> 18.55 dB, voice shifted +40 ms -> -2.97 dB, +500 ms -> -2.99 dB.
+# 60 dB sits far above every negative; an honest mux with the same ffmpeg reproduces bit for bit (a different ffmpeg build may not:
+# then the gate fails closed and names the ffmpeg version).
+MUX_AUDIO_MIN_SNR_DB = 60.0
+MUX_AUDIO_MAX_LENGTH_DIFF = 2048          # samples per channel (a few AAC frames); the rebuilt and the final audio must be this close
+# mux_av.sh's filter graph with ${TOTAL} ${VO_END} ${VOL} as placeholders (a test reads the script and compares the text)
+MUX_GRAPH = ('[0:a]apad=whole_dur=${TOTAL},asplit=2[vo][sc];[1:a]atrim=0:${TOTAL},afade=t=in:st=0:d=1.5,afade=t=out:st=${VO_END}:d=4.2,'
+             'volume=${VOL}[bed];[bed][sc]sidechaincompress=threshold=0.02:ratio=5:attack=40:release=600:makeup=1[duck];'
+             '[vo][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]')
+MUX_LOUDNORM = 'loudnorm=I=-14:TP=-1.5:LRA=20'
+# cuts (fresh gate): every clip the episode shows is bound to _cuts.json by bytes AND by picture.  Picture check, for EVERY footage
+# beat at three points of the range the episode really shows (one frame early in the clip would let an agent splice other footage
+# in after it and show that part with a later `from`): clip time p = from + CUT_EDGE_SEC, the middle, from + shown - CUT_EDGE_SEC,
+# where shown = min(next beat t - t, the clip's usable length) and the usable length is the engine's
+# L = max(1, floor((brollDur - from) * fps) - 2) frames (YtNewsStyle01V4.tsx Footage: source clips never loop, they hold the last
+# frame); a range of <= 2 x CUT_EDGE_SEC is checked at its middle only.  The grey CUT_THUMB thumbnail (area-scaled) of the staged
+# clip at p vs every source frame in [source_in + p + WINDOW_LO, source_in + p + WINDOW_HI]; distance = the smallest mean absolute
+# difference (0..255).  The window is needed because cut_clips.sh resamples to 25 fps: the clip frame at t is the source frame 1-2
+# frames (33-67 ms) earlier.  Measured on the proof run V261111_001 (VP9 1080p30 source, 2026-11-13): phase A (28 clips, one frame
+# at 1.0 s) true 0.01 .. 0.23, false (source_in +/- 10 s) >= 5.15; phase B (44 footage beats x 3 points = 132 frames) true max
+# 0.13 / 0.26 / 0.26 at from+0.5 / middle / end-0.5, false min 3.57 / 2.30 / 3.06 (all three lowest: yt_studio_ui, a nearly static
+# screen).  1.5 sits 5.8x above the worst true and 1.5x below the closest false distance.  Wall time of the 132 checks: 10.9 s (4 threads).
+CUT_EDGE_SEC = 0.5
+CUT_WINDOW_LO, CUT_WINDOW_HI = -0.30, 0.20
+CUT_THUMB = (64, 36)
+CUT_PICTURE_MAX_DIFF = 1.5
+CUT_WORKERS = 4
 
 # =================================================================================================================
 # CONTRACT with the other team's scripts (CF-A66, commit 5fe7699).  EVERY field / flag name of those scripts that
@@ -108,8 +218,12 @@ LAYOUT_REPORT_SCHEMA = 'yt-news-layout-report'
 LAYOUT_REPORT_VERSION = 3
 # -- qc_manifest.mjs : run manifest + manifestHash() (we call the JS function; canonical JSON is NOT re-implemented).
 #    sourceHashes keys used: episode.json, captions.json, scripts/gates.lock.json, src/YtNewsStyle01V4.tsx (ENGINE_REL),
-#    src/ytNewsStyle01V4.entry.tsx (ENTRY_REL); the other keys (import closure files, assets references, scripts/qc_*, the
-#    package-lock) are covered by the hash itself
+#    src/ytNewsStyle01V4.entry.tsx (ENTRY_REL) are re-hashed here in Python; in addition (CF-A67) the WHOLE sourceHashes object must
+#    equal computeSourceHashes() run fresh on the running checkout (qc_manifest.mjs: import closure, assets references, scripts/qc_*,
+#    the package-lock, ...), and mediaDigest / fontsDigest must equal digestDir() (media_digest.mjs) of <public>/<assetDir> and
+#    <public>/fonts computed fresh WITHOUT a hash cache (qc/layout/cache/media-hash.json and every other cache are never read: a cache
+#    entry is keyed by size/mtime/inode and an agent can make it lie).  The render receipt's mediaDigest / fontsDigest /
+#    mediaDigestMethod must equal the same fresh digests.
 RUN_MANIFEST_SCHEMA = 'yt-news-v4-run-manifest'
 QC_MANIFEST_SCRIPT = 'qc_manifest.mjs'
 MANIFEST_KEY_EPISODE = 'episode.json'            # keys of manifest.sourceHashes (computeSourceHashes)
@@ -145,8 +259,22 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    ("tool-missing", exit 4) or an empty / failing list ("required-external-unavailable", exit 3) fail closed too.
 # -- lint_content.py : --captions (same file as the schema gate) and --evidence / --frames-report / --source-timed (optional;
 #    lint itself reports evidence-missing, window-evidence-unavailable, cue-mismatch when a source beat lacks them, so passing
-#    what exists never hides an error)
-# -- frame_checks.py cutaways : --media-root <composer>/public/<assetDir>/broll (the files the render really uses)
+#    what exists never hides an error).  --relevance is NOT passed (CF-A67): artifacts/relevance.json is evidence for nothing
+#    (stock / AI footage is never allowed in unattended mode, lint_content fails every non-source footage beat:
+#    stock-not-allowed); finalize only records its presence + sha256 (`relevance` in check.json / the receipt, RELEVANCE_NOTE).
+# -- frame_checks.py cutaways : --media-root <public>/<assetDir>/broll (the files the render really uses); no --cache-dir (the OCR
+#    program is compiled into a private temp dir on every run, never taken from a cache)
+# -- face_box.py (CF-A67 W4) : `check --avatar <avatar> --episode <episode.json> --report <report>`, exit 0 pass / 1 fail / 2 usage /
+#    4 tool failure or its 120 s limit; report {schema yt-news-v4-face-box, avatar_sha256, frames, verdict {pass, face_box, min_share,
+#    frames_with_face, recommended, ...}}.  The `face-box` gate also requires verdict.face_box == episode.avatarFaceBox (read here)
+#    and avatar_sha256 == the avatar finalize hashed itself.  "cannot measure" is never a pass (face_box exits 1 or 4).
+# -- cut_manifest.py / broll_plan.cut_record : _cuts.json {"clips": {<src>: {origin, source_sha256, source_in, source_out, path,
+#    sha256, duration, ...}}}; sha256 = the cut clip file, source_sha256 = the source video.  The `cuts` gate binds every footage
+#    beat's staged clip (<public>/<assetDir>/broll/<src>.mp4) to it: sha256(staged) == sha256, source_sha256 == sha256(<project>/
+#    assets/ytsource/source.mp4), and the picture check (CUT_* constants) proves, at three points of every footage beat's SHOWN range,
+#    that the clip shows the source at source_in + clip time (source_in also steers the source-transcript window the content lint
+#    reads).  episode.json `from` (default 0), `brollDur` and `fps` are read as the engine reads them.  cut_record's source_path /
+#    path are never used.
 # -- timing_check.py : --audio <avatar media the words were measured on> --words <words_by_line.txt> --line-starts
 #    <line_starts.json> --srt <project>/assets/avatar.srt (required here: without --srt the `srt-copied` check would not
 #    run); exit 0/1/2/4
@@ -154,9 +282,29 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 # -- words_by_line.py <pages> <script> (stdout) / line_starts.py --pages P --script S --out O / caption_join.mjs
 #    --tokens P --script S --options <caption-options.json> --out O : the commands of SKILL step 2, re-run by the
 #    `derived` gate; their outputs must be byte-identical to the artifacts
-# -- word_timing.sh : leaves <word_timing dir>/word_timing.done.json {key, output, output_sha256, model, ...}; output_sha256
-#    is the sha256 of caption_pages.json.  `key` hashes (audio sha, script sha, tool id, model, args): the audio hash alone is
-#    NOT recorded, so the audio binding is only checked statistically by the timing gate
+# -- word timing chain (word_timing.sh -> asr_run.sh -> asr_transcribe.py -> asr_align.py; timing_defects.py), CF-A67 phases B/C.
+#    Invocation: `/bin/bash <SCRIPTS_DIR>/asr_run.sh <asr_transcribe.py|asr_align.py> ...` (asr_cmd) under asr_env() = {HOME passwd,
+#    PATH <chain ffmpeg dir>:/usr/bin:/bin, LANG en_US.UTF-8, TMPDIR /var/empty} (= asr_transcribe.minimal_env).  The launcher
+#    re-execs itself under env -i, verifies asr_venv.manifest (interpreter, stdlib, venv site-packages) with root-owned tools,
+#    exit 4 + the first differing file on a mismatch, then execs the pinned python -I -S -B with the manifest marker; started any
+#    other way, asr_transcribe / asr_align refuse with exit 4.  It runs ONLY its CHAIN_SCRIPTS: timing_defects.py (stdlib only)
+#    is run by finalize as `sys.executable -I -S -B -X pycache_prefix=/var/empty <SCRIPTS_DIR>/timing_defects.py ...` (defects_cmd).
+#    * <dir>/raw_asr.json (word_raw) {schema yt-news-v4-raw-asr, version 1, audio {wav_sha256, duration = samples / 16000},
+#      script_sha256 (sha256 of script.txt's bytes), params, code {asr_transcribe.py, asr_align.py, timing_defects.py, asr_run.sh},
+#      <fingerprint keys>, rungs, segments [{start, end, text, compression_ratio, ..., words [{word, start, end}]}]}: no clock
+#      values, same input -> same bytes.  The fingerprint is whatever `asr_transcribe.py --fingerprint` prints (an opaque nested
+#      dict, compared leaf by leaf with compare_fingerprint(), a copy of asr_transcribe.compare_fingerprint that a test checks
+#      against the script's source; finalize runs under the project venv and must not import asr_transcribe).  Its keys are the
+#      keys of the CURRENT --fingerprint output (none hard-coded here); the recorded value of each is raw[key] (`venv` =
+#      {manifest_sha256, python}: another manifest = another toolchain).
+#    * `asr_transcribe.py --check` exit 0 / 4 (manifest, model cache, pins; loads nothing) = the `word-timing` environment check,
+#      every mode; finalize --check adds `--deep` (sha256 of the ~3 GB weights content, ~10 s); `--fingerprint` exit 0 (JSON on
+#      stdout) / 4; `--wav W --script S --out-dir D` exit 0 / 2 / 4 / 5 (ladder exhausted,
+#      DEFECT lines) -- only the `asr-recheck` gate (--check) runs it, in a NEW EMPTY dir.
+#    * `asr_align.py --raw R --script S --out O` exit 0 / 2 / 4: pure, byte-identical pages for the same raw + script.
+#    * `timing_defects.py --pages P --raw R --wav W --report O` exit 0 none / 1 defects (report `defects` [{code, start, end,
+#      token, value, limit}]) / 2 usage or unreadable input.
+#    * word_timing.done.json: progress information only (in SELF_REPORTED), never read.
 # -- mux_av.sh (ours) : <final>.mux.json {visual, avatar, bed, final: {path (absolute), sha256}}; the video is stream-copied
 #    (-c:v copy) so the video packets of final.mp4 must equal those of visual.mp4.  The V4 render is yuv420p + bt709
 #    (ENCODER in render_episode.mjs): ffprobe pix_fmt of BOTH files must be yuv420p; pix_fmt / color_space / color_range of the
@@ -164,8 +312,9 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 # -- frame_checks.py cutaways : needs swift/swiftc (Vision OCR); without it the command exits 4 ("OCR is never skipped
 #    silently"), and finalize refuses to start without `swift` on PATH (REQUIRED_TOOLS)
 # -- environment_checks() : tools, python modules, composer packages, fonts, gate lock are checked first by a real run, by
-#    `--check` and by `--preflight` (same function).  ONE intentional difference: `word-timing` (venv / extractor / cached
-#    whisper model of word_timing.sh) is `--preflight`-only; finalize never runs word_timing.sh.
+#    `--check` and by `--preflight` (same function), `word-timing` (`asr_run.sh asr_transcribe.py --check`, `--check --deep` under
+#    finalize --check) included: a delivery runs asr_align.py through the launcher and --check transcribes.  ONE intentional
+#    difference: `music-library` is `--preflight`-only.  finalize never runs word_timing.sh.
 # -- fetch_broll.py --music : <bed>.source.json {schema "yt-news-v4-music-source", provider, track_id, track_title, url,
 #    query, sha256, fetched_at}; sha256 must equal the bed file's sha256.  The music bed is checked INSIDE THE `mux` RECORD
 #    (there is no separate `music` record: every failure below is reported as `mux` / status `stale` / exit 2, in its reason).
@@ -198,7 +347,13 @@ RENDER_RECEIPT_SCHEMA = 'yt-news-v4-render-receipt'
 #    mux_av.sh takes exactly 6 arguments (the bed volume is the constant VOL=0.22 in the script).  verify_mux_receipt requires
 #    version 2, bed_volume == MUX_BED_VOLUME, |vo_end - episode voEndSec| <= 0.01 and |total - episode totalDurationSec| <= 0.01;
 #    a missing field (an older receipt) or a mismatch fails the `mux` record (stale, exit 2): run mux_av.sh again.
-# -- music-library (`--preflight` ONLY, like word-timing; a real run and --check do not run it): at least one track of
+# -- mux-audio (fresh gate, CF-A67): re-runs the audio half of mux_av.sh into <reports>/mux-audio/ (MUX_GRAPH with the EPISODE's
+#    totalDurationSec / voEndSec and MUX_BED_VOLUME, `-ar 48000 -c:a pcm_f32le` mix.wav, MUX_LOUDNORM pass 1 parsed with
+#    parse_loudnorm (a mirror of measure_loudness.parse_loudnorm, a test compares), linear pass 2, `-c:a aac -ar 48000 -b:a 192k`) from the avatar and the bed file the mux receipt
+#    names (it must be a regular file under <project>/assets/audio; its provenance is the `mux` record's job), then compares: audio
+#    streamhash equal = pass, else decoded PCM SNR >= MUX_AUDIO_MIN_SNR_DB.  It proves the final's audio IS that mix (bed volume, fade,
+#    voice timing); a receipt that claims 0.22 while the mix used another volume fails here.  mix.wav (~250 MB) is deleted afterwards.
+# -- music-library (`--preflight` ONLY; a real run and --check do not run it): at least one track of
 #    scripts/music_library.json must be usable (music_library.check_library status "ok").  The online source (Pixabay) is
 #    refused at the time of writing, so the library is the one music source every run can rely on; failing at step 0 is
 #    cheaper than failing at the music step an hour in.  Empty / invalid manifest or no usable file = exit 4 class.
@@ -213,7 +368,8 @@ DEFAULT_PATHS = {
     'srt': 'assets/avatar.srt',                          # required: vendor SRT (script rebuild + srt-copied check)
     'words': 'artifacts/words_by_line.txt',
     'line_starts': 'artifacts/line_starts.json',
-    'word_pages': 'artifacts/word_timing/caption_pages.json',   # required, not overridable: raw word timing
+    'word_pages': 'artifacts/word_timing/caption_pages.json',   # required, not overridable: asr_align.py output (re-derived)
+    'word_raw': 'artifacts/word_timing/raw_asr.json',           # required, not overridable: asr_transcribe.py output (the raw words)
     'caption_options': 'artifacts/caption-options.json',        # required, not overridable: only endTime/lexicalOverrides
     'captions': 'artifacts/caption-joined.json',
     'cuts': 'artifacts/_cuts.json',
@@ -221,34 +377,40 @@ DEFAULT_PATHS = {
     'source_timed': 'assets/ytsource/transcript_timed.json',  # optional (lint_content treats absence as "no timed transcript")
     'evidence': 'artifacts/visual_evidence.json',            # optional (lint_content fails source beats that lack an entry)
     'chapters': 'assets/ytsource/chapters.txt',              # optional
-    'relevance': 'artifacts/relevance.json',                 # optional (absent is allowed)
+    'relevance': 'artifacts/relevance.json',                 # optional; evidence for NOTHING: only its presence + sha256 are recorded
+    'source_video': 'assets/ytsource/source.mp4',            # optional, not overridable: required by the `cuts` gate once a clip is shown
     'layout_report': 'qc/layout/report.json',
     'visual': 'renders/visual.mp4',
     'final': 'renders/final.mp4',
     'reports': 'qc/finalize',
 }
-OPTIONAL_KEYS = {'source_transcript', 'source_timed', 'evidence', 'chapters', 'relevance'}
+OPTIONAL_KEYS = {'source_transcript', 'source_timed', 'evidence', 'chapters', 'relevance', 'source_video'}
 # overridable = inputs the agent (or the fetch step) produces; gate-owned outputs, receipts and the raw timing are never
 OVERRIDABLE = {'script', 'source_script', 'srt', 'words', 'line_starts', 'cuts', 'source_transcript', 'source_timed',
                'evidence', 'chapters'}
 FORBIDDEN_OVERRIDES = set(DEFAULT_PATHS) - OVERRIDABLE
 # derived-from-episode inputs (not path keys): avatar = <composer>/public/<assetDir>/<avatarFile>,
-# word_done = <dir of word_pages>/word_timing.done.json, broll_root = <composer>/public/<assetDir>/broll
+# broll_root = <composer>/public/<assetDir>/broll.  <dir of word_pages>/word_timing.done.json is never an input (SELF_REPORTED).
 
 # -- gate registry (data-driven; long gates first so they start first) -----------------------------------------
 # name, interp ('python'|'node'), script (file in this scripts dir), args (templates; {key} = project path,
 # {report}, {reports}, {vo_end}, {composer}, {public}, {avatar}, {broll_root}, {skill}), optional_args [[flag,key]]
-# (only when the file exists), inputs (required path keys, also hashed into the receipt; 'avatar' and 'word_done' are the
-# derived inputs above), needs (episode values that must be readable), need_dirs (ctx attributes that must be
+# (only when the file exists), inputs (required path keys, also hashed into the receipt; 'avatar' is the derived input
+# above), needs (episode values that must be readable), need_dirs (ctx attributes that must be
 # directories), report (template), limit (s), required, validate (extra validator name), stdout_report (finalize stores
 # the tool's stdout JSON at `report`), pass_key (report key that must be True), exit_classes (extra exit code -> class),
 # after [gate names] (start only when those gates have FINISHED; if one did not pass this gate is 'blocked' with the
 # same exit class and does not run), dep_args [[flag, gate name]] (the report that gate wrote in THIS run),
-# runner (a gate that runs several commands / compares files and writes its own report; scripts = the files it needs).
+# runner (a gate that runs several commands / compares files and writes its own report; scripts = the files it needs),
+# check_only (runs in `--check` only, never in a delivery; such gates run in their own lane, see run()).
 GATES = [
+    dict(name='asr-recheck', runner='asr_recheck', check_only=True,
+         scripts=['asr_transcribe.py', 'asr_align.py', 'timing_defects.py'], optional_args=[],
+         inputs=['avatar', 'word_raw', 'word_pages', 'script'], needs=['asset_dir', 'avatar_file'],
+         report='{reports}/asr-recheck.json', limit=540, required=True),
     dict(name='frames', interp='python', script='frame_checks.py',
          args=['cutaways', '--beats', '{episode}', '--cuts', '{cuts}', '--frames-dir', '{reports}/frames',
-               '--report', '{report}', '--cache-dir', '{reports}/cache', '--media-root', '{broll_root}'],
+               '--report', '{report}', '--media-root', '{broll_root}'],
          optional_args=[], inputs=['episode', 'cuts'], needs=['asset_dir'], need_dirs=['broll_root'],
          report='{reports}/frames.json', limit=150, required=True),
     dict(name='final-av', interp='python', script='final_av_checks.py',
@@ -259,11 +421,20 @@ GATES = [
          args=['{final}', '{reports}/final-pixels', '--vo-end', '{vo_end}'], optional_args=[],
          inputs=['final'], needs=['vo_end'], report='{reports}/final-pixels/final-pixels.json',
          limit=120, required=True, validate='final_pixels'),
+    dict(name='mux-audio', runner='mux_audio', scripts=[], optional_args=[],
+         inputs=['final', 'avatar', 'episode'], needs=['vo_end', 'total'], report='{reports}/mux-audio.json', limit=150, required=True),
     dict(name='loudness', interp='python', script='measure_loudness.py', args=['{final}', '--report', '{report}'],
          optional_args=[], inputs=['final'], needs=[], report='{reports}/final-audio.json',
          limit=60, required=True),
     dict(name='music-presence', runner='music_presence', optional_args=[], inputs=['final', 'avatar'], needs=['vo_end'],
          report='{reports}/music-presence.json', limit=30, required=True),
+    dict(name='face-box', runner='face_box', scripts=['face_box.py', 'face_vision.swift'], optional_args=[],
+         inputs=['episode', 'avatar'], needs=[], report='{reports}/face-box.json', limit=150, required=True),
+    dict(name='cuts', runner='cuts', scripts=[], optional_args=[], inputs=['episode', 'cuts'], needs=[],
+         report='{reports}/cuts.json', limit=60, required=True),
+    dict(name='word-timing', runner='word_timing', scripts=['asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'timing_check.py'],
+         optional_args=[], inputs=['avatar', 'word_raw', 'word_pages', 'script'], needs=['asset_dir', 'avatar_file'],
+         report='{reports}/word-timing.json', limit=120, required=True),
     dict(name='timing', interp='python', script='timing_check.py',
          args=['--audio', '{avatar}', '--words', '{words}', '--line-starts', '{line_starts}', '--srt', '{srt}',
                '--report', '{report}'],
@@ -284,7 +455,7 @@ GATES = [
          args=['--beats', '{episode}', '--script', '{script}', '--words', '{words}', '--line-starts', '{line_starts}',
                '--cuts', '{cuts}', '--captions', '{captions}', '--report', '{report}'],
          optional_args=[['--source-transcript', 'source_transcript'], ['--chapters', 'chapters'],
-                        ['--relevance', 'relevance'], ['--evidence', 'evidence'], ['--source-timed', 'source_timed']],
+                        ['--evidence', 'evidence'], ['--source-timed', 'source_timed']],
          inputs=['episode', 'script', 'words', 'line_starts', 'cuts', 'captions'], needs=[],
          report='{reports}/content.json', limit=60, required=True,
          after=['frames'], dep_args=[['--frames-report', 'frames']]),
@@ -295,11 +466,16 @@ GATES = [
     dict(name='script', runner='script', scripts=['srt_to_script.py'], optional_args=[],
          inputs=['srt', 'source_script', 'script'], needs=[], report='{reports}/script.json', limit=30, required=True),
     dict(name='derived', runner='derived', scripts=['words_by_line.py', 'line_starts.py', 'caption_join.mjs'], optional_args=[],
-         inputs=['word_pages', 'word_done', 'caption_options', 'script', 'words', 'line_starts', 'captions'],
+         inputs=['word_pages', 'caption_options', 'script', 'words', 'line_starts', 'captions'],
          needs=['vo_end'], report='{reports}/derived.json', limit=90, required=True),
 ]
 
 STATUS_BY_CLASS = {1: 'fail', 2: 'bad-input', 3: 'integrity', 4: 'missing'}
+
+
+def active_gates(check):
+    """The fresh gates of this mode: a delivery never runs a check_only gate."""
+    return [g for g in GATES if check or not g.get('check_only')]
 RESTORE_HINT = 'restore the skill files from git HEAD; never edit or regenerate gates.lock.json'
 
 
@@ -511,20 +687,102 @@ class BadInput(Exception):
     pass
 
 
+def first_symlink(path, start=None):
+    """The first component of `path` AS GIVEN (never resolved; a '..' is walked as written) that is a symbolic link (lstat), or None.
+    start: an already-resolved directory `path` lies in lexically; only the components below it are examined.  A component that
+    does not exist ends the walk (nothing below it can be a link)."""
+    parts = Path(path).parts
+    skip = len(Path(start).parts) if start is not None and parts[:len(Path(start).parts)] == Path(start).parts else 1
+    cur = Path(parts[0])
+    for i, part in enumerate(parts[1:], 1):
+        cur = cur / part
+        if i < skip:
+            continue
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            return cur
+    return None
+
+
+def linked_reports(args, repo_root):
+    """True when <project as given>/qc/finalize goes through a symbolic link (nothing may be written there)."""
+    given = Path(args.project)
+    lex = lexical_path(given, repo_root if not given.is_absolute() else os.getcwd()) / DEFAULT_PATHS['reports']
+    return first_symlink(lex, None if given.is_absolute() else Path(repo_root)) is not None
+
+
+def lexical_path(given, base):
+    """`given` made absolute against `base` WITHOUT resolving or normalising it (the path a symlink check must look at)."""
+    p = Path(given)
+    return p if p.is_absolute() else Path(base) / p
+
+
+def symlink_refusal(what, path, start=None):
+    link = first_symlink(path, start)
+    if link is None:
+        return None
+    try:
+        target = os.readlink(link)
+    except OSError:
+        target = '?'
+    return ('%s %s goes through the symbolic link %s -> %s: finalize reads only real directories and files of the project (a link '
+            'could make another project count as this one); pass the real path / copy the file instead' % (what, path, link, target))
+
+
+def project_dir(args, repo_root):
+    p = Path(args.project)
+    return (p if p.is_absolute() else Path(repo_root) / p).resolve()
+
+
+def public_dir(args, repo_root):
+    """The public/ the episode's media come from: --public-root (only with --check) or <repo>/<composer>/public."""
+    if getattr(args, 'public_root', None):
+        return Path(args.public_root).resolve()
+    return (Path(repo_root) / args.composer).resolve() / 'public'
+
+
+def external_check(args, repo_root):
+    """True for the clean-checkout check: --check with --public-root / --work-dir, or a --check project outside the repository.
+    In that mode nothing is written into the project or the public root (reports + check.json go to the work dir)."""
+    if not getattr(args, 'check', False):
+        return False
+    if getattr(args, 'public_root', None) or getattr(args, 'work_dir', None):
+        return True
+    return repo_root is not None and not inside(project_dir(args, repo_root), repo_root)
+
+
 class Ctx:
-    def __init__(self, args, repo_root, deliver, tools=None):
+    def __init__(self, args, repo_root, deliver, tools=None, work_dir=None):
+        """work_dir: the clean-checkout check's output directory (None = reports go to <project>/qc/finalize)."""
         self.repo_root = repo_root
         self.tools = tools or {n: None for n in TOOL_NAMES}
-        p = Path(args.project)
-        self.project = (p if p.is_absolute() else self.repo_root / p).resolve()
+        # B9: no symlink anywhere in the project path as given (below the repo root for a relative one), checked BEFORE resolving
+        given = Path(args.project)
+        lex_project = lexical_path(given, repo_root if not given.is_absolute() else os.getcwd())
+        why = symlink_refusal('--project', lex_project, None if given.is_absolute() else Path(repo_root))
+        if why:
+            raise BadInput(why)
+        self.project = project_dir(args, repo_root)
+        check = bool(getattr(args, 'check', False))
+        if not check and not inside(self.project, repo_root):
+            raise BadInput('--project %s is outside the repository %s: only finalize.py --check accepts a project outside the '
+                           'repository (a delivery reads the media this repository rendered)' % (self.project, repo_root))
         self.comp = COMP
         self.deliver = deliver
         self.hash = Hasher()
-        self.composer = (self.repo_root / args.composer).resolve()
+        self.composer = (self.repo_root / args.composer).resolve()     # code, engine, node_modules: ALWAYS the running checkout
+        self.work_dir = Path(work_dir).resolve() if work_dir else None
+        self.budget = CHECK_TOTAL_BUDGET_SEC if check else TOTAL_BUDGET_SEC
         self.manifest_sha = None
         cfg = dict(DEFAULT_PATHS)
         explicit = set()
         mp = Path(args.manifest).resolve() if args.manifest else self.project / 'artifacts' / 'finalize.json'
+        why = None if args.manifest else symlink_refusal('the path manifest', mp, self.project)
+        if why:
+            raise BadInput(why)
         if args.manifest or mp.is_file():
             data, err = read_json(mp)
             if err or not isinstance(data, dict):
@@ -545,16 +803,32 @@ class Ctx:
             self.manifest_sha = sha256_file(mp)
         self.paths = {}
         for k, v in cfg.items():
+            why = symlink_refusal('%s (%s)' % (k, v), self.project / v, self.project)
+            if why:
+                raise BadInput(why)
             self.paths[k] = (self.project / v).resolve()
             if not inside(self.paths[k], self.project):
                 raise BadInput('%s resolves outside the project: %s' % (k, self.paths[k]))
         for k in explicit & OPTIONAL_KEYS:
             if not self.paths[k].is_file():
                 raise BadInput('manifest sets optional %s but %s does not exist' % (k, self.paths[k]))
-        self.reports = self.paths['reports']
+        # the agent's own qc/finalize/* is never read nor written in the clean-checkout check: its fresh reports live in the work dir
+        self.reports = self.work_dir if self.work_dir else self.paths['reports']
         if self.deliver.suffix.lower() != '.mp4':
             raise BadInput('--deliver must be an .mp4 path')
-        self.public = self.composer / 'public'          # same convention as qc_layout.mjs / render_episode.mjs
+        # same convention as qc_layout.mjs / render_episode.mjs (<composer>/public), or the agent's public/ given by --public-root
+        pr = getattr(args, 'public_root', None)
+        why = (symlink_refusal('--public-root', lexical_path(pr, os.getcwd())) if pr else
+               symlink_refusal('the public root', Path(repo_root) / args.composer / 'public', Path(repo_root)))
+        if why:
+            raise BadInput(why)
+        self.public = public_dir(args, repo_root)
+        if not self.public.is_dir():
+            raise BadInput('the public root %s is not a directory' % self.public)
+        if self.work_dir is not None:
+            for name, d in (('project', self.project), ('public root', self.public)):
+                if inside(self.work_dir, d):
+                    raise BadInput('--work-dir %s is inside the %s %s: the check must not write there' % (self.work_dir, name, d))
         self.ep = {'vo_end': None, 'total': None, 'asset_dir': None, 'avatar_file': None, 'error': None}
         self.avatar = None
         self.broll_root = None
@@ -563,8 +837,11 @@ class Ctx:
             self.broll_root = self.public / self.ep['asset_dir'] / 'broll'
             if self.ep['avatar_file']:
                 self.avatar = self.public / self.ep['asset_dir'] / self.ep['avatar_file']
-        self.word_done = self.paths['word_pages'].parent / 'word_timing.done.json'
-        self.extra = {'avatar': self.avatar, 'word_done': self.word_done}
+        self.word_done = self.paths['word_pages'].parent / 'word_timing.done.json'     # never read (SELF_REPORTED)
+        self.extra = {'avatar': self.avatar}
+        self.word_timing = None             # set by the word-timing gate: {raw: {path, sha256}, fingerprint} for the receipt
+        self._fp_lock = threading.Lock()
+        self._fingerprint = None
 
     def _read_episode(self):
         data, err = read_json(self.paths['episode'])
@@ -615,6 +892,18 @@ ISSUE_CODE_KEYS = ('code', 'rule', 'id', 'kind')
 ISSUE_TEXT_KEYS = ('detail', 'message', 'reason')
 ISSUE_TIME_KEYS = ('startSec', 'start_sec', 't', 'sec', 'time', 'start', 'at')
 ISSUE_COMMAND_KEYS = ('command', 'rerun', 'cmd')
+ISSUE_SEVERITY_KEYS = ('severity', 'level')
+SEVERITY_RANK = {'error': 0, 'fail': 0, 'critical': 0, 'unrated': 1, 'warn': 2, 'warning': 2, 'info': 3, 'note': 3}
+
+
+def issue_severity(it):
+    """-> the lower-case severity of an issue dict, or None."""
+    if not isinstance(it, dict):
+        return None
+    v = next((it[k] for k in ISSUE_SEVERITY_KEYS if isinstance(it.get(k), str) and it[k]), None)
+    return v.lower() if v else None
+
+
 DETAIL_MAX = 300            # free-text details only; a command is never shortened
 OCCURRENCES_SHOWN = 3
 
@@ -647,37 +936,52 @@ def _occurrence(it, skip):
 def summarize_issues(data, limit=3):
     """Console lines for the issues of a report.  An issue with a detail text prints `code: detail (@where)`; issues without
     one are grouped by their code/kind and print the count plus the first few occurrences with all their scalar fields
-    (time and measured values), so a bare `- dips` is never printed.  Commands inside an issue are printed in full."""
+    (time and measured values), so a bare `- dips` is never printed.  Commands inside an issue are printed in full.
+    Severity (ISSUE_SEVERITY_KEYS; an item of an `errors` list without one counts as an error): every line of every list is
+    ranked errors first, then unrated, then warnings / info (file order inside a rank) BEFORE the `limit` cut, and each list that
+    carries severities starts with a count line per severity: a report whose first issues are warnings never hides its errors."""
     out = []
     if not isinstance(data, dict):
         return out
+    heads, lines = [], []                    # lines: (rank, sequence, text)
+    seq = 0
+    skip = set(ISSUE_CODE_KEYS) | set(ISSUE_TEXT_KEYS)
     for key in ('issues', 'errors', 'dips', 'problems'):
         items = data.get(key)
         if not isinstance(items, list):
             continue
-        groups = {}
-        for it in items:
+        sev = [issue_severity(it) or ('error' if key == 'errors' else None) for it in items]
+        if any(issue_severity(it) is not None for it in items):
+            counts = {}
+            for s in sev:
+                counts[s or 'unrated'] = counts.get(s or 'unrated', 0) + 1
+            order = sorted(counts, key=lambda s: (SEVERITY_RANK.get(s, 1), s))
+            heads.append('%s: %s' % (key, ', '.join('%d %s' % (counts[s], s) for s in order)))
+        groups = {}                          # (rank, code) -> (first sequence, [items])
+        for it, s in zip(items, sev):
+            rank = SEVERITY_RANK.get(s or 'unrated', 1)
+            seq += 1
             if not isinstance(it, dict):
-                out.append(str(it)[:DETAIL_MAX])
+                lines.append((rank, seq, str(it)[:DETAIL_MAX]))
                 continue
             code = next((it[k] for k in ISSUE_CODE_KEYS if it.get(k)), key)
             detail = next((it[k] for k in ISSUE_TEXT_KEYS if it.get(k)), '')
             for ck in ISSUE_COMMAND_KEYS:
                 if isinstance(it.get(ck), str) and it[ck]:
-                    out.append('rerun (copy this whole line): %s' % it[ck])
+                    lines.append((rank, seq, 'rerun (copy this whole line): %s' % it[ck]))
             if detail:
                 text = '%s: %s' % (code, str(detail)[:DETAIL_MAX])
                 where = it.get('path') or it.get('beat') or it.get('t') or it.get('start')
                 if where not in (None, ''):
                     text += ' (@%s)' % (where,)
-                out.append(text)
+                lines.append((rank, seq, text))
             else:
-                groups.setdefault(str(code), []).append(it)
-        for code, its in groups.items():
-            skip = set(ISSUE_CODE_KEYS) | set(ISSUE_TEXT_KEYS)
+                groups.setdefault((rank, str(code)), (seq, []))[1].append(it)
+        for (rank, code), (first, its) in groups.items():
             shown = ['[%s]' % _occurrence(it, skip) for it in its[:OCCURRENCES_SHOWN]]
             more = '' if len(its) <= OCCURRENCES_SHOWN else ' ... +%d more' % (len(its) - OCCURRENCES_SHOWN)
-            out.append('%s x%d, first %d: %s%s' % (code, len(its), len(shown), ' '.join(shown), more))
+            lines.append((rank, first, '%s x%d, first %d: %s%s' % (code, len(its), len(shown), ' '.join(shown), more)))
+    out = heads + [t for _, _, t in sorted(lines, key=lambda x: (x[0], x[1]))]
     if not out and isinstance(data.get('error'), str):
         out.append('error: ' + data['error'][:DETAIL_MAX])
     return out[:max(limit, 1)] if limit else out
@@ -835,8 +1139,10 @@ def gate_scripts(gate):
 
 
 def interps_needed(gate):
+    """The tool each gate file runs under (.py: this python, .swift: swift, anything else: node) + the tools a runner calls."""
     scripts = gate_scripts(gate)
-    return {'python' if s.endswith('.py') else 'node' for s in scripts}
+    out = {'python' if s.endswith('.py') else 'swift' if s.endswith('.swift') else 'node' for s in scripts}
+    return out | set(RUNNER_TOOLS.get(gate.get('runner'), ()))
 
 
 def exe_for(ctx, script_name):
@@ -920,29 +1226,14 @@ def check_caption_options(ctx):
     return p, data
 
 
-def check_word_done(ctx):
-    """word_timing.done.json must bind caption_pages.json: output_sha256 == sha256(caption_pages.json)."""
-    data, err = read_json(ctx.word_done)
-    if err or not isinstance(data, dict):
-        return ['%s is %s (word_timing.sh writes it next to caption_pages.json)' % (ctx.rel(ctx.word_done), err or 'not a JSON object')], {}
-    want = data.get('output_sha256')
-    if not valid_sha(want):
-        return ['%s has no output_sha256' % ctx.rel(ctx.word_done)], data
-    if ctx.hash(ctx.paths['word_pages']) != want.lower():
-        return ['%s does not match output_sha256 of %s: caption_pages.json was edited or replaced after word_timing.sh wrote it'
-                % (ctx.rel(ctx.paths['word_pages']), ctx.rel(ctx.word_done))], data
-    return [], data
-
-
 def runner_derived(gate, ctx, base, report, limit, env):
-    """Re-run the commands of SKILL step 2 from the raw word timing; every artifact must be byte-identical."""
+    """Re-run the commands of SKILL step 2 from caption_pages.json (which the `word-timing` gate re-derives from raw_asr.json);
+    every artifact must be byte-identical.  word_timing.done.json is never read."""
     P = ctx.paths
     ddir = ctx.reports / 'derived'
     shutil.rmtree(ddir, ignore_errors=True)
     ddir.mkdir(parents=True, exist_ok=True)
     problems, opts = check_caption_options(ctx)
-    p2, done = check_word_done(ctx)
-    problems += p2
     outs = {'words': ddir / 'words_by_line.txt', 'line_starts': ddir / 'line_starts.json', 'captions': ddir / 'caption-joined.json'}
     steps = [
         ('words_by_line.py', [str(P['word_pages']), str(P['script'])], outs['words']),
@@ -951,9 +1242,7 @@ def runner_derived(gate, ctx, base, report, limit, env):
                               '--out', str(outs['captions'])], None),
     ]
     base['command'] = ' && '.join(shlex.join(exe_for(ctx, n) + a) for n, a, _ in steps)
-    data = {'schema': 'yt-news-v4-derived-check', 'version': 1, 'pass': False, 'captionOptions': opts,
-            'wordTimingDone': {k: done.get(k) for k in ('key', 'model', 'output_sha256')} if isinstance(done, dict) else None,
-            'comparisons': []}
+    data = {'schema': 'yt-news-v4-derived-check', 'version': 2, 'pass': False, 'captionOptions': opts, 'comparisons': []}
     if problems:
         data['problems'] = problems
         return finish_runner(gate, ctx, base, report, data, '; '.join(problems), issues=problems)
@@ -1084,7 +1373,917 @@ def finish_music(gate, ctx, base, report, data, status, cls, reason, extra, out,
     return record(gate, status, cls, reason, extra=extra or None, **b)
 
 
-RUNNERS = {'script': runner_script, 'derived': runner_derived, 'music_presence': runner_music_presence}
+def worst_class(classes):
+    """3 > 4 > 2 > 1 (the exit precedence) of a non-empty iterable of classes."""
+    s = set(classes)
+    return next(c for c in (3, 4, 2, 1) if c in s)
+
+
+def child_out(res):
+    return res['stdout'].decode('utf-8', 'replace')[-3000:] + ('\n' if res['stdout'] and res['stderr'] else '') + res['stderr']
+
+
+def runner_face_box(gate, ctx, base, report, limit, env):
+    """face_box.py check: the presenter's face in the avatar the episode uses must lie inside episode.avatarFaceBox.  The verdict is
+    face_box.py's (measured fresh from the avatar file); finalize additionally binds the report to the avatar bytes it hashed and to
+    the avatarFaceBox it read itself.  Never a pass without a fresh measurement."""
+    avatar, episode = ctx.avatar, ctx.paths['episode']
+    cmd = exe_for(ctx, 'face_box.py') + ['check', '--avatar', str(avatar), '--episode', str(episode), '--report', str(report)]
+    base['command'] = shlex.join(cmd)
+    res = spawn(cmd, ctx, limit, env)
+    b = dict(base, seconds=res['seconds'], out=child_out(res), code=res['code'])
+    if res['cancelled']:
+        return record(gate, 'crashed', 4, 'cancelled: finalize was terminated', **dict(b, code=None))
+    if res['timed_out']:
+        return record(gate, 'timeout', 4, 'timeout: face_box.py exceeded the %.0fs limit of the gate' % limit, **dict(b, code=None))
+    code = res['code']
+    stdout = [ln for ln in res['stdout'].decode('utf-8', 'replace').splitlines() if ln.strip()]
+    errline = (res['stderr'].strip().splitlines() or [''])[-1][:300]
+    data = None
+    if report.is_file() and report.stat().st_mtime_ns >= res['start_ns'] - STALE_TOLERANCE_NS:
+        data, _err = read_json(report)
+    verdict = data.get('verdict') if isinstance(data, dict) else None
+    # (the verdict's own `reason` goes in as verdict_reason: the record's `reason` is finalize's sentence)
+    extra = (dict({k: verdict.get(k) for k in ('min_share', 'frames_with_face', 'threshold', 'recommended')},
+                  verdict_reason=verdict.get('reason')) if isinstance(verdict, dict) else None)
+    if code < 0:
+        return record(gate, 'crashed', 4, 'face_box.py was killed by signal %d' % -code, **b)
+    if code == 4:
+        return record(gate, 'missing', 4, 'face_box.py could not measure the avatar (tool failure or its time limit): %s' % errline, **b)
+    if code == 2:
+        return record(gate, 'bad-input', 2, 'face_box.py refused its input: %s' % errline, **b)
+    if code == 1:
+        why = next((ln for ln in stdout if ln.startswith('face-box FAIL')), 'face-box FAIL (exit 1)')
+        return record(gate, 'fail', 1, why, issues=[ln for ln in stdout if not ln.startswith('face-box FAIL')][:6], extra=extra, **b)
+    if code != 0:
+        return record(gate, 'crashed', 4, 'face_box.py exited with unexpected code %d' % code, **b)
+    probs = []
+    if not isinstance(data, dict):
+        probs.append((2, 'face_box.py exited 0 but wrote no fresh report at %s' % ctx.rel(report)))
+    else:
+        if data.get('schema') != 'yt-news-v4-face-box':
+            probs.append((2, 'face-box report schema is %r' % data.get('schema')))
+        if not (isinstance(verdict, dict) and verdict.get('pass') is True):
+            probs.append((1, 'face-box report verdict.pass != true'))
+        if data.get('avatar_sha256') != ctx.hash(avatar):
+            probs.append((2, 'face-box report was measured on another file than the avatar %s (avatar_sha256 differs)' % ctx.rel(avatar)))
+        ep_box = (read_json(episode)[0] or {}).get('avatarFaceBox')
+        if not isinstance(verdict, dict) or verdict.get('face_box') != ep_box:
+            probs.append((2, 'face-box report checked another box than episode.json avatarFaceBox'))
+    if probs:
+        cls = worst_class(c for c, _ in probs)
+        return record(gate, STATUS_BY_CLASS[cls] if cls != 2 else 'stale', cls, '; '.join(m for _, m in probs), extra=extra, **b)
+    b['inputs'] = dict(base['inputs'])
+    b['inputs'][ctx.rel(report)] = ctx.hash(report)
+    return record(gate, 'pass', 0, '', extra=extra, **b)
+
+
+def footage_srcs(episode_path):
+    """The src of every beat that shows a footage file (media broll / clip), in first-use order -- the same selection as
+    frame_checks.py cutaways.  -> (srcs, error)"""
+    data, err = read_json(episode_path)
+    beats = data.get('beats') if isinstance(data, dict) else data if isinstance(data, list) else None
+    if err or not isinstance(beats, list):
+        return None, 'episode.json is %s' % (err or 'not an episode (no beats list)')
+    out = []
+    for b in beats:
+        if isinstance(b, dict) and b.get('media') in ('broll', 'clip') and isinstance(b.get('src'), str) and b['src'] and b['src'] not in out:
+            out.append(b['src'])
+    return out, None
+
+
+def gray_frames(ctx, env, path, start, duration, timeout):
+    """Grey CUT_THUMB thumbnails (area-scaled) decoded by ffmpeg: ONE frame at `start` (duration None) or every frame of
+    [start, start + duration].  -> (frames, error, class)"""
+    w, h = CUT_THUMB
+    cmd = [ctx.tools.get('ffmpeg'), '-nostdin', '-v', 'error', '-ss', '%.3f' % max(start, 0.0), '-i', str(path)]
+    cmd += ['-frames:v', '1'] if duration is None else ['-t', '%.3f' % duration]
+    cmd += ['-an', '-vf', 'scale=%d:%d:flags=area,format=gray' % (w, h), '-f', 'rawvideo', '-']
+    res = spawn(cmd, ctx, max(min(timeout, 60), 1), env)
+    if res['cancelled']:
+        return None, 'cancelled: finalize was terminated', 4
+    if res['timed_out']:
+        return None, 'ffmpeg timed out decoding %s' % ctx.rel(path), 4
+    if res['code'] != 0:
+        return None, 'ffmpeg cannot decode %s at %.2f s: %s' % (ctx.rel(path), start, tail(res['stderr'], 200).strip()), 2
+    n, raw = w * h, res['stdout']
+    return [raw[i:i + n] for i in range(0, len(raw) - n + 1, n)], None, 0
+
+
+def picture_distance(clip_frame, source_frames):
+    """Smallest mean absolute grey difference (0..255) between the clip frame and any of the source frames."""
+    n = len(clip_frame)
+    return min(sum(abs(a - b) for a, b in zip(clip_frame, f)) / n for f in source_frames)
+
+
+def shown_points(episode_path):
+    """Every footage beat with the clip times the cuts gate checks: from + CUT_EDGE_SEC, the middle, from + shown - CUT_EDGE_SEC of
+    the range the engine shows (Footage in YtNewsStyle01V4.tsx: trimBefore = round(from * fps), a source clip holds its last frame
+    after L = max(1, floor((brollDur - from) * fps) - 2) frames; the beat lasts until the next beat's t, the last one until
+    totalDurationSec).  -> ([{beat, t, src, from, shown, points}], error)"""
+    data, err = read_json(episode_path)
+    if err or not isinstance(data, dict) or not isinstance(data.get('beats'), list):
+        return None, 'episode.json is %s' % (err or 'not an episode (no beats list)')
+    beats, fps, dur, total = data['beats'], data.get('fps'), data.get('brollDur'), data.get('totalDurationSec')
+    if not (is_num(fps) and fps > 0 and is_num(total)):
+        return None, 'episode.json has no valid fps / totalDurationSec'
+    out = []
+    for i, b in enumerate(beats):
+        if not (isinstance(b, dict) and b.get('media') in ('broll', 'clip') and isinstance(b.get('src'), str) and b['src']):
+            continue
+        src, fr = b['src'], b.get('from', 0)
+        nxt = next((x.get('t') for x in beats[i + 1:] if isinstance(x, dict)), total)
+        clip = dur.get(src) if isinstance(dur, dict) else None
+        if not (is_num(fr) and fr >= 0 and is_num(b.get('t')) and is_num(nxt) and is_num(clip) and clip > 0):
+            return None, 'beat %d (%s) has no valid t / from / next t / brollDur[%s]' % (i, src, src)
+        usable = max(1, math.floor((clip - fr) * fps) - 2) / fps
+        shown = min(nxt - b['t'], usable)
+        if shown <= 0:
+            return None, 'beat %d (%s) shows nothing (t %s, next %s)' % (i, src, b['t'], nxt)
+        pts = ([fr + CUT_EDGE_SEC, fr + shown / 2, fr + shown - CUT_EDGE_SEC] if shown > 2 * CUT_EDGE_SEC else [fr + shown / 2])
+        out.append({'beat': i, 't': b['t'], 'src': src, 'from': fr, 'shown': round(shown, 3), 'points': [round(p, 3) for p in pts]})
+    return out, None
+
+
+def runner_cuts(gate, ctx, base, report, limit, env):
+    """Every clip the episode shows is bound to artifacts/_cuts.json (see the CONTRACT comment): bytes of the staged clip and of the
+    project's source video, and the picture at three points of every footage beat's shown range.  Without a footage beat there is
+    nothing to bind (pass, recorded)."""
+    started = time.monotonic()
+    P = ctx.paths
+    data = {'schema': 'yt-news-v4-cuts-check', 'version': 2, 'pass': False, 'threshold': CUT_PICTURE_MAX_DIFF,
+            'edgeSec': CUT_EDGE_SEC, 'window': [CUT_WINDOW_LO, CUT_WINDOW_HI], 'thumbnail': list(CUT_THUMB), 'clips': [], 'pictures': []}
+    probs = []                                   # (class, message)
+
+    def done():
+        data['seconds'] = round(time.monotonic() - started, 2)
+        if probs:
+            data['problems'] = [m for _, m in probs]
+            cls = worst_class(c for c, _ in probs)
+            write_json_atomic(report, data)
+            b = dict(base, seconds=data['seconds'])
+            b['inputs'] = dict(base['inputs'])
+            b['inputs'][ctx.rel(report)] = ctx.hash(report)
+            msgs = [m for _, m in probs]
+            reason = '; '.join(msgs[:4]) + (' ... (+%d more, see %s)' % (len(msgs) - 4, ctx.rel(report)) if len(msgs) > 4 else '')
+            return record(gate, {1: 'fail', 2: 'stale', 4: 'missing'}.get(cls, 'fail'), cls, reason, issues=msgs[:12], **b)
+        data['pass'] = True
+        return finish_runner(gate, ctx, dict(base, seconds=data['seconds']), report, data, '')
+
+    srcs, err = footage_srcs(P['episode'])
+    if err:
+        probs.append((2, err))
+        return done()
+    data['footageBeats'] = len(srcs)
+    if not srcs:
+        data['note'] = 'no beat shows a footage file: nothing to bind'
+        return done()
+    if not ctx.tools.get('ffmpeg'):
+        return record(gate, 'missing', 4, 'ffmpeg not found on PATH', **base)
+    cuts, err = read_json(P['cuts'])
+    clips = cuts.get('clips') if isinstance(cuts, dict) else None
+    if err or not isinstance(clips, dict):
+        probs.append((2, '%s is %s: cut_clips.sh writes it (cut_manifest.py) for every clip it cuts'
+                      % (ctx.rel(P['cuts']), err or 'not a cuts file ({"clips": {...}})')))
+        return done()
+    src_video = P['source_video']
+    if not src_video.is_file():
+        probs.append((2, 'the source video %s is missing: every shown clip must be cut from it' % ctx.rel(src_video)))
+        return done()
+    src_sha = ctx.hash(src_video)
+    data['sourceVideo'] = {'path': ctx.rel(src_video), 'sha256': src_sha}
+    again = 're-cut it with cut_clips.sh from %s and stage it again' % ctx.rel(src_video)
+    jobs, bound = [], {}
+    for src in srcs:
+        staged = ctx.broll_root / (src + '.mp4') if ctx.broll_root is not None else None
+        rec = clips.get(src)
+        entry = {'src': src, 'staged': ctx.rel(staged) if staged else None}
+        data['clips'].append(entry)
+        if staged is None or not staged.is_file():
+            probs.append((2, 'clip %s: the staged file %s is missing' % (src, entry['staged'] or '<public>/<assetDir>/broll/%s.mp4' % src)))
+            continue
+        entry['stagedSha256'] = ctx.hash(staged)
+        if not isinstance(rec, dict):
+            probs.append((2, 'clip %s has no record in %s: only clips cut from the source video may be shown; %s' % (src, ctx.rel(P['cuts']), again)))
+            continue
+        entry['cutSha256'], entry['sourceSha256'] = rec.get('sha256'), rec.get('source_sha256')
+        if not (valid_sha(rec.get('sha256')) and rec['sha256'].lower() == entry['stagedSha256']):
+            probs.append((2, 'clip %s: %s is not the file _cuts.json recorded (sha256 differs); %s' % (src, entry['staged'], again)))
+        if not (valid_sha(rec.get('source_sha256')) and rec['source_sha256'].lower() == src_sha):
+            probs.append((2, 'clip %s: _cuts.json says it was cut from another file than %s (source_sha256 differs); %s'
+                          % (src, ctx.rel(src_video), again)))
+        s_in = rec.get('source_in')
+        if not (is_num(s_in) and s_in >= 0):
+            probs.append((2, 'clip %s: _cuts.json has no valid source_in' % src))
+            continue
+        entry['sourceIn'] = s_in
+        bound[src] = (entry, staged, float(s_in))
+    shown, err = shown_points(P['episode'])
+    if err:
+        probs.append((2, err))
+        return done()
+    for sb in shown:
+        if sb['src'] in bound:
+            entry, staged, s_in = bound[sb['src']]
+            for k, p in enumerate(sb['points']):
+                jobs.append((entry, staged, s_in, sb, k, p))
+
+    def picture(job):
+        entry, staged, s_in, sb, k, p = job
+        where = 'beat %d (t %s, from %s, shows %.2f s)' % (sb['beat'], sb['t'], sb['from'], sb['shown'])
+        left = limit - (time.monotonic() - started)
+        frames, e, c = gray_frames(ctx, env, staged, p, None, left)
+        if e:
+            return (c, 'clip %s, %s: %s' % (entry['src'], where, e)), None
+        if not frames:
+            return (2, 'clip %s, %s: no frame at %.2f s of %s (shorter than the shown range?)' % (entry['src'], where, p, entry['staged'])), None
+        at = s_in + p
+        seg, e, c = gray_frames(ctx, env, src_video, at + CUT_WINDOW_LO, CUT_WINDOW_HI - CUT_WINDOW_LO, limit - (time.monotonic() - started))
+        if e:
+            return (c, 'clip %s, %s: %s' % (entry['src'], where, e)), None
+        if not seg:
+            return (1, 'clip %s, %s: the source video has no picture at source_in + %.2f s = %.2f s: source_in %s is wrong; %s'
+                    % (entry['src'], where, p, at, s_in, again)), None
+        d = picture_distance(frames[0], seg)
+        pic = {'src': entry['src'], 'beat': sb['beat'], 'point': k, 'clipSec': p, 'distance': round(d, 3), 'sourceFrames': len(seg),
+               'sourceWindow': [round(max(at + CUT_WINDOW_LO, 0), 3), round(at + CUT_WINDOW_HI, 3)]}
+        if d > CUT_PICTURE_MAX_DIFF:
+            return (1, 'clip %s, %s, does not show the source video: picture distance %.2f > %.1f between %s at %.2f s and the source '
+                    'around source_in %s + %.2f s = %.2f s (other footage spliced into the clip, or source_in is wrong); %s'
+                    % (entry['src'], where, d, CUT_PICTURE_MAX_DIFF, entry['staged'], p, s_in, p, at, again)), pic
+        return None, pic
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CUT_WORKERS) as ex:
+        for prob, pic in ex.map(picture, jobs):
+            if pic:
+                data['pictures'].append(pic)
+            if prob:
+                probs.append(prob)
+    data['pictureChecks'] = len(jobs)
+    if time.monotonic() - started > limit:
+        probs.append((4, 'timeout: the cuts gate exceeded its %.0fs limit' % limit))
+    return done()
+
+
+LOUDNORM_KEYS = ('input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset')
+
+
+def parse_loudnorm(text):
+    """The loudnorm JSON of an ffmpeg stderr -> {input_i, ...} floats: the LAST complete object, exactly like
+    measure_loudness.parse_loudnorm (which mux_av.sh uses to build its pass-2 filter; a test compares both on real ffmpeg output).
+    Mirrored, not imported, because the `loudness` gate script must stay replaceable on its own.  Raises ValueError."""
+    for raw in reversed(re.findall(r'\{[^{}]*\}', text)):
+        try:
+            d = json.loads(raw)
+            out = {k: float(d[k]) for k in LOUDNORM_KEYS}
+            if not all(math.isfinite(v) for v in out.values()):
+                raise ValueError('nonfinite loudness / silent audio')
+            return out
+        except (KeyError, TypeError, json.JSONDecodeError):
+            continue
+    raise ValueError('missing complete loudnorm JSON / no audio')
+
+
+def mux_graph(total, vo_end, volume):
+    return MUX_GRAPH.replace('${TOTAL}', repr(float(total))).replace('${VO_END}', repr(float(vo_end))).replace('${VOL}', repr(float(volume)))
+
+
+def runner_mux_audio(gate, ctx, base, report, limit, env):
+    """Rebuild the final's audio exactly as mux_av.sh does and compare (see the CONTRACT comment)."""
+    started = time.monotonic()
+    ffmpeg = ctx.tools.get('ffmpeg')
+    final, avatar, total, vo = ctx.paths['final'], ctx.avatar, ctx.ep['total'], ctx.ep['vo_end']
+    wd = ctx.reports / 'mux-audio'
+    shutil.rmtree(wd, ignore_errors=True)
+    wd.mkdir(parents=True, exist_ok=True)
+    mix, m4a = wd / 'mix.wav', wd / 'rebuilt.m4a'
+    data = {'schema': 'yt-news-v4-mux-audio', 'version': 1, 'pass': False, 'threshold_snr_db': MUX_AUDIO_MIN_SNR_DB,
+            'total': total, 'vo_end': vo, 'bed_volume': MUX_BED_VOLUME, 'ffmpeg': ffmpeg, 'seconds': {}}
+    b = dict(base)
+    b['inputs'] = dict(base['inputs'])
+
+    def left():
+        return limit - (time.monotonic() - started)
+
+    def end(status, cls, reason, out=''):
+        for p in (mix, wd / 'rebuilt.f32', wd / 'final.f32'):
+            remove_quiet(p)
+        data['reason'] = reason or None
+        write_json_atomic(report, data)
+        bb = dict(b, seconds=time.monotonic() - started, out=out)
+        bb['inputs'][ctx.rel(report)] = ctx.hash(report)
+        extra = {k: data.get(k) for k in ('streamhash_equal', 'snr_db')}
+        if status == 'pass':
+            return record(gate, 'pass', 0, '', extra=extra, **bb)
+        return record(gate, status, cls, reason, extra=extra, **bb)
+
+    def step(label, cmd):
+        if left() < 1:
+            return None, ('timeout', 4, 'timeout: the mux-audio gate exceeded its %.0fs limit (at %s)' % (limit, label))
+        t0 = time.monotonic()
+        res = spawn(cmd, ctx, left(), env)
+        data['seconds'][label] = round(time.monotonic() - t0, 2)
+        if res['cancelled']:
+            return None, ('crashed', 4, 'cancelled: finalize was terminated')
+        if res['timed_out']:
+            return None, ('timeout', 4, 'timeout: the mux-audio gate exceeded its %.0fs limit (at %s)' % (limit, label))
+        if res['code'] != 0:
+            return None, ('crashed', 4, 'ffmpeg (%s) exited with code %s: %s' % (label, res['code'], tail(res['stderr'], 300).strip()))
+        return res, None
+
+    # the bed: the file the mux receipt names, which must be a regular file under <project>/assets/audio (provenance: `mux` record)
+    mr = ctx.receipt_path('final', '.mux.json')
+    receipt, err = read_json(mr)
+    bed = receipt.get('bed') if isinstance(receipt, dict) else None
+    bed_path = Path(bed['path']) if isinstance(bed, dict) and isinstance(bed.get('path'), str) and bed['path'] else None
+    audio_dir = ctx.project / 'assets' / 'audio'
+    if err or bed_path is None:
+        return end('bad-input', 2, 'cannot find the music bed: the mux receipt %s is %s' % (ctx.rel(mr), err or 'without bed.path'))
+    b['inputs'][ctx.rel(mr)] = ctx.hash(mr)
+    if not (bed_path.is_file() and inside(bed_path, audio_dir)):
+        return end('bad-input', 2, 'the music bed %s named by the mux receipt is not a file under %s/' % (bed_path, ctx.rel(audio_dir)))
+    data['bed'] = {'path': ctx.rel(bed_path), 'sha256': ctx.hash(bed_path)}
+    data['avatar'] = {'path': ctx.rel(avatar), 'sha256': ctx.hash(avatar)}
+    b['inputs'][ctx.rel(bed_path)] = data['bed']['sha256']
+    # an input that is not readable audio is bad input (2); an ffmpeg failure after that is a tool failure (4)
+    ffprobe = ctx.tools.get('ffprobe')
+    for label, path in (('avatar', avatar), ('music bed', bed_path)):
+        r, bad = step('probe-' + label.replace(' ', '-'), [ffprobe, '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type',
+                                                          '-of', 'csv=p=0', str(path)])
+        if bad and (bad[0] == 'timeout' or bad[2].startswith('cancelled')):
+            return end(*bad)
+        if bad or 'audio' not in r['stdout'].decode('utf-8', 'replace'):        # ffprobe ran and found no audio / could not read it
+            return end('bad-input', 2, 'the %s %s has no readable audio stream' % (label, ctx.rel(path)))
+    T = repr(float(total))
+    _r, bad = step('mix', [ffmpeg, '-y', '-v', 'error', '-i', str(avatar), '-stream_loop', '-1', '-i', str(bed_path), '-filter_complex',
+                           mux_graph(total, vo, MUX_BED_VOLUME), '-map', '[a]', '-t', T, '-ar', '48000', '-c:a', 'pcm_f32le', str(mix)])
+    if bad:
+        return end(*bad)
+    r1, bad = step('loudnorm-pass1', [ffmpeg, '-hide_banner', '-nostats', '-i', str(mix), '-af', MUX_LOUDNORM + ':print_format=json',
+                                      '-f', 'null', '-'])
+    if bad:
+        return end(*bad)
+    try:
+        d = parse_loudnorm(r1['stderr'])
+    except ValueError as e:
+        return end('crashed', 4, 'cannot read the loudnorm measurement of the rebuilt mix: %s' % e, r1['stderr'][-2000:])
+    filt = MUX_LOUDNORM + ':linear=true:print_format=json:' + ':'.join(
+        '%s=%s' % (a, d[k]) for a, k in (('measured_I', 'input_i'), ('measured_TP', 'input_tp'), ('measured_LRA', 'input_lra'),
+                                         ('measured_thresh', 'input_thresh'), ('offset', 'target_offset')))
+    data['filter'] = filt
+    _r, bad = step('loudnorm-pass2', [ffmpeg, '-y', '-hide_banner', '-nostats', '-i', str(mix), '-af', filt, '-map', '0:a:0', '-t', T,
+                                      '-c:a', 'aac', '-ar', '48000', '-b:a', '192k', '-vn', str(m4a)])
+    if bad:
+        return end(*bad)
+    remove_quiet(mix)
+    hashes = {}
+    for label, path in (('rebuilt', m4a), ('final', final)):
+        r, bad = step('streamhash-' + label, [ffmpeg, '-nostdin', '-v', 'error', '-i', str(path), '-map', '0:a:0', '-c', 'copy', '-f',
+                                              'streamhash', '-hash', 'sha256', '-'])
+        if bad:
+            if label == 'final':
+                return end('fail', 1, 'the final file %s has no readable audio stream; run the mux (mux_av.sh) again' % ctx.rel(final))
+            return end(*bad)
+        lines = [x.strip() for x in r['stdout'].decode('utf-8', 'replace').splitlines() if ',a,SHA256=' in x]
+        hashes[label] = lines[0] if len(lines) == 1 else None
+    data['rebuiltStreamhash'], data['finalStreamhash'] = hashes['rebuilt'], hashes['final']
+    data['streamhash_equal'] = hashes['rebuilt'] is not None and hashes['rebuilt'] == hashes['final']
+    if data['streamhash_equal']:
+        data['snr_db'] = None                   # bit-identical: nothing to measure
+        data['pass'] = True
+        return end('pass', 0, '')
+    # not bit-identical: decode both (files: the 50 MB stdout cap of spawn) and measure the residual
+    pcm = {}
+    for label, path in (('rebuilt', m4a), ('final', final)):
+        out = wd / (label + '.f32')
+        _r, bad = step('decode-' + label, [ffmpeg, '-nostdin', '-y', '-v', 'error', '-i', str(path), '-map', '0:a:0', '-ac', '2', '-ar', '48000',
+                                           '-f', 'f32le', str(out)])
+        if bad:
+            return end(*bad)
+        pcm[label] = out
+    try:
+        import numpy as np
+        x = np.fromfile(str(pcm['rebuilt']), dtype='<f4')
+        y = np.fromfile(str(pcm['final']), dtype='<f4')
+    except Exception as e:  # noqa: BLE001
+        return end('missing', 4, 'cannot compare the decoded audio (numpy): %s' % e)
+    data['samples'] = {'rebuilt': int(len(x) // 2), 'final': int(len(y) // 2)}
+    if abs(len(x) - len(y)) // 2 > MUX_AUDIO_MAX_LENGTH_DIFF:
+        return end('fail', 1, 'the audio of %s is %.3f s long but the mux of the avatar + bed for totalDurationSec %s is %.3f s: the final '
+                   'was not muxed from these inputs; run mux_av.sh again' % (ctx.rel(final), len(y) / 2 / 48000, total, len(x) / 2 / 48000))
+    n = min(len(x), len(y))
+    sig = res_e = 0.0
+    for i in range(0, n, 1 << 22):
+        j = min(i + (1 << 22), n)                    # both bounded by the shorter stream (the length check above allows a few samples)
+        a, c = x[i:j].astype(np.float64), y[i:j].astype(np.float64)
+        sig += float((c * c).sum())
+        res_e += float(((c - a) ** 2).sum())
+    snr = 10 * math.log10(max(sig, 1e-30) / max(res_e, 1e-30))
+    data['snr_db'] = round(snr, 2)
+    if snr < MUX_AUDIO_MIN_SNR_DB:
+        return end('fail', 1, 'the audio of %s is not what mux_av.sh makes from the avatar + the bed %s + the episode\'s totalDurationSec %s / '
+                   'voEndSec %s at bed volume %s (residual SNR %.1f dB, needs >= %.0f; an identical mux is bit-exact with the same ffmpeg %s): '
+                   'run mux_av.sh again with exactly these inputs' % (ctx.rel(final), data['bed']['path'], total, vo, MUX_BED_VOLUME, snr,
+                                                                       MUX_AUDIO_MIN_SNR_DB, ffmpeg))
+    data['pass'] = True
+    return end('pass', 0, '')
+
+
+# ---------------------------------------------------------------- word timing (CF-A67 phase B, see the CONTRACT comment)
+def chain_ffmpeg():
+    return next((c for c in CHAIN_FFMPEG_CANDIDATES if os.path.isfile(c) and os.access(c, os.X_OK)), None)
+
+
+def asr_env():
+    """The ONLY environment a chain call, the wav extraction and timing_defects.py get: built from scratch, never from os.environ
+    (= asr_transcribe.minimal_env; a test compares the two), so nothing of the caller (BASH_ENV, DYLD_*, HF_*, PYTHON*, ...) reaches
+    /bin/bash, the launcher, the decoder or its libraries."""
+    ff = chain_ffmpeg()
+    return {'HOME': passwd_home(), 'PATH': (os.path.dirname(ff) + ':' if ff else '') + '/usr/bin:/bin', 'LANG': ASR_LANG,
+            'TMPDIR': ASR_TMPDIR}
+
+
+def asr_cmd(script, *args):
+    """The ONE way finalize reaches the chain's python (--check [--deep], --fingerprint, asr_align, the re-transcription):
+    /bin/bash <certified checkout>/scripts/asr_run.sh <script> <args>.  The script is named, not pathed: the launcher runs only its
+    own CHAIN_SCRIPTS next to itself."""
+    return [SYSTEM_BASH, str(ASR_RUN), script, *[str(a) for a in args]]
+
+
+def defects_cmd(*args):
+    """timing_defects.py of the certified checkout under finalize's own interpreter, no site-packages (stdlib only)."""
+    return [sys.executable, *DEFECTS_FLAGS, str(SCRIPTS_DIR / 'timing_defects.py'), *[str(a) for a in args]]
+
+
+def launcher_problem():
+    """None, or why the launcher cannot even be started (the launcher's own checks -- venv, manifest, interpreter -- run when it
+    is called and come back as its exit 4 + stderr)."""
+    if not Path(ASR_RUN).is_file():
+        return 'the ASR launcher %s is missing — %s' % (ASR_RUN, ASR_SETUP_HINT % SKILL_DIR)
+    return None
+
+
+def launcher_failure(what, res):
+    """A chain call that exited non-zero: its exit code + the tail of its stderr (the launcher names the first differing manifest
+    file, a missing venv, ...), plus the setup hint for a launcher refusal (exit 4) that does not carry one."""
+    err = tail(res['stderr'].strip(), 500) or 'no message'
+    msg = '%s exited %s: %s' % (what, res['code'], err)
+    if res['code'] == 4 and 'setup_asr_venv.sh' not in err:
+        msg += ' — %s' % (ASR_SETUP_HINT % SKILL_DIR)
+    return msg
+
+
+_FP_MISSING = object()
+
+
+def _fp_show(v):
+    if v is _FP_MISSING:
+        return '<missing>'
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True)
+
+
+def compare_fingerprint(recorded, current):
+    """A copy of asr_transcribe.compare_fingerprint (finalize must not import that module; a test runs both on the same inputs):
+    one line per differing leaf, 'path: <recorded> (production) != <current> (this machine)'; a key on one side only differs."""
+    out = []
+
+    def walk(path, a, b):
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(set(a) | set(b), key=str):
+                walk('%s.%s' % (path, k) if path else str(k), a.get(k, _FP_MISSING), b.get(k, _FP_MISSING))
+        elif isinstance(a, list) and isinstance(b, list):
+            for i in range(max(len(a), len(b))):
+                walk('%s[%d]' % (path, i), a[i] if i < len(a) else _FP_MISSING, b[i] if i < len(b) else _FP_MISSING)
+        elif a is _FP_MISSING or b is _FP_MISSING or type(a) is not type(b) or a != b:
+            out.append('%s: %s (production) != %s (this machine)' % (path or 'fingerprint', _fp_show(a), _fp_show(b)))
+    walk('', recorded, current)
+    return out
+
+
+def machine_fingerprint(ctx, limit):
+    """`asr_run.sh asr_transcribe.py --fingerprint` of THIS machine, run once per finalize run (both word-timing gates need it).
+    -> (dict | None, error, class)"""
+    with ctx._fp_lock:
+        if ctx._fingerprint is None:
+            ctx._fingerprint = _run_fingerprint(ctx, limit)
+        return ctx._fingerprint
+
+
+def _run_fingerprint(ctx, limit):
+    bad = launcher_problem()
+    if bad:
+        return None, bad, 4
+    res = spawn(asr_cmd('asr_transcribe.py', '--fingerprint'), ctx, limit, asr_env())
+    if res['cancelled']:
+        return None, 'cancelled: finalize was terminated', 4
+    if res['timed_out']:
+        return None, 'asr_transcribe.py --fingerprint exceeded %.0f s' % limit, 4
+    if res['code'] != 0:
+        return None, launcher_failure('asr_run.sh asr_transcribe.py --fingerprint', res), 4
+    try:
+        fp = json.loads(res['stdout'].decode('utf-8'))
+    except (ValueError, UnicodeDecodeError):
+        fp = None
+    if not (isinstance(fp, dict) and fp):
+        return None, 'asr_transcribe.py --fingerprint printed no fingerprint object', 4
+    return fp, None, 0
+
+
+def fingerprint_problem(ctx, raw, limit):
+    """B2.4 precondition: the toolchain recorded in raw_asr.json == this machine's.  -> (recorded, problem | None, class)"""
+    current, err, cls = machine_fingerprint(ctx, limit)
+    if err:
+        return None, 'cannot read the transcription toolchain of this machine: %s' % err, cls
+    recorded = {k: raw.get(k, _FP_MISSING) for k in current}
+    diff = compare_fingerprint(recorded, current)
+    shown = {k: v for k, v in recorded.items() if v is not _FP_MISSING}
+    if diff:
+        return shown, '%s: %s' % (TOOLCHAIN_MSG, '; '.join(diff[:6]) + (' ... (+%d more)' % (len(diff) - 6) if len(diff) > 6 else '')), 4
+    return shown, None, 0
+
+
+def extract_wav(ctx, wav, limit):
+    """word_timing.sh step 1 with the chain's ffmpeg, from the avatar the episode uses (the agent's vo16k.wav is never read).
+    -> (info {sha256, duration, bytes, seconds} | None, error, class)"""
+    ff = chain_ffmpeg()
+    if ff is None:
+        return None, 'no ffmpeg at %s (the word-timing chain never searches $PATH)' % ', '.join(CHAIN_FFMPEG_CANDIDATES), 4
+    res = spawn([ff] + [a.format(avatar=ctx.avatar, wav=wav) for a in WAV_EXTRACT], ctx, limit, asr_env())
+    if res['cancelled']:
+        return None, 'cancelled: finalize was terminated', 4
+    if res['timed_out']:
+        return None, 'the wav extraction exceeded %.0f s' % limit, 4
+    if res['code'] != 0 or not wav.is_file():
+        return None, 'ffmpeg could not extract the audio of %s: %s' % (ctx.rel(ctx.avatar), tail(res['stderr'].strip(), 300)), 2
+    try:
+        with wave.open(str(wav), 'rb') as w:
+            ok = (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1, 2, WAV_RATE)
+            frames = w.getnframes()
+    except (OSError, EOFError, wave.Error) as e:
+        return None, 'the extracted wav cannot be read: %s' % e, 4
+    if not ok or frames == 0:
+        return None, 'the extracted wav is not 16 kHz mono 16-bit PCM with samples', 4
+    return {'sha256': sha256_file(wav), 'duration': frames / WAV_RATE, 'bytes': wav.stat().st_size,
+            'seconds': round(res['seconds'], 2)}, None, 0
+
+
+_TC_THRESHOLDS = []
+
+
+def timing_check_thresholds():
+    """silencedetect + interior-margin values from timing_check.py THRESHOLDS (the dict literal, read with ast.literal_eval from its
+    source: never executed, never a second copy of the numbers)."""
+    if not _TC_THRESHOLDS:
+        tree = ast.parse((SCRIPTS_DIR / 'timing_check.py').read_text(encoding='utf-8'))
+        node = next(n.value for n in tree.body if isinstance(n, ast.Assign) and len(n.targets) == 1
+                    and isinstance(n.targets[0], ast.Name) and n.targets[0].id == 'THRESHOLDS')
+        th = ast.literal_eval(node)
+        _TC_THRESHOLDS.append({k: th[k] for k in ('silence_noise_db', 'silence_min_s', 'silenceInteriorLeadS', 'silenceInteriorTrailS',
+                                                  'maxInSilenceShare')})
+    return _TC_THRESHOLDS[0]
+
+
+def detect_silences(ctx, wav, th, limit):
+    """[(start, end)] of ffmpeg silencedetect, parsed exactly like timing_check.detect_silences.  -> (silences | None, error, class)"""
+    ff = chain_ffmpeg()
+    res = spawn([ff, '-hide_banner', '-nostats', '-i', str(wav), '-vn', '-af',
+                 'silencedetect=noise=%sdB:d=%s' % (th['silence_noise_db'], th['silence_min_s']), '-f', 'null', '-'], ctx, limit, asr_env())
+    if res['timed_out'] or res['cancelled'] or res['code'] != 0:
+        return None, 'ffmpeg silencedetect failed on the extracted wav: %s' % tail(res['stderr'].strip(), 300), 4
+    out, start = [], None
+    for m in re.finditer(r'silence_(start|end):\s*(-?\d+(?:\.\d+)?)', res['stderr']):
+        if m.group(1) == 'start':
+            start = float(m.group(2))
+        elif start is not None:
+            out.append((max(start, 0.0), float(m.group(2))))
+            start = None
+    return out, None, 0
+
+
+def raw_words(raw):
+    """[(start, end, word)] of every raw word in file order; None when a segment / word is malformed."""
+    out = []
+    segs = raw.get('segments')
+    if not isinstance(segs, list):
+        return None
+    for s in segs:
+        ws = s.get('words') if isinstance(s, dict) else None
+        if not isinstance(ws, list):
+            return None
+        for w in ws:
+            if not (isinstance(w, dict) and is_num(w.get('start')) and is_num(w.get('end'))
+                    and math.isfinite(w['start']) and math.isfinite(w['end'])):
+                return None
+            out.append((float(w['start']), float(w['end']), w.get('word')))
+    return out
+
+
+def speech_spans(silences, duration):
+    out, t = [], 0.0
+    for a, b in sorted(silences):
+        if a > t:
+            out.append((t, a))
+        t = max(t, b)
+    if duration > t:
+        out.append((t, duration))
+    return out
+
+
+def audio_binding(words, silences, duration, th):
+    """Rules (a) and (c) of BIND_* on the RAW words vs the silences of the audio.  -> (metrics, problems)"""
+    lead, trail, share_max = th['silenceInteriorLeadS'], th['silenceInteriorTrailS'], th['maxInSilenceShare']
+    interiors = [(a + lead, b - trail) for a, b in silences if b - trail >= a + lead]
+    elig = [w for w in words if w[1] - w[0] >= BIND_MIN_WORD_S]
+    inside = [w for w in elig if any(lo <= w[0] and w[1] <= hi for lo, hi in interiors)]
+    share = len(inside) / len(elig) if elig else 0.0
+    speech = speech_spans(silences, duration)
+
+    def speech_in(lo, hi):
+        return sum(max(0.0, min(hi, b) - max(lo, a)) for a, b in speech)
+    pre = speech_in(0.0, min(w[0] for w in words)) if words else duration
+    post = speech_in(max(w[1] for w in words), duration) if words else duration
+    m = {'silences': len(silences), 'eligibleWords': len(elig), 'wordsInSilence': len(inside), 'inSilenceShare': round(share, 5),
+         'inSilenceShareMax': share_max, 'interior': [lead, trail], 'speechBeforeFirstWord': round(pre, 3),
+         'speechAfterLastWord': round(post, 3), 'edgeSpeechMax': BIND_EDGE_SPEECH_MAX_S}
+    p = []
+    if not words:
+        p.append('raw_asr.json has no word with a time: nothing binds it to the audio')
+    if share > share_max:
+        s, e, t = inside[0]
+        p.append('%d of %d raw words (%.2f %%, limit %.1f %%) lie inside silences of the audio (first: %r %.2f-%.2f s): the words '
+                 'are not where this audio has speech' % (len(inside), len(elig), 100 * share, 100 * share_max, t, s, e))
+    for label, v in (('before the first', pre), ('after the last', post)):
+        if v > BIND_EDGE_SPEECH_MAX_S:
+            p.append('%.2f s of speech %s raw word (limit %.2f s): the words do not cover this audio' % (v, label, BIND_EDGE_SPEECH_MAX_S))
+    return m, p
+
+
+def page_words(text):
+    data = json.loads(text)
+    pages = data.get('pages') if isinstance(data, dict) else data
+    return [(w.get('w'), w.get('s'), w.get('e')) for pg in pages for w in pg.get('words', [])]
+
+
+def first_pages_diff(derived, artifact):
+    """-> a sentence naming the first differing word (index, token, both start / end) of two caption_pages.json texts."""
+    try:
+        a, b = page_words(derived), page_words(artifact)
+    except (ValueError, AttributeError, TypeError):
+        return 'one of the files is not a caption_pages.json list'
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return 'first differing word #%d: %r %s-%s (re-derived) vs %r %s-%s (artifact)' % (i, x[0], x[1], x[2], y[0], y[1], y[2])
+    if len(a) != len(b):
+        return 'the re-derived pages have %d words, the artifact %d' % (len(a), len(b))
+    return 'same words, different bytes (page boundaries or formatting differ)'
+
+
+def first_raw_diff(new, agent):
+    """-> a sentence naming the first difference of two raw_asr.json documents (segment / word, else the top-level key)."""
+    try:
+        a, b = json.loads(new), json.loads(agent)
+    except ValueError:
+        return 'one of the raw files is not JSON'
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return 'one of the raw files is not a JSON object'
+    sa, sb = a.get('segments') or [], b.get('segments') or []
+    for i, (x, y) in enumerate(zip(sa, sb)):
+        if x == y:
+            continue
+        wx, wy = (x.get('words') or []) if isinstance(x, dict) else [], (y.get('words') or []) if isinstance(y, dict) else []
+        for j, (u, v) in enumerate(zip(wx, wy)):
+            if u != v:
+                return ('first differing raw word: segment %d word %d %r %s-%s (re-transcribed) vs %r %s-%s (agent)'
+                        % (i, j, u.get('word'), u.get('start'), u.get('end'), v.get('word'), v.get('start'), v.get('end')))
+        keys = sorted(k for k in set(x) | set(y) if x.get(k) != y.get(k))
+        return 'first differing raw segment %d: %s' % (i, ', '.join(keys) or 'word count %d vs %d' % (len(wx), len(wy)))
+    if len(sa) != len(sb):
+        return 'the re-transcription has %d segments, the agent raw %d' % (len(sa), len(sb))
+    keys = sorted(k for k in set(a) | set(b) if k != 'segments' and a.get(k) != b.get(k))
+    return 'same segments; differing top-level keys: %s' % (', '.join(keys) or '(formatting only)')
+
+
+def raw_header_problems(ctx, raw):
+    """B2.3: schema / version, script sha256, the chain code of the RUNNING checkout, the pinned params.  -> [(class, message)]"""
+    p = []
+    if raw.get('schema') != RAW_ASR_SCHEMA or raw.get('version') != RAW_ASR_VERSION:
+        p.append((2, 'raw_asr.json is not a %s v%d document (schema %r, version %r): run word_timing.sh with the current chain'
+                  % (RAW_ASR_SCHEMA, RAW_ASR_VERSION, raw.get('schema'), raw.get('version'))))
+        return p
+    if raw.get('script_sha256') != ctx.hash(ctx.paths['script']):
+        p.append((2, 'raw_asr.json was decoded for another script (script_sha256 differs from %s): run word_timing.sh again'
+                  % ctx.rel(ctx.paths['script'])))
+    code = raw.get('code')
+    want = {n: ctx.hash(SCRIPTS_DIR / n) for n in CHAIN_CODE_FILES}
+    if code != want:
+        names = sorted(n for n in set(want) | set(code if isinstance(code, dict) else {}) if not isinstance(code, dict) or code.get(n) != want.get(n))
+        p.append((2, 'raw_asr.json was made by other chain code than this checkout (%s differ): run word_timing.sh with the current '
+                  'scripts' % ', '.join(names)))
+    if raw.get('params') != ASR_PARAMS:
+        p.append((2, 'raw_asr.json was decoded with other params %s (pinned: %s): run word_timing.sh'
+                  % (json.dumps(raw.get('params'), sort_keys=True), json.dumps(ASR_PARAMS, sort_keys=True))))
+    return p
+
+
+def defect_line(d):
+    if not isinstance(d, dict):
+        return str(d)[:DETAIL_MAX]
+    return '%s %r @%s-%s: %s (limit %s)' % (d.get('code'), d.get('token'), d.get('start'), d.get('end'), d.get('value'), d.get('limit'))
+
+
+def runner_word_timing(gate, ctx, base, report, limit, env):
+    """`word-timing` (delivery and --check): raw_asr.json is bound to this avatar's audio, to script.txt and to the chain code;
+    its toolchain must be this machine's; caption_pages.json must be what asr_align.py derives from it; timing_defects.py (page +
+    raw rules, with the wav) must find nothing; the raw words must sit where the audio has speech (rules a / c).  Nothing is
+    transcribed here, and word_timing.done.json is never read."""
+    started = time.monotonic()
+    P = ctx.paths
+    wd = ctx.reports / 'word-timing'
+    shutil.rmtree(wd, ignore_errors=True)
+    wd.mkdir(parents=True)
+    data = {'schema': 'yt-news-v4-word-timing-check', 'version': 1, 'pass': False,
+            'raw': {'path': ctx.rel(P['word_raw']), 'sha256': ctx.hash(P['word_raw'])}, 'steps': {}}
+
+    def left():
+        return max(limit - (time.monotonic() - started), 0.1)
+
+    def end(cls, reason='', issues=None, status=None):
+        data['seconds'] = round(time.monotonic() - started, 2)
+        if cls:
+            data['problems'] = [reason] + list(issues or [])
+            write_json_atomic(report, data)
+            b = dict(base, seconds=data['seconds'])
+            b['inputs'] = dict(base['inputs'])
+            b['inputs'][ctx.rel(report)] = ctx.hash(report)
+            return record(gate, status or {1: 'fail', 2: 'stale', 4: 'missing'}.get(cls, 'fail'), cls, reason, issues=issues, **b)
+        data['pass'] = True
+        return finish_runner(gate, ctx, dict(base, seconds=data['seconds']), report, data, '')
+
+    raw, err = read_json(P['word_raw'])
+    if err or not isinstance(raw, dict):
+        return end(2, '%s is %s: run word_timing.sh' % (ctx.rel(P['word_raw']), err or 'not a JSON object'))
+    hp = raw_header_problems(ctx, raw)
+    if hp:
+        return end(worst_class(c for c, _ in hp), '; '.join(m for _, m in hp))
+    words = raw_words(raw)
+    audio = raw.get('audio') if isinstance(raw.get('audio'), dict) else {}
+    if words is None or not is_num(audio.get('duration')):
+        return end(2, '%s has malformed segments / words / audio: run word_timing.sh' % ctx.rel(P['word_raw']))
+    # B2.2 the audio: extracted again from the avatar, byte for byte what the chain decodes
+    wav = wd / 'vo16k.wav'
+    info, err, cls = extract_wav(ctx, wav, left())
+    if err:
+        return end(cls, err)
+    data['steps']['wav'] = info
+    if audio.get('wav_sha256') != info['sha256'] or audio.get('duration') != info['duration']:
+        return end(1, "raw_asr.json was not decoded from this presenter video's audio (wav sha256 %s / duration %s s recorded, %s / %s s "
+                   'extracted from %s): run word_timing.sh on this avatar' % (str(audio.get('wav_sha256'))[:12], audio.get('duration'),
+                                                                             info['sha256'][:12], info['duration'], ctx.rel(ctx.avatar)))
+    # B2.4 the toolchain
+    recorded, why, cls = fingerprint_problem(ctx, raw, left())
+    if why:
+        return end(cls, why)
+    # B2.5 the pages, re-derived
+    pages = wd / 'caption_pages.json'
+    res = spawn(asr_cmd('asr_align.py', '--raw', P['word_raw'], '--script', P['script'], '--out', pages), ctx, left(), asr_env())
+    data['steps']['align'] = {'seconds': round(res['seconds'], 2), 'exit': res['code']}
+    if res['cancelled'] or res['timed_out']:
+        return end(4, 'asr_align.py %s' % ('was cancelled' if res['cancelled'] else 'exceeded the gate limit'), status='timeout' if res['timed_out'] else 'crashed')
+    if res['code'] != 0 or not pages.is_file():
+        cls = 2 if res['code'] == 2 else 4
+        return end(cls, launcher_failure('asr_run.sh asr_align.py', res))
+    if pages.read_bytes() != P['word_pages'].read_bytes():
+        why = first_pages_diff(pages.read_text(encoding='utf-8'), P['word_pages'].read_text(encoding='utf-8'))
+        return end(1, 'caption_pages.json is not what asr_align.py derives from raw_asr.json: re-run word_timing.sh, never hand-edit (%s)' % why)
+    # B2.6 defects (page rules + the raw rules, with the wav)
+    rep = wd / 'timing-defects.json'
+    res = spawn(defects_cmd('--pages', pages, '--raw', P['word_raw'], '--wav', wav, '--report', rep), ctx, left(), asr_env())
+    data['steps']['defects'] = {'seconds': round(res['seconds'], 2), 'exit': res['code']}
+    if res['cancelled'] or res['timed_out']:
+        return end(4, 'timing_defects.py %s' % ('was cancelled' if res['cancelled'] else 'exceeded the gate limit'), status='timeout' if res['timed_out'] else 'crashed')
+    if res['code'] == 1:
+        doc, _e = read_json(rep)
+        found = (doc or {}).get('defects') if isinstance(doc, dict) else None
+        lines = [defect_line(d) for d in (found or [])] or [l for l in res['stdout'].decode('utf-8', 'replace').splitlines() if l.strip()][:12]
+        data['defects'] = found
+        return end(1, 'the word timing has %d defect(s) (timing_defects.py): %s; re-run word_timing.sh, never hand-edit'
+                   % (len(found or lines), '; '.join(lines[:3])), issues=lines[:12])
+    if res['code'] == 2:
+        return end(2, 'timing_defects.py refused its input: %s' % tail(res['stderr'].strip(), 400))
+    if res['code'] != 0:
+        return end(4, 'timing_defects.py exited %s: %s' % (res['code'], tail(res['stderr'].strip(), 400)))
+    # B2.7 audio binding of the raw words
+    try:
+        th = timing_check_thresholds()
+    except Exception as e:  # noqa: BLE001
+        return end(4, 'cannot read the silence thresholds of timing_check.py: %s' % e)
+    sil, err, cls = detect_silences(ctx, wav, th, left())
+    if err:
+        return end(cls, err)
+    metrics, probs = audio_binding(words, sil, info['duration'], th)
+    data['binding'] = metrics
+    if probs:
+        return end(1, '; '.join(probs))
+    ctx.word_timing = {'raw': dict(data['raw']), 'fingerprint': recorded}
+    remove_quiet(wav)
+    return end(0)
+
+
+def runner_asr_recheck(gate, ctx, base, report, limit, env):
+    """`asr-recheck` (--check only): re-transcribe the avatar audio with this machine's chain in a NEW EMPTY dir and require
+    byte-identical raw_asr.json and caption_pages.json.  Precondition: the recorded toolchain == this machine's (else exit 4).
+    No tolerance path.  Running out of time is status `timeout` (exit 4, `retry: when-idle`), never a pass."""
+    started = time.monotonic()
+    P = ctx.paths
+    wd = ctx.reports / 'asr-recheck'
+    shutil.rmtree(wd, ignore_errors=True)
+    wd.mkdir(parents=True)
+    data = {'schema': 'yt-news-v4-asr-recheck', 'version': 1, 'pass': False, 'steps': {}}
+
+    def left():
+        return max(limit - (time.monotonic() - started), 0.1)
+
+    def end(cls, reason='', issues=None, status=None, extra=None):
+        data['seconds'] = round(time.monotonic() - started, 2)
+        if cls:
+            data['problems'] = [reason] + list(issues or [])
+            data.update(extra or {})
+            write_json_atomic(report, data)
+            b = dict(base, seconds=data['seconds'])
+            b['inputs'] = dict(base['inputs'])
+            b['inputs'][ctx.rel(report)] = ctx.hash(report)
+            return record(gate, status or {1: 'fail', 2: 'stale', 4: 'missing'}.get(cls, 'fail'), cls, reason, issues=issues, extra=extra, **b)
+        data['pass'] = True
+        return finish_runner(gate, ctx, dict(base, seconds=data['seconds']), report, data, '')
+
+    def timed_out(step):
+        data['steps'][step + '_timed_out'] = True
+        return end(4, CHECK_TIMEOUT_MSG % ctx.budget, status='timeout', extra={'retry': 'when-idle'})
+
+    raw, err = read_json(P['word_raw'])
+    if err or not isinstance(raw, dict):
+        return end(2, '%s is %s: run word_timing.sh' % (ctx.rel(P['word_raw']), err or 'not a JSON object'))
+    _rec, why, cls = fingerprint_problem(ctx, raw, left())
+    if why:
+        return end(cls, why)
+    wav = wd / 'vo16k.wav'
+    info, err, cls = extract_wav(ctx, wav, left())
+    if err:
+        return end(cls, err)
+    data['steps']['wav'] = info
+    out = wd / 'asr'
+    out.mkdir()                                   # NEW: no checkpoint of anybody can be resumed
+    if any(out.iterdir()):
+        return end(4, 'the re-transcription dir %s is not empty' % out)
+    res = spawn(asr_cmd('asr_transcribe.py', '--wav', wav, '--script', P['script'], '--out-dir', out), ctx, left(), asr_env())
+    data['steps']['transcribe'] = {'seconds': round(res['seconds'], 2), 'exit': res['code']}
+    if res['cancelled']:
+        return end(4, 'cancelled: finalize was terminated', status='crashed')
+    if res['timed_out']:
+        return timed_out('transcribe')
+    text = res['stdout'].decode('utf-8', 'replace') + '\n' + res['stderr']
+    if res['code'] == 5:
+        lines = [l.strip() for l in text.splitlines() if 'DEFECT' in l][:12]
+        return end(1, 'the re-transcription is still defective after the fixed repair ladder (asr_transcribe.py exit 5): %s'
+                   % ('; '.join(lines[:3]) or tail(text.strip(), 300)), issues=lines)
+    if res['code'] != 0:
+        return end(2 if res['code'] == 2 else 4, launcher_failure('asr_run.sh asr_transcribe.py', res))
+    new_raw = out / 'raw_asr.json'
+    if not new_raw.is_file():
+        return end(4, 'asr_transcribe.py exited 0 but wrote no raw_asr.json')
+    pages = out / 'caption_pages.json'
+    res = spawn(asr_cmd('asr_align.py', '--raw', new_raw, '--script', P['script'], '--out', pages), ctx, left(), asr_env())
+    data['steps']['align'] = {'seconds': round(res['seconds'], 2), 'exit': res['code']}
+    if res['cancelled']:
+        return end(4, 'cancelled: finalize was terminated', status='crashed')
+    if res['timed_out']:
+        return timed_out('align')
+    if res['code'] != 0 or not pages.is_file():
+        return end(2 if res['code'] == 2 else 4, launcher_failure('asr_run.sh asr_align.py', res))
+    data['rawSha256'] = {'retranscribed': sha256_file(new_raw), 'agent': ctx.hash(P['word_raw'])}
+    data['pagesSha256'] = {'retranscribed': sha256_file(pages), 'agent': ctx.hash(P['word_pages'])}
+    probs = []
+    if new_raw.read_bytes() != P['word_raw'].read_bytes():
+        probs.append('raw_asr.json is not what this machine transcribes from the avatar audio (%s)'
+                     % first_raw_diff(new_raw.read_text(encoding='utf-8'), P['word_raw'].read_text(encoding='utf-8')))
+    if pages.read_bytes() != P['word_pages'].read_bytes():
+        probs.append('caption_pages.json differs from the re-transcription (%s)'
+                     % first_pages_diff(pages.read_text(encoding='utf-8'), P['word_pages'].read_text(encoding='utf-8')))
+    if probs:
+        return end(1, '; '.join(probs) + ': re-run word_timing.sh, never hand-edit')
+    remove_quiet(wav)
+    return end(0)
+
+
+RUNNERS = {'script': runner_script, 'derived': runner_derived, 'music_presence': runner_music_presence, 'face_box': runner_face_box,
+           'cuts': runner_cuts, 'mux_audio': runner_mux_audio, 'word_timing': runner_word_timing, 'asr_recheck': runner_asr_recheck}
+# console label of a runner gate (its `command`), and the tools it calls besides its scripts (checked before it starts: missing = 4)
+RUNNER_COMMANDS = {'music_presence': 'ffmpeg -af volumedetect', 'cuts': 'sha256 + ffmpeg (clip frame vs source frames at source_in)',
+                   'mux_audio': 'mux_av.sh audio rebuild (ffmpeg mix + loudnorm x2 + aac) vs the final audio',
+                   'word_timing': 'wav from the avatar + asr_run.sh asr_transcribe.py --fingerprint, asr_run.sh asr_align.py, timing_defects.py --wav + '
+                                  'silencedetect (raw_asr.json re-checked, nothing transcribed)',
+                   'asr_recheck': 'asr_run.sh asr_transcribe.py --wav (new empty dir) + asr_run.sh asr_align.py, byte-compared with the agent files'}
+RUNNER_TOOLS = {'face_box': ('ffmpeg', 'ffprobe'), 'cuts': ('ffmpeg',), 'mux_audio': ('ffmpeg', 'ffprobe')}
 
 
 def run_gate(gate, ctx, inputs, deadline, env, deps=None):
@@ -1099,7 +2298,7 @@ def run_gate(gate, ctx, inputs, deadline, env, deps=None):
     scripts = gate_scripts(gate)
     if runner:
         cmd = ['<%s>' % gate['name']]
-        command = ' + '.join(scripts) or 'ffmpeg -af volumedetect'
+        command = RUNNER_COMMANDS.get(runner) or ' + '.join(scripts)
     else:
         cmd = exe_for(ctx, gate['script']) + argv
         command = shlex.join(cmd)
@@ -1121,7 +2320,7 @@ def run_gate(gate, ctx, inputs, deadline, env, deps=None):
     remaining = deadline - time.monotonic()
     limit = min(gate['limit'], remaining)
     if limit < 1:
-        return record(gate, 'timeout', 4, 'finalize time budget (%ds, phase gates) exhausted before the gate started' % TOTAL_BUDGET_SEC, **base)
+        return record(gate, 'timeout', 4, 'finalize time budget (%ds, phase gates) exhausted before the gate started' % ctx.budget, **base)
     if STOP.is_set():
         return record(gate, 'crashed', 4, 'cancelled: finalize was terminated', **base)
     if runner:
@@ -1189,7 +2388,8 @@ def time_left(deadline, cap):
     return None if left < 1 else min(cap, left)
 
 
-BUDGET_MSG = 'time budget (%ds) exhausted during phase "post-verification"' % TOTAL_BUDGET_SEC
+def budget_msg(deadline, phase='post-verification'):
+    return 'time budget (%ds) exhausted during phase "%s"' % (deadline.total, phase)
 
 
 def node_manifest_hash(manifest_path, env, ctx, deadline):
@@ -1202,7 +2402,7 @@ def node_manifest_hash(manifest_path, env, ctx, deadline):
         return None, 'node not found on PATH (cannot recompute manifestHash)', 4
     timeout = time_left(deadline, 30)
     if timeout is None:
-        return None, BUDGET_MSG, 4
+        return None, budget_msg(deadline), 4
     code = ("import {pathToFileURL} from 'node:url'; import fs from 'node:fs';"
             "const m = await import(pathToFileURL(process.argv[1]).href);"
             "console.log(m.manifestHash(JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))));")
@@ -1215,6 +2415,69 @@ def node_manifest_hash(manifest_path, env, ctx, deadline):
     if r.returncode != 0 or not valid_sha(h):
         return None, 'manifestHash computation failed (exit %d): %s' % (r.returncode, tail(r.stderr, 300)), 4
     return h.lower(), None, 0
+
+
+MEDIA_DIGEST_SCRIPT = 'media_digest.mjs'
+
+
+def node_fresh_layout_hashes(ctx, env, deadline):
+    """What the layout manifest must say, computed NOW by the other team's JS from the bytes: computeSourceHashes() of the running
+    checkout + this episode/captions, digestDir() of <public>/<assetDir> and <public>/fonts WITHOUT a hash cache (no cacheFile:
+    every file is read).  -> ({sourceHashes, media, fonts}|None, error, class)"""
+    qm, md, node = SCRIPTS_DIR / QC_MANIFEST_SCRIPT, SCRIPTS_DIR / MEDIA_DIGEST_SCRIPT, ctx.tools.get('node')
+    for f in (qm, md):
+        if not f.is_file():
+            return None, '%s is missing from the skill (cannot recompute the layout hashes)' % f.name, 4
+    if not node:
+        return None, 'node not found on PATH (cannot recompute the layout hashes)', 4
+    if not ctx.ep['asset_dir']:
+        return None, 'episode.json has no assetDir: the media digest cannot be computed', 2
+    for key in ('episode', 'captions'):           # an input of the agent that is gone is the agent's problem (2), not a broken tool (4)
+        if not ctx.paths[key].is_file():
+            return None, 'the layout hashes cannot be recomputed: %s does not exist' % ctx.rel(ctx.paths[key]), 2
+    timeout = time_left(deadline, 90)
+    if timeout is None:
+        return None, budget_msg(deadline), 4
+    code = ("import {pathToFileURL} from 'node:url'; import fs from 'node:fs';"
+            "const [qmp, mdp, composer, skill, episode, captions, media, fonts] = process.argv.slice(1);"
+            "const qm = await import(pathToFileURL(qmp).href); const md = await import(pathToFileURL(mdp).href);"
+            "const out = {sourceHashes: await qm.computeSourceHashes({composerDir: composer, skillDir: skill, episodePath: episode,"
+            " captionsPath: captions})};"
+            "out.media = fs.existsSync(media) ? await md.digestDir(media) : null;"
+            "out.fonts = fs.existsSync(fonts) ? await md.digestDir(fonts) : null;"
+            "console.log(JSON.stringify(out));")
+    args = [str(qm), str(md), str(ctx.composer), str(SKILL_DIR), str(ctx.paths['episode']), str(ctx.paths['captions']),
+            str(ctx.public / ctx.ep['asset_dir']), str(ctx.public / 'fonts')]
+    try:
+        r = subprocess.run([node, '--input-type=module', '-e', code, *args], capture_output=True, text=True, timeout=timeout, env=env,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, 'recomputing the layout hashes failed: %s' % e, 4
+    try:
+        out = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        out = None
+    if not (isinstance(out, dict) and isinstance(out.get('sourceHashes'), dict)):
+        return None, 'recomputing the layout hashes failed (exit %d): %s' % (r.returncode, tail(r.stderr, 300)), 4
+    return out, None, 0
+
+
+def compare_digest(label, claimed, fresh, asset_dir=None):
+    """A digest object of the layout manifest vs the fresh digestDir() result.  -> problems"""
+    if fresh is None:
+        return ['%s: the directory does not exist under the public root' % label]
+    if not isinstance(claimed, dict):
+        return ['run manifest has no %s' % label]
+    p = []
+    for k in ('method', 'digest', 'files', 'bytes'):
+        if claimed.get(k) != fresh.get(k):
+            p.append('layout was run on different media: run manifest %s.%s is %r but the files now give %r'
+                     % (label, k, claimed.get(k) if k != 'digest' else str(claimed.get(k))[:12],
+                        fresh.get(k) if k != 'digest' else str(fresh.get(k))[:12]))
+            break
+    if asset_dir is not None and claimed.get('assetDir') != asset_dir:
+        p.append('run manifest %s.assetDir %r is not the episode assetDir %r' % (label, claimed.get('assetDir'), asset_dir))
+    return p
 
 
 def verify_layout(report_path, ctx, env, deadline):
@@ -1284,6 +2547,21 @@ def verify_layout(report_path, ctx, env, deadline):
         p.append(herr)
     elif valid_sha(mhash) and h != mhash.lower():
         p.append('run manifest hash %s does not match report.manifestHash' % h[:12])
+    # every claim of the manifest about its inputs, recomputed from the bytes (never from qc/layout/cache/media-hash.json)
+    fresh, ferr, fcls = node_fresh_layout_hashes(ctx, env, deadline)
+    if ferr:
+        p.append(ferr)
+        tool = max(tool, fcls) if fcls == 4 else tool
+        return p, tool, info, inputs
+    info['freshMedia'], info['freshFonts'] = fresh.get('media'), fresh.get('fonts')
+    if isinstance(hashes, dict):
+        now = fresh['sourceHashes']
+        diff = sorted(k for k in set(hashes) | set(now) if hashes.get(k) != now.get(k))
+        if diff:
+            p.append('layout was run on different code or inputs than the running checkout + this episode: sourceHashes differ for %s'
+                     % ', '.join(diff[:8]) + (' ... (+%d more)' % (len(diff) - 8) if len(diff) > 8 else ''))
+    p += compare_digest('mediaDigest', manifest.get('mediaDigest'), fresh.get('media'), ctx.ep['asset_dir'])
+    p += compare_digest('fontsDigest', manifest.get('fontsDigest'), fresh.get('fonts'))
     return p, tool, info, inputs
 
 
@@ -1302,7 +2580,7 @@ def probe_video(ctx, path, env, deadline):
         return None, 'ffprobe not found', 4
     timeout = time_left(deadline, 60)
     if timeout is None:
-        return None, BUDGET_MSG, 4
+        return None, budget_msg(deadline), 4
     try:
         r = subprocess.run([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-count_packets', '-show_entries',
                             'stream=width,height,r_frame_rate,nb_read_packets,pix_fmt,color_space,color_range',
@@ -1380,6 +2658,13 @@ def verify_render_receipt(receipt_path, ctx, layout_info, probe=None):
         for rel in (ENGINE_REL, ENTRY_REL):
             if rel not in closure:
                 p.append('render receipt entryClosure does not list %s' % rel)
+    # the media / fonts the render staged (its receipt) must be the files there are now (digests computed fresh, no cache)
+    for key, fresh in (('mediaDigest', layout_info.get('freshMedia')), ('fontsDigest', layout_info.get('freshFonts'))):
+        if isinstance(fresh, dict) and data.get(key) != fresh.get('digest'):
+            p.append('render receipt %s does not match the media under the public root now (rendered from other files)' % key)
+    fm = layout_info.get('freshMedia')
+    if isinstance(fm, dict) and data.get('mediaDigestMethod') != fm.get('method'):
+        p.append('render receipt mediaDigestMethod %r is not %r' % (data.get('mediaDigestMethod'), fm.get('method')))
     if layout_info.get('manifestHash') and (data.get('gateManifestHash') or '').lower() != str(layout_info['manifestHash']).lower():
         p.append('render receipt gateManifestHash differs from the layout report manifestHash')
     if layout_info.get('runId') and data.get('gateRunId') != layout_info['runId']:
@@ -1506,7 +2791,7 @@ def stream_hash(ctx, path, env, deadline):
         return None, 'ffmpeg not found', 4
     timeout = time_left(deadline, 60)
     if timeout is None:
-        return None, BUDGET_MSG, 4
+        return None, budget_msg(deadline), 4
     try:
         r = subprocess.run([ffmpeg, '-nostdin', '-v', 'error', '-i', str(path), '-map', '0:v:0', '-c', 'copy', '-f', 'streamhash',
                             '-hash', 'sha256', '-'], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
@@ -1544,7 +2829,7 @@ def verify_duration(ctx, env, deadline):
         return ['ffprobe not found'], 4, {}
     timeout = time_left(deadline, 60)
     if timeout is None:
-        return [BUDGET_MSG], 4, {}
+        return [budget_msg(deadline)], 4, {}
     try:
         r = subprocess.run([ffprobe, '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1',
                             str(final)], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
@@ -1620,31 +2905,16 @@ def run_verified(ctx, env, deadline):
     probs, cls, dinfo = verify_duration(ctx, env, deadline)
     recs.append(verified_record('final-duration', probs, ctx, P['final'], {ctx.rel(P['final']): h(P['final'])} if P['final'].is_file() else {},
                                 cls=cls or 2, status='missing' if cls == 4 else 'stale', extra=dinfo or None))
-    # relevance: absent is allowed (the content lint fails any stock/ai media beat without a verified verdict)
-    rv = P['relevance']
-    status = 'absent'
-    if rv.is_file():
-        data, err = read_json(rv)
-        value = data.get('verification_status') if isinstance(data, dict) else None
-        if err or not isinstance(data, dict):
-            status = 'unreadable'
-            recs.append(verified_record('relevance', ['relevance file unreadable: %s' % (err or 'not an object')], ctx, rv, {},
-                                        extra={'verification_status': status}))
-        elif value in ('verified', 'unverified'):
-            status = value
-            recs.append(verified_record('relevance', [], ctx, rv, {ctx.rel(rv): h(rv)}, extra={'verification_status': status}))
-        elif value == 'failed':
-            status = 'failed'
-            recs.append(verified_record('relevance', ['relevance verification_status is "failed"'], ctx, rv, {ctx.rel(rv): h(rv)},
-                                        cls=1, status='fail', extra={'verification_status': status}))
-        else:
-            status = 'invalid'
-            recs.append(verified_record('relevance', ['relevance verification_status is %r (expected verified/unverified/failed)' % (value,)],
-                                        ctx, rv, {ctx.rel(rv): h(rv)}, extra={'verification_status': status}))
-    else:
-        recs.append(record({'name': 'relevance', 'required': True}, 'pass', 0, 'no relevance file (recorded only)',
-                           ctx.rel(rv), None, 0, {}, kind='verified', extra={'verification_status': 'absent'}))
-    return recs, status, summary_info
+    return recs, relevance_info(ctx), summary_info
+
+
+def relevance_info(ctx):
+    """artifacts/relevance.json is evidence for NOTHING (CF-A67: stock / AI footage is never allowed in unattended mode, the content lint
+    fails every footage beat whose origin is not the source).  Its presence and bytes are only recorded, never read as a verdict."""
+    rv = ctx.paths['relevance']
+    present = rv.is_file()
+    return {'path': ctx.rel(rv), 'present': present, 'sha256': ctx.hash(rv) if present else None, 'used_as_evidence': False,
+            'note': RELEVANCE_NOTE}
 
 
 # ---------------------------------------------------------------- outcome
@@ -1786,7 +3056,7 @@ def write_check_state(status, started_at, **extra):
     path = CHECK_FILE['path']
     if path is None:
         return
-    body = {'schema': CHECK_SCHEMA, 'version': 1, 'skill': SKILL_DIR.name, 'composition': COMP, 'status': status,
+    body = {'schema': CHECK_SCHEMA, 'version': CHECK_VERSION, 'skill': SKILL_DIR.name, 'composition': COMP, 'status': status,
             'pid': os.getpid(), 'started_at': started_at, 'would_deliver': False}
     body.update(extra)
     try:
@@ -1843,23 +3113,42 @@ def check_integrity(args, tools, deadline, state, on_root=None):
     return problems
 
 
-def whisper_snapshot(model):
-    """Local HF cache check exactly as word_timing.sh does it (no network, nothing loaded): -> snapshot dir or None, hub dir."""
-    hub = Path(os.environ.get('HF_HUB_CACHE') or (os.environ.get('HF_HOME') or str(Path.home() / '.cache' / 'huggingface')) + '/hub')
-    for snap in sorted((hub / ('models--' + model.replace('/', '--')) / 'snapshots').glob('*')):
-        if (snap / 'config.json').is_file() and ((snap / 'weights.safetensors').exists() or (snap / 'weights.npz').exists()):
-            return snap, hub
-    return None, hub
+def asr_env_check(deep=False):
+    """`word-timing` environment check: `/bin/bash asr_run.sh asr_transcribe.py --check` (a delivery / --preflight) or `--check
+    --deep` (finalize --check: also the ~3 GB weights content) under asr_env().  The launcher verifies interpreter + stdlib + venv
+    against asr_venv.manifest first; a missing launcher / venv / manifest is FAIL with the setup hint, and nothing is ever installed.
+    -> (name, 'ok' | 'FAIL', detail with the seconds it took)."""
+    bad = launcher_problem()
+    if bad:
+        return 'word-timing', 'FAIL', bad
+    cmd = asr_cmd('asr_transcribe.py', '--check', *(['--deep'] if deep else []))
+    label = 'asr_run.sh asr_transcribe.py --check%s' % (' --deep' if deep else '')
+    t0 = time.monotonic()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=ASR_ENV_CHECK_LIMIT, stdin=subprocess.DEVNULL, env=asr_env(),
+                           cwd=str(SCRIPTS_DIR))
+    except subprocess.TimeoutExpired:
+        return 'word-timing', 'FAIL', '%s did not finish within %d s' % (label, ASR_ENV_CHECK_LIMIT)
+    except OSError as e:
+        return 'word-timing', 'FAIL', 'cannot run %s: %s' % (label, e)
+    secs = time.monotonic() - t0
+    if r.returncode == 0:
+        return 'word-timing', 'ok', '%s (%.1f s): %s' % (label, secs, (r.stdout.strip().splitlines() or ['ok'])[-1][:300])
+    err = ' | '.join(l.strip() for l in r.stderr.strip().splitlines()[-4:]) or 'no message'
+    hint = '' if 'setup_asr_venv.sh' in err else ' — %s' % (ASR_SETUP_HINT % SKILL_DIR)
+    return 'word-timing', 'FAIL', '%s exited %d: %s (nothing is downloaded or installed)%s' % (label, r.returncode, err[:700], hint)
 
 
-def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=False, word_timing=True):  # word_timing = the preflight-only checks
-    """Fail-closed environment checks, shared by a real run and `finalize.py --preflight`.  Never raises, never touches the
-    network, never loads a model.  -> [{name, status: ok|FAIL|skip, detail, cls}] in the order of the preflight listing.
+def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=False, preflight_only=True, public=None, deep=False):
+    """Fail-closed environment checks, shared by a real run, `--check` and `finalize.py --preflight`.  Never raises, never touches
+    the network, never loads a model.  -> [{name, status: ok|FAIL|skip, detail, cls}] in the order of the preflight listing.
     lock_problems: the problems check_integrity() found (None = not checked, an empty list = the lock verified).
-    word_timing: the preflight-only checks, the ONLY intentional difference between `--preflight` (True) and a real run /
-    `--check` (False): `word-timing` (finalize never calls word_timing.sh, so a missing model cache at delivery time must not
-    block an episode whose timing already passed the `timing` / `derived` gates) and `music-library` (the delivery only needs
-    the bed already in the project, not the library file).  Every other check is identical."""
+    preflight_only: `music-library`, the ONLY intentional difference between `--preflight` (True) and a real run / `--check`
+    (False; the delivery only needs the bed already in the project, not the library file).  `word-timing` (asr_run.sh
+    asr_transcribe.py --check) runs in EVERY mode: a delivery re-derives the pages through the launcher and --check transcribes;
+    deep=True (finalize --check only) adds --deep (the weights content).
+    public: the public/ directory the run reads (the fonts check looks there): <composer>/public, or the agent's --public-root in the
+    clean-checkout check (fonts are not tracked by git, a clean checkout has none of its own)."""
     out = []
 
     def add(name, status, detail, cls=0):
@@ -1896,10 +3185,11 @@ def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=F
         add('composer-node-modules', 'FAIL' if absent else 'ok',
             ('%s lacks %s' % (nm, ', '.join(absent))) if absent else '%s has %s' % (nm, ', '.join(COMPOSER_PACKAGES)), 4)
     # 4. fonts the engine loads
-    absent = [f for f in FONT_FILES if not (composer / 'public' / f).is_file() or (composer / 'public' / f).stat().st_size == 0]
+    pub = Path(public) if public is not None else composer / 'public'
+    absent = [f for f in FONT_FILES if not (pub / f).is_file() or (pub / f).stat().st_size == 0]
     add('fonts', 'FAIL' if absent else 'ok',
-        ('missing or empty under %s: %s (the render loads them blocking; never download fonts during a run)' % (composer / 'public', ', '.join(absent)))
-        if absent else '%s under %s' % (', '.join(FONT_FILES), composer / 'public'), 4)
+        ('missing or empty under %s: %s (the render loads them blocking; never download fonts during a run)' % (pub, ', '.join(absent)))
+        if absent else '%s under %s' % (', '.join(FONT_FILES), pub), 4)
     # 5. gate lock (verified by check_integrity)
     if lock_problems is None:
         add('gate-lock', 'skip', 'not checked')
@@ -1909,29 +3199,12 @@ def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=F
             4 if tool_only else 3)
     else:
         add('gate-lock', 'ok', 'lock present; skill, mirror and external files match it and git HEAD')
-    # 6. local speech model for word_timing.sh (--preflight only): file existence only, what the script itself checks before it starts
-    if not word_timing:
+    # 6. the word-timing chain, EVERY mode (a delivery runs asr_align.py through the launcher, --check transcribes):
+    #    `/bin/bash asr_run.sh asr_transcribe.py --check [--deep]` (manifest, model cache, pins; loads nothing, downloads nothing)
+    name, status, detail = asr_env_check(deep)
+    add(name, status, detail, 4)
+    if not preflight_only:
         return out
-    venv = Path(os.environ.get('KARAOKE_VENV') or Path.home() / '.cache' / 'karaoke-subtitle' / 'venv')
-    model = os.environ.get('WHISPER_MODEL') or WHISPER_DEFAULT_MODEL
-    problems = []
-    py = venv / 'bin' / 'python'
-    if not (py.is_file() and os.access(py, os.X_OK)):
-        problems.append('karaoke venv python missing: %s' % py)
-    tool = os.environ.get('EXTRACT_TIMING')
-    if not tool:
-        tool = next((str(c) for c in (SKILL_DIR.parent / 'karaoke_subtitle_v2' / 'scripts' / 'extract_timing.py',
-                                      Path('/Volumes/Ext_SS990Pro/Dev/openMontage-video-production/.claude/skills/karaoke_subtitle_v2/scripts/extract_timing.py'))
-                     if c.is_file()), '')
-    if not (tool and Path(tool).is_file()):
-        problems.append('extract_timing.py not found (set EXTRACT_TIMING)')
-    snap, hub = whisper_snapshot(model)
-    if snap is None:
-        problems.append('speech model %s is not in the local HF cache %s' % (model, hub))
-    if problems:
-        add('word-timing', 'FAIL', '; '.join(problems) + ' (word_timing.sh would exit 4; nothing is downloaded)', 4)
-    else:
-        add('word-timing', 'ok', 'venv %s, %s, model %s cached at %s (not loaded)' % (venv, tool, model, snap))
     # 7. approved local music library (--preflight only): the online source is refused at the time of writing, so a usable
     #    library is what every run relies on; failing here is cheaper than at the music step an hour in
     try:
@@ -1955,8 +3228,8 @@ def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=F
 
 def preflight(args):
     """`finalize.py --preflight`: print one line per check; exit 0 all ok, 3 integrity, 4 tool / dependency missing.
-    A real run and `--check` execute the same environment_checks() except `word-timing` (local whisper for word_timing.sh):
-    that one is preflight-only, on purpose (finalize never calls word_timing.sh); so is `music-library`."""
+    A real run and `--check` execute the same environment_checks(), `word-timing` (asr_run.sh asr_transcribe.py --check; --check
+    adds --deep) included; only `music-library` is preflight-only, on purpose."""
     deadline = Deadline(TOTAL_BUDGET_SEC)
     STOP.clear()
     tools = resolve_tools()
@@ -1977,7 +3250,8 @@ def preflight(args):
 # ---------------------------------------------------------------- main
 def run(args):
     t_start, started = time.monotonic(), now_iso()
-    deadline = Deadline(TOTAL_BUDGET_SEC)
+    budget = CHECK_TOTAL_BUDGET_SEC if args.check else TOTAL_BUDGET_SEC
+    deadline = Deadline(budget)
     STOP.clear()
     CHECK_FILE.update(path=None, started_at=started)
     tools = resolve_tools()
@@ -1999,10 +3273,37 @@ def run(args):
     except OSError as e:
         deliver_problem = 'cannot stat %s: %s' % (deliver, e)
 
-    state = {'moved': None, 'check_path': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False}
+    state = {'moved': None, 'check_path': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False,
+             'external': False, 'work_dir': None, 'work_dir_error': None}
 
     def remaining_msg(phase):
-        return 'time budget (%ds) exhausted during phase "%s"' % (TOTAL_BUDGET_SEC, phase)
+        return 'time budget (%ds) exhausted during phase "%s"' % (budget, phase)
+
+    def ensure_work_dir(root):
+        """The clean-checkout check's output directory: --work-dir (must be empty or new, never inside the project or the public
+        root -- checked BEFORE anything is created) or a new temp dir.  -> path or None (state['work_dir_error'] says why)"""
+        if state['work_dir'] is not None or state['work_dir_error']:
+            return state['work_dir']
+        try:
+            if args.work_dir:
+                wd = Path(os.path.abspath(args.work_dir))
+                proj = project_dir(args, root) if (root is not None or Path(args.project).is_absolute()) else None
+                for name, d in (('project', proj), ('public root', Path(args.public_root).resolve() if args.public_root else None)):
+                    if d is not None and inside(wd, d):
+                        state['work_dir_error'] = '--work-dir %s is inside the %s %s: the check must not write there' % (wd, name, d)
+                        return None
+                if os.path.lexists(wd) and (not wd.is_dir() or wd.is_symlink() or any(wd.iterdir())):
+                    state['work_dir_error'] = ('--work-dir %s must be an empty directory or not exist yet (a result of an earlier run must '
+                                               'never be mistaken for this one)' % wd)
+                    return None
+                wd.mkdir(parents=True, exist_ok=True)
+            else:
+                wd = Path(tempfile.mkdtemp(prefix='yt-news-v4-check-'))
+        except OSError as e:
+            state['work_dir_error'] = 'cannot create the work dir: %s' % e
+            return None
+        state['work_dir'] = wd.resolve()
+        return state['work_dir']
 
     def may_touch_deliver():
         """The deliver path may be cleaned up / moved aside only when it is certainly not an input of the run."""
@@ -2015,19 +3316,30 @@ def run(args):
                 return False
         return True
 
-    def finish(code, records, reasons, integrity=(), relevance='absent', hint=None):
+    def finish(code, records, reasons, integrity=(), relevance=None, hint=None):
         ctx = state['ctx']
         body = {'skill': SKILL_DIR.name, 'composition': COMP, 'exit_code': code, 'started_at': started,
                 'finished_at': now_iso(), 'seconds': round(time.monotonic() - t_start, 2),
                 'git_head': state['head'], 'lock_sha256': state['lock_sha']}
         if args.check:
-            body.update(schema=CHECK_SCHEMA, version=1, status='finished', pid=os.getpid(), would_deliver=(code == 0), reasons=reasons,
-                        integrity_problems=list(integrity), relevance_status=relevance,
-                        gates=[public(r, True) for r in records])
+            # running out of time is exit 4 and must never read like a content failure: `retry` tells the outside system so
+            timed_out = code == 4 and (any(r.get('status') == 'timeout' for r in records) or any('time budget' in x for x in reasons))
+            body.update(retry='when-idle' if timed_out else None)
+            body.update(schema=CHECK_SCHEMA, version=CHECK_VERSION, status='finished', pid=os.getpid(), would_deliver=(code == 0),
+                        reasons=reasons, integrity_problems=list(integrity), relevance=relevance,
+                        mode='clean-checkout' if state['external'] else 'in-repo', work_dir=str(state['work_dir']) if state['work_dir'] else None,
+                        project=str(ctx.project) if ctx else None, public_root=str(ctx.public) if ctx else None,
+                        certification=CERTIFICATION, gates=[public(r, True) for r in records])
             rdir = None
-            if ctx is not None:
+            if state['work_dir_error']:
+                pass                                    # an unusable work dir: nothing is written anywhere
+            elif ctx is not None:
                 rdir = ctx.reports
-            elif state['repo_root'] is not None:        # never relative to the cwd: an unknown repo writes nothing
+            elif state['external'] or (state['repo_root'] is None and (args.public_root or args.work_dir)):
+                state['external'] = True
+                rdir = ensure_work_dir(state['repo_root'])
+                body.update(mode='clean-checkout', work_dir=str(rdir) if rdir else None)
+            elif state['repo_root'] is not None and not linked_reports(args, state['repo_root']):   # never through a symlink (B9)
                 proj = Path(args.project)
                 rdir = (proj if proj.is_absolute() else state['repo_root'] / proj) / DEFAULT_PATHS['reports']
             if rdir is not None:
@@ -2064,14 +3376,25 @@ def run(args):
                 lines.append('  -> see %s' % failed_p)
         if args.check:
             cp = state['check_path']
-            lines.append('CHECK RESULT FILE: %s' % (cp if cp else 'not written (the repository or project could not be resolved)'))
+            lines.append('CHECK RESULT FILE: %s' % (cp if cp else 'not written (%s)' % (
+                state['work_dir_error'] or 'the repository or project could not be resolved')))
+            if state['external'] and state['work_dir']:
+                lines.append('CHECK WORK DIR: %s (the fresh reports of this check; nothing was written into the project or the public root)'
+                             % state['work_dir'])
             lines.append('--check never writes %s; the result of this run is only in the file above' % failed_p)
         print('\n'.join(lines))
         return code
 
     # ---- 1. integrity (gate files); repo root is derived from the skill dir, never from the cwd
     def on_root(root):
-        if args.check:       # the previous check.json must never be mistaken for the result of this run
+        if args.check and external_check(args, root):      # clean-checkout check: everything this run writes goes to the work dir
+            state['external'] = True
+            wd = ensure_work_dir(root)
+            if wd is not None:
+                CHECK_FILE['path'] = wd / 'check.json'
+                write_check_state('running', started, mode='clean-checkout', work_dir=str(wd))
+            return
+        if args.check and not linked_reports(args, root):    # (a symlinked project path is refused later; never written through)
             proj0 = Path(args.project)
             rdir0 = (proj0 if proj0.is_absolute() else root / proj0) / DEFAULT_PATHS['reports']
             if not run_lock_held_by_other(rdir0):          # never overwrite the file of a run that is still going
@@ -2089,13 +3412,17 @@ def run(args):
         return finish(3, [], ['integrity: %s' % p for p in problems[:20]], problems, hint=RESTORE_HINT)
     if deadline.expired():
         return finish(4, [], [remaining_msg('integrity')])
-    bad_env = [r for r in environment_checks(repo_root, args.composer, tools, [], word_timing=False) if r['status'] == 'FAIL']
+    if state['work_dir_error']:
+        return finish(2, [], ['bad input: %s' % state['work_dir_error']])
+    bad_env = [r for r in environment_checks(repo_root, args.composer, tools, [], preflight_only=False, public=public_dir(args, repo_root),
+                                             deep=bool(args.check))
+               if r['status'] == 'FAIL']
     if bad_env:                      # the very checks `finalize.py --preflight` prints: they can never disagree
         return finish(4, [], ['environment: %s: %s (nothing was run)' % (r['name'], r['detail']) for r in bad_env[:6]])
 
     # ---- context, run lock, deliver path (class 2 problems; nothing has run yet)
     try:
-        ctx = Ctx(args, repo_root, deliver, tools)
+        ctx = Ctx(args, repo_root, deliver, tools, work_dir=state['work_dir'] if state['external'] else None)
         state['ctx'] = ctx
     except (BadInput, OSError) as e:
         return finish(2, [], ['bad input: %s' % e])
@@ -2132,14 +3459,19 @@ def run(args):
         # ---- 2. fresh gates (parallel, bounded by the invocation deadline minus the post-verification reserve)
         gate_end = deadline.end - POST_RESERVE_SEC
         prepared = []
-        for g in GATES:
+        for g in active_gates(args.check):
             _argv, _report, in_paths, _p = build_command(g, ctx)
             prepared.append((g, {ctx.rel(p): ctx.hash(p) for p in in_paths}))
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        # --check-only gates (the re-transcription, minutes long) run in their OWN lane, in parallel with every other gate
+        lane = concurrent.futures.ThreadPoolExecutor(max_workers=1) if any(g.get('check_only') for g, _ in prepared) else None
         try:
             futs = {}
             for g, inp in prepared:
-                if not g.get('after'):
+                if g.get('check_only'):
+                    futs[g['name']] = lane.submit(run_gate, g, ctx, inp, gate_end, env)
+            for g, inp in prepared:
+                if not g.get('after') and not g.get('check_only'):
                     futs[g['name']] = ex.submit(run_gate, g, ctx, inp, gate_end, env)
             for g, inp in prepared:      # dependent gates start once the gates they wait for have finished
                 if g.get('after'):
@@ -2148,6 +3480,8 @@ def run(args):
             records = [futs[g['name']].result() for g, _ in prepared]
         finally:
             ex.shutdown(wait=False, cancel_futures=True)      # nothing queued may start after a cancellation
+            if lane is not None:
+                lane.shutdown(wait=False, cancel_futures=True)
 
         # ---- 3. verified reports
         if deadline.expired():
@@ -2185,6 +3519,20 @@ def run(args):
             release_run_lock(state['lock'])
 
 
+def input_hashes(ctx):
+    """The primary inputs and the agent's statements a delivery rests on, hashed now (receipt key `input_hashes`): the avatar the
+    episode uses, script.txt, the avatar SRT, the source transcript / video, the cuts file, visual_evidence.json (a claim of the
+    agent, see SELF_REPORTED) and the frames report THIS run wrote.  An absent optional file is {path, sha256: null}."""
+    out = {}
+    for key, path in (('avatar', ctx.avatar), ('script', ctx.paths['script']), ('srt', ctx.paths['srt']),
+                      ('source_transcript', ctx.paths['source_transcript']), ('source_video', ctx.paths['source_video']),
+                      ('cuts', ctx.paths['cuts']), ('visual_evidence', ctx.paths['evidence']),
+                      ('frames_report', gate_report_path('frames', ctx))):
+        present = path is not None and Path(path).is_file()
+        out[key] = {'path': ctx.rel(path) if path is not None else None, 'sha256': ctx.hash(path) if present else None}
+    return out
+
+
 def music_presence_receipt(records):
     rec = next((r for r in records if r['name'] == 'music-presence'), None)
     if rec is None or rec['status'] != 'pass':
@@ -2205,7 +3553,9 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
         shutil.copyfile(final, partial)
         if sha256_file(partial) != final_sha:
             raise OSError('copy verification failed (sha256 mismatch)')
-        receipt = {'schema': RECEIPT_SCHEMA, 'version': 1, 'skill': SKILL_DIR.name, 'composition': COMP,
+        receipt = {'schema': RECEIPT_SCHEMA, 'version': RECEIPT_VERSION, 'skill': SKILL_DIR.name, 'composition': COMP,
+                   'certification': CERTIFICATION,
+                   'self_reported': list(SELF_REPORTED),
                    'delivered': {'path': str(deliver), 'sha256': final_sha, 'bytes': partial.stat().st_size},
                    'requested_deliver_path': str(lexical),
                    'git_head': state['head'], 'lock_sha256': state['lock_sha'],
@@ -2213,13 +3563,15 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
                    'skill_tree': git_out(tools, ctx.repo_root, 'rev-parse', 'HEAD:' + SKILL_DIR.relative_to(ctx.repo_root).as_posix()),
                    'tools': tool_versions(tools),
                    'bound_inputs': {k: {'path': ctx.rel(ctx.paths[k]), 'sha256': ctx.hash(ctx.paths[k])}
-                                    for k in ('episode', 'script', 'source_script', 'srt', 'words', 'line_starts', 'word_pages',
+                                    for k in ('episode', 'script', 'source_script', 'srt', 'words', 'line_starts', 'word_raw', 'word_pages',
                                               'caption_options', 'captions', 'visual', 'final')},
+                   'word_timing': ctx.word_timing,
                    'layout': vinfo.get('layout'), 'render': vinfo.get('render'), 'mux': vinfo.get('mux'),
                    'music': vinfo.get('music'), 'video': vinfo.get('video'),
                    'music_presence': music_presence_receipt(records),
+                   'input_hashes': input_hashes(ctx),
                    'manifest_sha256': ctx.manifest_sha,
-                   'gates': [public(r, False) for r in records], 'relevance_status': relevance,
+                   'gates': [public(r, False) for r in records], 'relevance': relevance,
                    'started_at': started, 'finished_at': now_iso(), 'seconds': round(time.monotonic() - t_start, 2)}
         receipt_tmp.write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + '\n')
         remove_quiet(deliver)               # a previous (uncertified) mp4 is never left beside the new receipt
@@ -2294,12 +3646,21 @@ def main(argv=None):
     ap.add_argument('--repo-root', default=None, help='optional; must equal the skill\'s git top level')
     ap.add_argument('--manifest')
     ap.add_argument('--check', action='store_true')
+    ap.add_argument('--public-root', default=None,
+                    help='--check only: the agent\'s remotion-composer/public (episode media + fonts); code, lock, engine and '
+                         'node_modules still come from this checkout')
+    ap.add_argument('--work-dir', default=None,
+                    help='--check only: where the fresh reports and check.json go (empty or new; default: a new temp dir, printed '
+                         'at the end); nothing is written into the project or the public root')
     args = ap.parse_args(argv)
     if args.preflight:
-        if args.project or args.deliver or args.check or args.manifest:
+        if args.project or args.deliver or args.check or args.manifest or args.public_root or args.work_dir:
             ap.error('--preflight takes only --composer / --repo-root')
     elif not (args.project and args.deliver):
         ap.error('--project and --deliver are required (unless --preflight)')
+    elif (args.public_root or args.work_dir) and not args.check:
+        ap.error('--public-root / --work-dir are --check-only options: a real delivery reads the media of this repository and writes '
+                 'its reports into the project')
     old = {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, signal.SIGINT):

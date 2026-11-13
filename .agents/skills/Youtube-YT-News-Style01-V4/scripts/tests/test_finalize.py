@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import pwd
 import importlib.util
 import io
 import json
@@ -121,19 +122,55 @@ console.log(JSON.stringify({ ok, issues: ok ? [] : [{ id: 'engine-drift', messag
 process.exit(b.exit !== undefined ? b.exit : (ok ? 0 : 3));
 '''
 
-# qc_manifest.mjs (canonical JSON + manifestHash), srt_to_script / words_by_line / line_starts / caption_join are NOT stubbed:
-# the real files of this skill are copied into every fake skill (REAL_ALWAYS), so manifestHash and the derived gate are the real thing.
-REAL_ALWAYS = ('qc_manifest.mjs', 'srt_to_script.py', 'words_by_line.py', 'line_starts.py', 'caption_join.mjs')
+# face_box.py stub (the real one needs a >= 20 s avatar with a face; its own tests are test_face_box.py): writes the report in the
+# shape face_box.py writes (avatar_sha256 of the file it was given, verdict.face_box = the episode's avatarFaceBox) and exits like it.
+FACE_STUB = PY_STUB.split("report = arg('--report')")[0] + r'''
+import hashlib
+report = arg('--report')
+box = json.loads(Path(arg('--episode')).read_text()).get('avatarFaceBox')
+ok = b.get('pass', True)
+rec = {'x': 0.38, 'y': 0.1, 'w': 0.2, 'h': 0.36}
+if report and b.get('write', True):
+    Path(report).write_text(json.dumps({
+        'schema': b.get('schema', 'yt-news-v4-face-box'), 'version': 1,
+        'avatar_sha256': b.get('avatar_sha256') or hashlib.sha256(Path(arg('--avatar')).read_bytes()).hexdigest(),
+        'times': [], 'frames': [], 'union': None, 'recommended': rec,
+        'verdict': {'pass': ok, 'reason': None if ok else 'share-below-threshold', 'min_share': 0.97 if ok else 0.84,
+                    'frames_with_face': 40, 'threshold': 0.9, 'face_box': b['face_box'] if 'face_box' in b else box, 'recommended': rec}}))
+print('face-box PASS: min share 0.970 (>= 0.9) over 40 frames, face found in 40' if ok else
+      'face-box FAIL: 2 frame(s) have less than 90% of the face inside avatarFaceBox\nfix: replace avatarFaceBox')
+(logs / (name + '.end')).write_text(repr(time.time()))
+sys.exit(b.get('exit', 0 if ok else 1))
+'''
 
+# qc_manifest.mjs + media_digest.mjs (canonical JSON, manifestHash, computeSourceHashes, digestDir), srt_to_script / words_by_line /
+# line_starts / caption_join are NOT stubbed: the real files of this skill are copied into every fake skill (REAL_ALWAYS), so
+# manifestHash, the fresh layout hashes and the derived gate are the real thing.
+REAL_ALWAYS = ('qc_manifest.mjs', 'media_digest.mjs', 'srt_to_script.py', 'words_by_line.py', 'line_starts.py', 'caption_join.mjs',
+               'asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'asr_run.sh')
+# ^ the chain code (raw `code` names all four): asr_* are reached only through the fake launcher, timing_defects.py runs for real
+
+def _real_thresholds_src():
+    import ast as _ast
+    src = (SCRIPTS / 'timing_check.py').read_text()
+    node = next(n for n in _ast.parse(src).body if isinstance(n, _ast.Assign) and getattr(n.targets[0], 'id', None) == 'THRESHOLDS')
+    return 'THRESHOLDS = ' + _ast.get_source_segment(src, node.value) + '\n'
+
+
+# the timing_check stub carries the REAL THRESHOLDS literal: finalize reads the silence / interior-margin values from it with ast
+TIMING_STUB = PY_STUB + '\n' + _real_thresholds_src()
 STUB_FILES = {'lint_beats.py': PY_STUB, 'lint_content.py': PY_STUB, 'lint_captions.py': PY_STUB,
-              'frame_checks.py': PY_STUB, 'measure_loudness.py': PY_STUB, 'timing_check.py': PY_STUB, 'qc_final_pixels.mjs': JS_PIXELS,
-              'episode_schema.mjs': JS_SCHEMA, 'gate_integrity.mjs': JS_INTEGRITY}
-ALL_GATES = ['frames', 'final-av', 'final-pixels', 'loudness', 'music-presence', 'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions',
-             'script', 'derived']
-ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration', 'relevance']
+              'frame_checks.py': PY_STUB, 'measure_loudness.py': PY_STUB, 'timing_check.py': TIMING_STUB, 'qc_final_pixels.mjs': JS_PIXELS,
+              'episode_schema.mjs': JS_SCHEMA, 'gate_integrity.mjs': JS_INTEGRITY, 'face_box.py': FACE_STUB,
+              'face_vision.swift': '// stub: the face_box.py stub never runs it\n'}
+ALL_GATES = ['frames', 'final-av', 'final-pixels', 'mux-audio', 'loudness', 'music-presence', 'face-box', 'cuts', 'word-timing',
+             'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions', 'script', 'derived']   # the gates of a delivery
+CHECK_ONLY = ['asr-recheck']                                     # --check only (registered first, own lane)
+ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration']
+CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS
 STEM = {'beats': 'lint_beats', 'content': 'lint_content', 'captions': 'lint_captions', 'frames': 'frame_checks',
         'loudness': 'measure_loudness', 'timing': 'timing_check', 'final-pixels': 'qc_final_pixels', 'schema': 'episode_schema',
-        'gate-integrity': 'gate_integrity'}
+        'gate-integrity': 'gate_integrity', 'face-box': 'face_box'}
 
 
 def sha(path):
@@ -204,26 +241,36 @@ def probe_video(path):
 
 
 TONE = 'sine=frequency=440:sample_rate=48000:duration=30'       # sound all the way: the voice, then the bed after it
+# the default audio of a final: the REAL mux_av.sh output for the fixture avatar + the approved library bed (MUX_LIB) or the online
+# bed of an empty-library fixture (MUX_ONLINE); stream-copied, so the `mux-audio` gate's rebuild is bit-identical to it
+MUX_LIB, MUX_ONLINE = 'muxed:lib', 'muxed:online'
+MUXED = {}
 VISUAL_ARGS = ['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=2', '-f', 'lavfi', '-i', 'color=c=0x101018:s=320x240:r=25:d=2',
                '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0']
 
 
-def final_with_audio(proj, *video_args, audio=TONE, out=None):
-    """final.mp4 = the packets of visual.mp4 (by default) + an audio track built from the lavfi source `audio` (None = no audio)."""
+def final_with_audio(proj, *video_args, audio=MUX_LIB, out=None, shortest=True):
+    """final.mp4 = the packets of visual.mp4 (by default) + MUX_LIB / MUX_ONLINE or a Path (a real mux audio, copied) or an audio
+    track built from the lavfi source `audio` (None = no audio).  shortest=False keeps every video packet of a visual that is a
+    little longer than the 4.0 s mux audio (with -shortest the copy would end at the audio and the video stream would differ)."""
     visual = str(proj / 'renders' / 'visual.mp4')
     dest = str(out or proj / 'renders' / 'final.mp4')
+    copied = audio if isinstance(audio, Path) else MUXED.get(audio) if audio is not None else None
     if audio is None:
         ffmpeg('-i', visual, *(video_args or ('-c:v', 'copy')), '-an', dest)
+    elif copied is not None:
+        ffmpeg('-i', visual, '-i', str(copied), '-map', '0:v:0', '-map', '1:a:0', *(video_args or ('-c:v', 'copy')), '-c:a', 'copy',
+               *(['-shortest'] if shortest else []), dest)
     else:
         ffmpeg('-i', visual, '-f', 'lavfi', '-i', audio, '-map', '0:v:0', '-map', '1:a:0', *(video_args or ('-c:v', 'copy')),
                '-c:a', 'aac', '-shortest', dest)
 
 
-def make_videos(proj, visual_args=None, pix_fmt='yuv420p', audio=TONE):
+def make_videos(proj, visual_args=None, pix_fmt='yuv420p', audio=MUX_LIB, shortest=True):
     """visual.mp4 = 2 s of motion + the V4 end card (2 s solid dark static frame) -> exactly totalDurationSec 4.0 (voEndSec 2.0);
     final.mp4 = the same video packets (mux_av.sh stream-copies the video) + sound after the voice ends (the music-presence gate)."""
     ffmpeg(*(visual_args or VISUAL_ARGS), '-pix_fmt', pix_fmt, str(proj / 'renders' / 'visual.mp4'))
-    final_with_audio(proj, audio=audio)
+    final_with_audio(proj, audio=audio, shortest=shortest)
 
 
 def synth_wav(segments, rate=48000, freq=440.0):
@@ -254,6 +301,25 @@ SEAM_BED = synth_wav([(2.5, 0.07), (2.0, 0.07 * 0.08)])        # sine amplitude 
 SILENT_BED = synth_wav([(4.5, 0.0)])
 SEAM_SHA, SILENT_SHA = hashlib.sha256(SEAM_BED).hexdigest(), hashlib.sha256(SILENT_BED).hexdigest()
 AVATAR_FILE = []
+# the approved library track and the retired online bed are REAL (decodable) audio: the `mux-audio` gate rebuilds the mix from them
+LIB_BYTES = synth_wav([(6.0, 0.05)], freq=220.0)
+ONLINE_BED_BYTES = synth_wav([(6.0, 0.05)], freq=330.0)
+
+
+def real_mux_audio(work, visual, avatar, bed_bytes, total=4.0, vo_end=2.0, script=None):
+    """The audio track the REAL mux_av.sh (or `script`, a modified copy) makes from visual + avatar + bed -> path of an .m4a."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    bed = work / 'bed.wav'
+    bed.write_bytes(bed_bytes)
+    out = work / 'final.mp4'
+    r = subprocess.run(['bash', str(script or SCRIPTS / 'mux_av.sh'), str(visual), str(avatar), str(bed), str(out), str(total), str(vo_end)],
+                       capture_output=True, text=True)
+    if not out.is_file():
+        raise RuntimeError('mux_av.sh made no output: %s' % r.stderr[-800:])
+    audio = work / 'audio.m4a'
+    ffmpeg('-i', str(out), '-map', '0:a:0', '-c', 'copy', str(audio))
+    return audio
 
 
 def make_avatar(path, seconds=2.0):
@@ -263,6 +329,135 @@ def make_avatar(path, seconds=2.0):
            '-shortest', str(path))
 
 
+# ---- the word-timing chain (CF-A67 phases B + C).  finalize reaches the chain's python ONLY as `/bin/bash <ASR_RUN> <script> ...`;
+# ASR_RUN (a module constant = <scripts>/asr_run.sh) is patched in-process by FinalizeBase.module() to the FAKE launcher FILE below
+# (a seam the agent cannot reach; no environment variable).  The fake launcher execs the fake chain, which refuses anything but
+# the launcher's CHAIN_SCRIPTS (exit 2, like asr_run.sh), logs every call (argv, environment, the --out-dir listing) to
+# calls.jsonl, and emulates asr_transcribe.py (--check [--deep] / --fingerprint / a transcription that writes `transcribe_raw`) and
+# asr_align.py (pages looked up by the sha256 of --raw in align_map.json, else "[]").  timing_defects.py is not a launcher script:
+# finalize runs the REAL one under its own interpreter (stdlib + ffmpeg silencedetect on the real extracted wav).
+CHAIN_CODE = ('asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'asr_run.sh')
+CHAIN_FFMPEG = next(c for c in ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg') if os.access(c, os.X_OK))
+ASR_PARAMS = {'language': 'th', 'temperature': [0.0], 'condition_on_previous_text': False, 'word_timestamps': True}
+FAKE_FP = {'model': {'id': 'fake/whisper', 'snapshot': 'f' * 40, 'files': {'config.json': 'c' * 40}},
+           'mlx_whisper': {'version': '0.4.3', 'files': {'transcribe.py': 'a' * 64}}, 'mlx': {'version': '0.31.2'},
+           'tokenizer': {'pythainlp': '5.3.4'}, 'platform': {'system': 'Darwin', 'machine': 'arm64', 'cpu': 'Test'},
+           'ffmpeg': {'realpath': '/opt/fake/ffmpeg', 'sha256': 'e' * 64, 'version': 'ffmpeg version test'},
+           'venv': {'manifest_sha256': 'b' * 64, 'python': '3.12.15 (main) [Clang test]'}}
+# names /bin/bash itself puts into the environment of the fake (measured: PWD, SHLVL) and the one macOS adds to every process
+BASH_OR_OS_ADDED = {'PWD', 'SHLVL', '__CF_USER_TEXT_ENCODING'}
+FAKE_ASR = r"""import hashlib, json, os, sys, time
+from pathlib import Path
+STUB = Path(__file__).resolve().parent
+argv = sys.argv[1:]
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def load(name, default):
+    f = STUB / name
+    return json.loads(f.read_text(encoding='utf-8')) if f.exists() else default
+beh = load('behavior.json', {})
+scripts = Path(load('config.json', {})['scripts'])
+script = argv[0] if argv else '?'
+args = argv[1:]
+def opt(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+rec = {'argv': argv, 'env': dict(os.environ), 'script': script}
+if opt('--out-dir'):
+    d = Path(opt('--out-dir'))
+    rec['out_dir_entries'] = sorted(os.listdir(d)) if d.is_dir() else None
+with open(STUB / 'calls.jsonl', 'a', encoding='utf-8') as f:
+    f.write(json.dumps(rec) + '\n')
+if script not in ('asr_transcribe.py', 'asr_align.py', 'source_timed.py'):
+    sys.stderr.write('ERROR: %s is not a chain script (asr_transcribe.py asr_align.py source_timed.py)\n' % script)
+    sys.exit(2)
+def act(key):
+    b = beh.get(key) or {}
+    if b.get('sleep'):
+        time.sleep(b['sleep'])
+    if 'stdout' in b:
+        sys.stdout.write(b['stdout'])
+    if 'stderr' in b:
+        sys.stderr.write(b['stderr'])
+    if 'exit' in b:
+        sys.exit(b['exit'])
+if script == 'asr_transcribe.py':
+    if '--check' in args:
+        act('check_deep' if '--deep' in args else 'check')
+        print('ok: fake chain%s' % (' (weights content verified)' if '--deep' in args else ''))
+        sys.exit(0)
+    if '--fingerprint' in args:
+        act('fingerprint')
+        fp = load('fingerprint.json', {})
+        fp['code'] = {n: sha(scripts / n) for n in ('asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'asr_run.sh')}
+        fp.update(beh.get('fingerprint_patch') or {})
+        print(json.dumps(fp, sort_keys=True))
+        sys.exit(0)
+    act('transcribe')
+    Path(opt('--out-dir'), 'raw_asr.json').write_bytes(Path(beh['transcribe_raw']).read_bytes())
+    sys.exit(0)
+if script == 'asr_align.py':
+    act('align')
+    Path(opt('--out')).write_text(load('align_map.json', {}).get(sha(opt('--raw')), '[]'), encoding='utf-8')
+    sys.exit(0)
+sys.stderr.write('fake ASR: %s is not emulated\n' % script)
+sys.exit(4)
+"""
+WAV_INFO = {}            # the fixture avatar's audio, extracted exactly like word_timing.sh step 1: {sha256, duration}
+RAW_TEXT = []            # the fixture raw_asr.json (written into the project template)
+
+
+def chain_wav(avatar, wav):
+    subprocess.run([CHAIN_FFMPEG, '-v', 'error', '-y', '-i', str(avatar), '-vn', '-map_metadata', '-1', '-ac', '1', '-ar', '16000',
+                    '-c:a', 'pcm_s16le', '-fflags', '+bitexact', '-flags:a', '+bitexact', str(wav)], check=True)
+    import wave as _wave
+    with _wave.open(str(wav), 'rb') as w:
+        return {'wav_sha256': sha(wav), 'duration': w.getnframes() / 16000}      # = raw_asr.json audio (asr_transcribe.py)
+
+
+def raw_doc(words=None, audio=None, script_sha=None, **over):
+    """A raw_asr.json document in the shape asr_transcribe.py writes, for the fixture avatar + script (words = (word, s, e))."""
+    words = [(w['w'], w['s'], w['e']) for pg in PAGES for w in pg['words']] if words is None else words
+    seg = {'start': words[0][1] if words else 0.0, 'end': words[-1][2] if words else 0.0, 'text': ' '.join(w for w, _, _ in words),
+           'compression_ratio': 1.2, 'avg_logprob': -0.2, 'no_speech_prob': 0.01, 'rung': 'R0',
+           'words': [{'word': w, 'start': a, 'end': b} for w, a, b in words]}
+    doc = {'schema': 'yt-news-v4-raw-asr', 'version': 1, 'audio': dict(audio or WAV_INFO), 'script_sha256': script_sha or WAV_INFO['script'],
+           **json.loads(json.dumps(FAKE_FP)), 'params': dict(ASR_PARAMS), 'code': {n: sha(SCRIPTS / n) for n in CHAIN_CODE},
+           'rungs': [{'rung': 'R0', 'regions': [], 'seconds': WAV_INFO['duration']}], 'segments': [seg]}
+    doc['audio'].pop('script', None)
+    doc.update(over)
+    return doc
+
+
+def raw_text(doc):
+    return json.dumps(doc, ensure_ascii=False, indent=1, allow_nan=False) + '\n'
+
+
+def make_asr_stub(d, pages_text, scripts):
+    """The fake launcher `d`/asr_run.sh + its fake chain (fresh per test).  `scripts` = the fixture skill's scripts dir (the chain
+    code the fingerprint names).  The fixture raw re-derives to `pages_text`; a re-transcription writes the fixture raw again."""
+    d.mkdir(parents=True)
+    (d / 'fake_chain.py').write_text(FAKE_ASR)
+    # run by finalize as `/bin/bash <this file> <script> ...`: exec, so no shell stays between finalize and the fake chain
+    (d / 'asr_run.sh').write_text('#!/bin/bash\nexec "%s" -I -B "%s" "$@"\n' % (sys.executable, d / 'fake_chain.py'))
+    (d / 'config.json').write_text(json.dumps({'scripts': str(scripts)}))
+    (d / 'fingerprint.json').write_text(json.dumps(dict(FAKE_FP, params=ASR_PARAMS)))
+    (d / 'retranscribed.json').write_text(RAW_TEXT[0])
+    (d / 'behavior.json').write_text(json.dumps({'transcribe_raw': str(d / 'retranscribed.json')}))
+    (d / 'align_map.json').write_text(json.dumps({hashlib.sha256(RAW_TEXT[0].encode('utf-8')).hexdigest(): pages_text}))
+    return d
+
+
+FIN_LAUNCH = r"""import importlib.util, os, sys
+from pathlib import Path
+path, launcher = sys.argv[1], sys.argv[2]
+sys.path[0] = os.path.dirname(path)
+spec = importlib.util.spec_from_file_location('finalize_cli', path)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.ASR_RUN = Path(launcher)
+sys.argv = [path] + sys.argv[3:]
+sys.exit(m.main())
+"""
 ENV_BACKUP = {}
 ENV_DIR = []
 
@@ -270,27 +465,17 @@ ENV_DIR = []
 def setUpModule():
     global PROJECT_TEMPLATE
     # a stubbed environment for the environment checks every real run starts with: stand-ins for numpy / PIL / pythainlp
-    # (appended to sys.path and PYTHONPATH, so a real install still wins), a fake karaoke venv, extract_timing.py and HF cache
+    # (appended to sys.path and PYTHONPATH, so a real install still wins).  The chain is the fake launcher of make_asr_stub
+    # (finalize's ASR_RUN seam); no environment variable is involved.
     env = Path(tempfile.mkdtemp(prefix='finalize-env-')).resolve()
     ENV_DIR.append(env)
     for mod in ('numpy', 'PIL', 'pythainlp'):
         (env / 'stubmods' / mod).mkdir(parents=True)
         (env / 'stubmods' / mod / '__init__.py').write_text('')
     sys.path.append(str(env / 'stubmods'))
-    (env / 'venv' / 'bin').mkdir(parents=True)
-    (env / 'venv' / 'bin' / 'python').write_text('#!/bin/sh\n')
-    (env / 'venv' / 'bin' / 'python').chmod(0o755)
-    (env / 'extract_timing.py').write_text('# stub\n')
-    snap = env / 'hub' / 'models--mlx-community--whisper-large-v3-mlx' / 'snapshots' / 'abc'
-    snap.mkdir(parents=True)
-    (snap / 'config.json').write_text('{}')
-    (snap / 'weights.safetensors').write_bytes(b'w')
-    for k, v in (('PYTHONPATH', os.pathsep.join(x for x in (os.environ.get('PYTHONPATH'), str(env / 'stubmods')) if x)),
-                 ('KARAOKE_VENV', str(env / 'venv')), ('EXTRACT_TIMING', str(env / 'extract_timing.py')), ('HF_HUB_CACHE', str(env / 'hub'))):
+    for k, v in (('PYTHONPATH', os.pathsep.join(x for x in (os.environ.get('PYTHONPATH'), str(env / 'stubmods')) if x)),):
         ENV_BACKUP[k] = os.environ.get(k)
         os.environ[k] = v
-    ENV_BACKUP.pop('WHISPER_MODEL', None)
-    os.environ.pop('WHISPER_MODEL', None)
     if not (HAVE_FFMPEG and HAVE_NODE):
         return
     t = Path(tempfile.mkdtemp(prefix='finalize-proj-'))
@@ -299,7 +484,7 @@ def setUpModule():
         (p / d).mkdir(parents=True)
     (p / 'artifacts' / 'episode.json').write_text(json.dumps({
         'schema': 'yt-news-v4-episode/1', 'assetDir': 'ep1', 'avatarFile': 'avatar.mp4', 'fps': 25, 'voEndSec': 2.0,
-        'totalDurationSec': 4.0, 'beats': [{'t': 0}]}))
+        'totalDurationSec': 4.0, 'avatarFaceBox': {'x': 0.38, 'y': 0.1, 'w': 0.2, 'h': 0.36}, 'beats': [{'t': 0}]}))
     (p / 'artifacts' / 'source_script.txt').write_text(SOURCE_SCRIPT)
     (p / 'assets' / 'avatar.srt').write_text(SRT)
     (p / 'artifacts' / 'word_timing' / 'caption_pages.json').write_text(json.dumps(PAGES))
@@ -309,9 +494,17 @@ def setUpModule():
     (p / 'artifacts' / '_cuts.json').write_text('[]')
     (p / 'assets' / 'broll' / 'a.mp4').write_bytes(b'x')
     (p / 'assets' / 'ytsource' / 'transcript.txt').write_text('transcript\n')
-    make_videos(p)
     make_avatar(t / 'avatar.mp4')
     AVATAR_FILE.append(t / 'avatar.mp4')
+    WAV_INFO.clear()
+    WAV_INFO.update(chain_wav(t / 'avatar.mp4', t / 'vo16k.wav'), script=sha(p / 'artifacts' / 'script.txt'))
+    (t / 'vo16k.wav').unlink()
+    RAW_TEXT[:] = [raw_text(raw_doc())]
+    (p / 'artifacts' / 'word_timing' / 'raw_asr.json').write_text(RAW_TEXT[0])
+    ffmpeg(*VISUAL_ARGS, '-pix_fmt', 'yuv420p', str(p / 'renders' / 'visual.mp4'))
+    for key, bed in ((MUX_LIB, LIB_BYTES), (MUX_ONLINE, ONLINE_BED_BYTES)):
+        MUXED[key] = real_mux_audio(t / ('mux-' + key.split(':')[1]), p / 'renders' / 'visual.mp4', t / 'avatar.mp4', bed)
+    final_with_audio(p)
     PROJECT_TEMPLATE = t
 
 
@@ -333,7 +526,6 @@ def tearDownModule():
         raise AssertionError('a test leaked files into the skill tree: %s' % stray)
 
 
-LIB_BYTES = b'LIBRARY-TRACK-BYTES'
 LIB_FILE = 'calm-tech.mp3'
 
 
@@ -362,14 +554,46 @@ def library_sidecar(bed, **kw):
     return d
 
 
-def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=None, sidecar=None):
-    """Layout report v3 + run manifest, render receipt and mux receipt in the shapes the real writers produce."""
-    proj = repo / 'projects' / 'p1'
+LAYOUT_JS = (
+    "import {pathToFileURL} from 'node:url'; import fs from 'node:fs';"
+    "const [qmp, mdp, composer, skill, episode, captions, media, fonts, cache] = process.argv.slice(1);"
+    "const qm = await import(pathToFileURL(qmp).href); const md = await import(pathToFileURL(mdp).href);"
+    "const o = cache ? {cacheFile: cache} : {};"
+    "const dig = async d => fs.existsSync(d) ? await md.digestDir(d, o) : {missing: true};"
+    "const sh = fs.existsSync(episode) && fs.existsSync(captions) ? await qm.computeSourceHashes({composerDir: composer, skillDir: skill,"
+    " episodePath: episode, captionsPath: captions}) : {};"
+    "console.log(JSON.stringify({sourceHashes: sh, media: await dig(media), fonts: await dig(fonts)}));")
+
+
+def layout_inputs(repo, name=NAME, proj=None, public=None, cache_file=None):
+    """What qc_layout.mjs records about its inputs (the other team's JS: computeSourceHashes + digestDir, with the hash cache when
+    `cache_file` is given, exactly like a real layout run).  A fixture that removed one of the helpers (MissingManifestHelperTests)
+    or the fonts (RealRunEnvironmentTests) still gets receipts: the helper then comes from the real skill, a missing dir digests as
+    {missing: true} (what finalize sees there is the point of those tests, not these receipts)."""
+    proj = proj or repo / 'projects' / 'p1'
+    public = public or repo / 'remotion-composer' / 'public'
+    skill = repo / '.claude' / 'skills' / name
+    # media_digest.mjs imports ./qc_manifest.mjs: both come from the same directory
+    hdir = skill / 'scripts' if all((skill / 'scripts' / n).is_file() for n in ('qc_manifest.mjs', 'media_digest.mjs')) else SCRIPTS
+    helper = lambda n: hdir / n   # noqa: E731
+    r = subprocess.run(['node', '--input-type=module', '-e', LAYOUT_JS, str(helper('qc_manifest.mjs')),
+                        str(helper('media_digest.mjs')), str(repo / 'remotion-composer'), str(skill),
+                        str(proj / 'artifacts' / 'episode.json'), str(proj / 'artifacts' / 'caption-joined.json'), str(public / 'ep1'),
+                        str(public / 'fonts'), str(cache_file or '')], capture_output=True, text=True, check=True)
+    return json.loads(r.stdout)
+
+
+def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=None, sidecar=None, proj=None, public=None, cache_file=None):
+    """Layout report v3 + run manifest, render receipt and mux receipt in the shapes the real writers produce.  proj / public: the
+    agent's project and public/ when they are not the ones inside `repo` (the clean-checkout check); the lock, the composer and the
+    skill are always those of `repo`."""
+    proj = proj or repo / 'projects' / 'p1'
+    public = public or repo / 'remotion-composer' / 'public'
     lock = repo / '.claude' / 'skills' / name / 'scripts' / 'gates.lock.json'
     ep, cap = proj / 'artifacts' / 'episode.json', proj / 'artifacts' / 'caption-joined.json'
     vis, fin = proj / 'renders' / 'visual.mp4', proj / 'renders' / 'final.mp4'
     composer = repo / 'remotion-composer'
-    avatar = repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+    avatar = public / 'ep1' / 'avatar.mp4'
     rd = proj / 'qc' / 'layout' / 'runs' / run_id
     rd.mkdir(parents=True, exist_ok=True)
     bed = proj / 'assets' / 'audio' / 'bed.mp3'
@@ -377,18 +601,14 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=None, sidecar=None)
     # the default bed is the real path: an approved library track + the library sidecar.  A fixture with an EMPTY approved list
     # (make_repo drops .stub_online_bed) gets the retired online bed instead, the only kind an empty list accepts.
     online = (repo / '.stub_online_bed').exists()
-    bed.write_bytes(bed_bytes if bed_bytes is not None else (b'BED-MUSIC' if online else LIB_BYTES))
+    bed.write_bytes(bed_bytes if bed_bytes is not None else (ONLINE_BED_BYTES if online else LIB_BYTES))
     side = sidecar(bed) if callable(sidecar) else sidecar or (online_sidecar(bed) if online else library_sidecar(bed))
     Path(str(bed) + '.source.json').write_text(json.dumps(side))
+    li = layout_inputs(repo, name, proj, public, cache_file)
     manifest = {'schema': 'yt-news-v4-run-manifest', 'version': 1, 'runId': run_id, 'compositionId': COMP,
-                'sourceHashes': {'episode.json': sha(ep), 'captions.json': sha(cap), 'scripts/gates.lock.json': sha(lock),
-                                 'src/YtNewsStyle01V4.tsx': sha(composer / 'src' / 'YtNewsStyle01V4.tsx'),
-                                 'src/ytNewsStyle01V4.entry.tsx': sha(composer / 'src' / 'ytNewsStyle01V4.entry.tsx'),
-                                 'src/ytNewsStyle01V4Sample.json': sha(composer / 'src' / 'ytNewsStyle01V4Sample.json'),
-                                 'src/ytNewsStyle01V4SampleCaptions.json': sha(composer / 'src' / 'ytNewsStyle01V4SampleCaptions.json')},
-                'mediaDigest': {'method': 'sha256-per-file-v1', 'assetDir': 'ep1', 'digest': 'b' * 64, 'files': 3, 'bytes': 99},
-                'fontsDigest': {'method': 'sha256-per-file-v1', 'digest': 'c' * 64}, 'bundleKey': 'k-1',
-                'planSha256': 'd' * 64, 'frames': [0, 25, 50], 'thresholdsSha256': 'e' * 64}
+                'sourceHashes': li['sourceHashes'],
+                'mediaDigest': {**li['media'], 'assetDir': 'ep1'}, 'fontsDigest': {**li['fonts'], 'assetDir': 'fonts'},
+                'bundleKey': 'k-1', 'planSha256': 'd' * 64, 'frames': [0, 25, 50], 'thresholdsSha256': 'e' * 64}
     (rd / 'run-manifest.json').write_text(json.dumps(manifest, indent=2))
     mhash = hashlib.sha256(canon(manifest).encode()).hexdigest()
     report = {'schema': 'yt-news-layout-report', 'version': 3, 'compositionId': COMP, 'runId': run_id,
@@ -411,7 +631,7 @@ def write_receipts(repo, run_id=RUN_ID, name=NAME, bed_bytes=None, sidecar=None)
                'entrySha256': sha(composer / 'src' / 'ytNewsStyle01V4.entry.tsx'), 'entryReferenceSha256': 'a' * 64,
                'entryClosure': {'src/' + n: sha(composer / 'src' / n) for n in ('YtNewsStyle01V4.tsx', 'ytNewsStyle01V4.entry.tsx',
                                                                                   'ytNewsStyle01V4Sample.json', 'ytNewsStyle01V4SampleCaptions.json')},
-               'fontsDigest': 'c' * 64, 'mediaDigest': 'b' * 64, 'mediaDigestMethod': 'sha256-per-file-v1',
+               'fontsDigest': li['fonts'].get('digest'), 'mediaDigest': li['media'].get('digest'), 'mediaDigestMethod': li['media'].get('method'),
                'gatesLockSha256': sha(lock), 'gateReportPath': str(proj / 'qc' / 'layout' / 'report.json'),
                'gateReportSha256': sha(proj / 'qc' / 'layout' / 'report.json'), 'gateRunId': run_id,
                'gateManifestHash': mhash, 'gateCheckedAtStart': 't0', 'gateCheckedAtConcat': 't1', 'segments': [],
@@ -468,6 +688,7 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     (repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4.entry.tsx').write_text(ENTRY_SRC)
     (repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4Sample.json').write_text('{}\n')
     (repo / 'remotion-composer' / 'src' / 'ytNewsStyle01V4SampleCaptions.json').write_text('{}\n')
+    (repo / 'remotion-composer' / 'package-lock.json').write_text('{"lockfileVersion": 3}\n')
     (skill / 'assets').mkdir(exist_ok=True)
     (skill / 'assets' / 'ytNewsStyle01V4.entry.reference.tsx').write_text(ENTRY_SRC)
     (skill / 'assets' / 'YtNewsStyle01V4.reference.tsx').write_text(ENGINE_SRC)     # identical: no engine drift
@@ -495,6 +716,8 @@ def make_repo(tmp, omit=(), skill_files=None, name=NAME, real=(), external=(), r
     for pkg in ('remotion', '@remotion/bundler', '@remotion/renderer'):
         (repo / 'remotion-composer' / 'node_modules' / pkg).mkdir(parents=True)
         (repo / 'remotion-composer' / 'node_modules' / pkg / 'package.json').write_text('{}')
+    if (repo / '.stub_online_bed').exists():          # the final of an empty-library fixture is muxed with the online bed
+        final_with_audio(repo / 'projects' / 'p1', audio=MUX_ONLINE)
     write_receipts(repo, name=name)
     return repo
 
@@ -522,6 +745,9 @@ class FinalizeBase(unittest.TestCase):
         self.deliver = self.repo / 'out' / 'episode.mp4'
         self.skill = self.repo / '.claude' / 'skills' / self.name
         self.fin = self.proj / 'renders' / 'final.mp4'
+        pages = self.proj / 'artifacts' / 'word_timing' / 'caption_pages.json'
+        self.asr = make_asr_stub(Path(self.tmp) / 'asrstub', pages.read_text(encoding='utf-8') if pages.is_file() else '[]',
+                                 self.skill / 'scripts')
 
     # --- helpers
     def behavior(self, **kw):
@@ -530,12 +756,48 @@ class FinalizeBase(unittest.TestCase):
         cur.update(kw)
         f.write_text(json.dumps(cur))
 
+    def asr_behavior(self, **kw):
+        """Behaviour of the fake ASR interpreter: check / fingerprint / transcribe / align = {exit, stdout, stderr, sleep};
+        fingerprint_patch = {key: value} over this machine's fingerprint; defects = {exit, defects}; transcribe_raw = a file."""
+        f = self.asr / 'behavior.json'
+        cur = json.loads(f.read_text())
+        cur.update(kw)
+        f.write_text(json.dumps(cur))
+
+    def asr_calls(self):
+        f = self.asr / 'calls.jsonl'
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+
+    def set_raw(self, doc_or_text, pages_text=None):
+        """Replace the agent's raw_asr.json; asr_align (fake) re-derives `pages_text` from it (default: the current artifact pages)."""
+        text = doc_or_text if isinstance(doc_or_text, str) else raw_text(doc_or_text)
+        (self.proj / 'artifacts' / 'word_timing' / 'raw_asr.json').write_text(text, encoding='utf-8')
+        pages = pages_text if pages_text is not None else (self.proj / 'artifacts' / 'word_timing' / 'caption_pages.json').read_text(encoding='utf-8')
+        m = json.loads((self.asr / 'align_map.json').read_text())
+        m[hashlib.sha256(text.encode('utf-8')).hexdigest()] = pages
+        (self.asr / 'align_map.json').write_text(json.dumps(m))
+        return text
+
+    def rebind_raw(self):
+        """The agent re-ran word_timing.sh after replacing the avatar: the raw names the new audio (same words)."""
+        info = chain_wav(self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4', Path(self.tmp) / 'rebind.wav')
+        (Path(self.tmp) / 'rebind.wav').unlink()
+        text = self.set_raw(raw_doc(audio=info))
+        (self.asr / 'retranscribed.json').write_text(text)
+        return text
+
     def module(self):
         _counter[0] += 1
         spec = importlib.util.spec_from_file_location('finalize_t%d' % _counter[0], self.skill / 'scripts' / 'finalize.py')
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
+        m.ASR_RUN = self.asr / 'asr_run.sh'     # the in-process seam: the real launcher (and the ASR venv) is never used by a unit test
         return m
+
+    def fin_cmd(self, *py_flags):
+        """argv prefix that runs this fixture's finalize.py as a CLI process (its own pid, signals, exit code, stdout) with ASR_RUN set
+        to the fake interpreter: the module is loaded exactly as `python finalize.py` would, then main() reads sys.argv."""
+        return [sys.executable, *py_flags, '-c', FIN_LAUNCH, str(self.skill / 'scripts' / 'finalize.py'), str(self.asr / 'asr_run.sh')]
 
     def run_fin(self, *extra, patch=None, deliver=None, check_args=True):
         m = self.module()
@@ -563,9 +825,9 @@ class FinalizeBase(unittest.TestCase):
         fn(d)
         p.write_text(json.dumps(d))
 
-    def set_videos(self, visual_args, pix_fmt='yuv420p'):
+    def set_videos(self, visual_args, pix_fmt='yuv420p', shortest=True):
         """Replace visual.mp4 (and final.mp4 = its packets) and re-write the receipts that describe them."""
-        make_videos(self.proj, visual_args, pix_fmt)
+        make_videos(self.proj, visual_args, pix_fmt, shortest=shortest)
         write_receipts(self.repo, name=self.name)
 
     def argv_of(self, stem):
@@ -599,7 +861,7 @@ class FinalizeBase(unittest.TestCase):
 
 class HappyAndGateTests(FinalizeBase):
     def test_happy_path_cli_from_a_subdirectory(self):
-        r = subprocess.run([sys.executable, str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1',
+        r = subprocess.run([*self.fin_cmd(), '--project', 'projects/p1',
                             '--deliver', str(self.deliver)],
                            capture_output=True, text=True, cwd=self.repo / 'projects')
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
@@ -611,8 +873,7 @@ class HappyAndGateTests(FinalizeBase):
         self.assertEqual(sha(self.deliver), rc['delivered']['sha256'])
         self.assertEqual(self.deliver.stat().st_size, rc['delivered']['bytes'])
         for g in rc['gates']:
-            if g['name'] != 'relevance':
-                self.assertTrue(g['inputs'], g['name'])
+            self.assertTrue(g['inputs'], g['name'])
             for h in g['inputs'].values():
                 self.assertEqual(64, len(h))
         self.assertIn('projects/p1/renders/final.mp4', self.gate(rc, 'final-av')['inputs'])
@@ -636,7 +897,25 @@ class HappyAndGateTests(FinalizeBase):
         self.assertEqual('render-1', rc['render']['renderId'])
         self.assertEqual(sha(self.render_path()), rc['render']['receiptSha256'])
         self.assertEqual(sha(self.mux_path()), rc['mux']['receiptSha256'])
-        self.assertEqual('absent', rc['relevance_status'])
+        self.assertNotIn('relevance_status', rc)
+        self.assertEqual({'path': 'projects/p1/artifacts/relevance.json', 'present': False, 'sha256': None, 'used_as_evidence': False,
+                          'note': 'not used as evidence (stock/AI footage is not allowed in unattended mode)'}, rc['relevance'])
+        # receipt v2 (CF-A67 A4): not a certification; the agent's claims; the primary inputs hashed under one key
+        self.assertEqual(2, rc['version'])
+        self.assertEqual('not a certification: valid only after finalize.py --check from a clean checkout of the pinned commit passes',
+                         rc['certification'])
+        self.assertEqual(['artifacts/visual_evidence.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json'],
+                         rc['self_reported'])           # the done marker is progress information only (CF-A67 phase B)
+        ih = rc['input_hashes']
+        avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+        self.assertEqual({'path': 'remotion-composer/public/ep1/avatar.mp4', 'sha256': sha(avatar)}, ih['avatar'])
+        self.assertEqual(sha(self.proj / 'artifacts' / 'script.txt'), ih['script']['sha256'])
+        self.assertEqual(sha(self.proj / 'assets' / 'avatar.srt'), ih['srt']['sha256'])
+        self.assertEqual(sha(self.proj / 'assets' / 'ytsource' / 'transcript.txt'), ih['source_transcript']['sha256'])
+        self.assertEqual({'path': 'projects/p1/artifacts/visual_evidence.json', 'sha256': None}, ih['visual_evidence'])
+        self.assertEqual({'path': 'projects/p1/qc/finalize/frames.json', 'sha256': sha(self.rdir / 'frames.json')}, ih['frames_report'])
+        self.assertEqual(sha(self.proj / 'artifacts' / '_cuts.json'), ih['cuts']['sha256'])
+        self.assertIsNone(ih['source_video']['sha256'])
         self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
         self.assertFalse(Path(str(self.deliver) + '.receipt.json.tmp').exists())
         self.assertFalse((self.rdir / '.finalize.lock').exists())
@@ -678,21 +957,49 @@ class HappyAndGateTests(FinalizeBase):
 
     def test_long_gates_are_registered_first(self):
         names = [g['name'] for g in self.module().GATES]
-        self.assertEqual(['frames', 'final-av', 'final-pixels', 'loudness'], names[:4])
-        self.assertEqual(ALL_GATES, names)
+        self.assertEqual(['asr-recheck', 'frames', 'final-av', 'final-pixels', 'mux-audio', 'loudness'], names[:6])
+        self.assertEqual(CHECK_ONLY + ALL_GATES, names)
+        self.assertEqual(ALL_GATES, [g['name'] for g in self.module().active_gates(False)])      # a delivery never re-transcribes
 
     def test_no_skip_switch_and_no_comp_flag(self):
         for flag in (['--skip-gates'], ['--comp', 'Other']):
-            r = subprocess.run([sys.executable, str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1',
+            r = subprocess.run([*self.fin_cmd(), '--project', 'projects/p1',
                                 '--deliver', str(self.deliver), *flag], capture_output=True, text=True)
             self.assertEqual(2, r.returncode)
         self.assertFalse(self.deliver.exists())
         src = (SCRIPTS / 'finalize.py').read_text()
         self.assertNotIn('getenv', src)
-        # the only environment variables read are the ones word_timing.sh itself honours (its venv / extractor / model cache),
-        # for the word-timing PRE-FLIGHT check; none of them can skip, weaken or reconfigure a gate
-        names = set(re.findall(r"os\.environ\.get\('([A-Z_]+)'", src))
-        self.assertEqual({'HF_HUB_CACHE', 'HF_HOME', 'KARAOKE_VENV', 'WHISPER_MODEL', 'EXTRACT_TIMING'}, names)
+        # finalize reads NO environment variable at all (CF-A67 phases B/C): the chain is reached through the launcher of the
+        # certified checkout, under an environment built from scratch, and the old word-timing names are gone
+        self.assertEqual(set(), set(re.findall(r"os\.environ\.get\('([A-Z_]+)'", src)))
+        self.assertNotRegex(src, r"os\.environ\[")
+        for name in ('KARAOKE_VENV', 'WHISPER_MODEL', 'EXTRACT_TIMING', 'extract_timing', 'karaoke_subtitle_v2', 'HF_HUB_CACHE', 'HF_HOME',
+                     'WHISPER_DEFAULT_MODEL'):
+            self.assertNotIn(name, src)
+
+    def test_the_old_word_timing_environment_names_change_nothing(self):
+        bogus = {'KARAOKE_VENV': '/nonexistent/venv', 'WHISPER_MODEL': 'tiny', 'EXTRACT_TIMING': '/nonexistent/x.py',
+                 'HF_HUB_CACHE': '/nonexistent/hub', 'HF_HOME': '/nonexistent/hf', 'WHISPER_DEFAULT_MODEL': 'tiny',
+                 'LANG': 'C', 'TMPDIR': '/nonexistent/tmp-from-caller', 'BASH_ENV': str(Path(self.tmp) / 'bash_env.sh')}
+        marker = Path(self.tmp) / 'bash_env_ran'
+        (Path(self.tmp) / 'bash_env.sh').write_text('touch "%s"\n' % marker)       # /bin/bash would source it if finalize leaked it
+        saved = {k: os.environ.get(k) for k in bogus}
+        try:
+            os.environ.update(bogus)
+            self.assertEqual(0, self.run_fin(), self.out)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        calls = self.asr_calls()
+        self.assertTrue(calls)
+        for c in calls:                 # the chain never sees the caller's environment (bash adds PWD / SHLVL, macOS one encoding hint)
+            self.assertEqual({'HOME': pwd.getpwuid(os.getuid()).pw_dir, 'PATH': os.path.dirname(CHAIN_FFMPEG) + ':/usr/bin:/bin',
+                              'LANG': 'en_US.UTF-8', 'TMPDIR': '/var/empty'},
+                             {k: v for k, v in c['env'].items() if k not in BASH_OR_OS_ADDED})
+        self.assertFalse(marker.exists())          # the caller's BASH_ENV never reached /bin/bash
 
     def test_gate_exit_1_fails_but_all_gates_run(self):
         self.behavior(lint_content={'exit': 1, 'pass': False})
@@ -814,7 +1121,7 @@ class HappyAndGateTests(FinalizeBase):
 
     def test_sigterm_kills_gates_and_writes_failed_json(self):
         self.behavior(lint_beats={'sleep': 25})
-        p = subprocess.Popen([sys.executable, str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1',
+        p = subprocess.Popen([*self.fin_cmd(), '--project', 'projects/p1',
                               '--deliver', str(self.deliver)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         pidfile = self.repo / '.stub_logs' / 'lint_beats.pid'
         for _ in range(100):
@@ -892,7 +1199,7 @@ class HappyAndGateTests(FinalizeBase):
         self.assertIn('totalDurationSec', g['reason'])
 
     def test_final_duration_within_one_frame_is_accepted(self):
-        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=4.02'])
+        self.set_videos(['-f', 'lavfi', '-i', 'testsrc2=s=320x240:r=25:d=4.02'], shortest=False)
         self.assertEqual(0, self.run_fin(), self.out)
 
     def test_input_mutated_during_run_is_rejected(self):
@@ -1193,31 +1500,40 @@ class MuxReceiptVerifyTests(FinalizeBase):
 
 
 class RelevanceTests(FinalizeBase):
+    """CF-A67 A1: artifacts/relevance.json is evidence for nothing; only its presence and bytes are recorded."""
     def rel(self, content):
         (self.proj / 'artifacts' / 'relevance.json').write_text(content if isinstance(content, str) else json.dumps(content))
 
-    def test_absent_is_recorded(self):
+    def test_absent_is_recorded_as_absent_and_is_no_record(self):
         self.assertEqual(0, self.run_fin(), self.out)
-        self.assertEqual('absent', self.receipt()['relevance_status'])
-        self.assertEqual('absent', self.gate(self.receipt(), 'relevance')['verification_status'])
+        rc = self.receipt()
+        self.assertEqual({'path': 'projects/p1/artifacts/relevance.json', 'present': False, 'sha256': None, 'used_as_evidence': False,
+                          'note': 'not used as evidence (stock/AI footage is not allowed in unattended mode)'}, rc['relevance'])
+        self.assertNotIn('relevance', [g['name'] for g in rc['gates']])
 
-    def test_verified_and_unverified_pass_and_are_passed_to_content_lint(self):
-        for status in ('verified', 'unverified'):
-            self.rel({'verification_status': status})
-            self.assertEqual(0, self.run_fin(), self.out)
-            self.assertEqual(status, self.receipt()['relevance_status'])
-            self.assertIn('--relevance', self.argv_of('lint_content'))
+    def test_any_content_is_only_hashed_never_a_verdict_and_never_handed_to_a_gate(self):
+        # a "verified" verdict cannot make anything pass, a "failed" one or garbage cannot make anything fail
+        for content in ({'verification_status': 'verified'}, {'verification_status': 'failed'}, {'verification_status': 'weird'},
+                        '{oops', '[]'):
+            self.rel(content)
+            self.assertEqual(0, self.run_fin(), (content, self.out))
+            rc = self.receipt()
+            want = sha(self.proj / 'artifacts' / 'relevance.json')
+            self.assertEqual({'present': True, 'sha256': want, 'used_as_evidence': False},
+                             {k: rc['relevance'][k] for k in ('present', 'sha256', 'used_as_evidence')}, content)
+            self.assertNotIn('--relevance', self.argv_of('lint_content'))
+            self.assertNotIn(str(self.proj / 'artifacts' / 'relevance.json'), json.dumps(self.argv_of('lint_content')))
+            self.assertNotIn('relevance', [g['name'] for g in rc['gates']])
             self.deliver.unlink()
 
-    def test_failed_is_class_1(self):
-        self.rel({'verification_status': 'failed'})
-        self.assertExit(1, 'fail', 'relevance')
-
-    def test_anything_else_is_class_2(self):
-        for content in ({'verification_status': 'weird'}, {}, {'verification_status': None}, '{oops', '[]'):
-            self.rel(content)
-            self.assertEqual(2, self.run_fin(), (content, self.out))
-            self.assertEqual('stale', self.gate(self.failed(), 'relevance')['status'])
+    def test_check_json_records_it_too(self):
+        self.rel({'verification_status': 'verified'})
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        self.assertEqual(2, doc['version'])
+        self.assertTrue(doc['relevance']['present'])
+        self.assertFalse(doc['relevance']['used_as_evidence'])
+        self.assertNotIn('relevance_status', doc)
 
 
 class ResultHandlingTests(FinalizeBase):
@@ -1263,7 +1579,7 @@ class ResultHandlingTests(FinalizeBase):
         self.assertIn('CHECK PASS — nothing delivered', self.out)
         chk = json.loads((self.rdir / 'check.json').read_text())
         self.assertTrue(chk['would_deliver'])
-        self.assertEqual(len(ALL_RECORDS), len(chk['gates']))
+        self.assertEqual(CHECK_RECORDS, [g['name'] for g in chk['gates']])
 
     def test_check_mode_failure_leaves_existing_files(self):
         self.deliver.parent.mkdir(parents=True)
@@ -1413,7 +1729,9 @@ class ManifestOverrideTests(FinalizeBase):
         os.symlink(outside, self.proj / 'artifacts' / 'linked.txt')
         self.manifest({'script': 'artifacts/linked.txt'})
         self.assertEqual(2, self.run_fin())
-        self.assertIn('outside the project', ' '.join(self.failed()['reasons']))
+        # CF-A67 B9: any symbolic link in a project path is refused (before the "resolves outside the project" check is reached)
+        reasons = ' '.join(self.failed()['reasons'])
+        self.assertIn('goes through the symbolic link %s -> %s' % (self.proj / 'artifacts' / 'linked.txt', outside), reasons)
 
     def test_forbidden_overrides(self):
         for key in ('episode', 'captions', 'visual', 'final', 'layout_report', 'reports', 'relevance', 'word_pages', 'caption_options'):
@@ -1842,9 +2160,17 @@ class ScriptGateTests(FinalizeBase):
         self.assertEqual((self.proj / 'artifacts' / 'script.txt').read_bytes(), (self.rdir / 'script.rebuilt.txt').read_bytes())
         self.assertIs(True, json.loads((self.rdir / 'script.json').read_text())['pass'])
 
+    def rerun_word_timing_for_the_edited_script(self):
+        """Without it the raw names the old script: `word-timing` is stale (exit 2), which outranks the script gate's exit 1."""
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.assertEqual('stale', self.gate(self.failed(), 'word-timing')['status'])
+        self.assertEqual('fail', self.gate(self.failed(), 'script')['status'])
+        self.set_raw(raw_doc(script_sha=sha(self.proj / 'artifacts' / 'script.txt')))
+
     def test_hand_edited_script_is_a_quality_failure(self):
         sp = self.proj / 'artifacts' / 'script.txt'
         sp.write_text(sp.read_text().replace('hello', 'hullo'))
+        self.rerun_word_timing_for_the_edited_script()
         self.assertEqual(1, self.run_fin(), self.out)
         g = self.gate(self.failed(), 'script')
         self.assertEqual('fail', g['status'])
@@ -1855,6 +2181,7 @@ class ScriptGateTests(FinalizeBase):
     def test_trailing_newline_difference_is_a_difference(self):
         sp = self.proj / 'artifacts' / 'script.txt'
         sp.write_text(sp.read_text() + '\n')
+        self.rerun_word_timing_for_the_edited_script()
         self.assertEqual(1, self.run_fin(), self.out)
         self.assertEqual('fail', self.gate(self.failed(), 'script')['status'])
 
@@ -1902,9 +2229,10 @@ class DerivedGateTests(FinalizeBase):
         self.assertEqual(3, len(rep['comparisons']))
         self.assertTrue(all(c['equal'] for c in rep['comparisons']))
         self.assertEqual({'endTime': 2.0}, rep['captionOptions'])
-        self.assertEqual(sha(self.art('word_timing/caption_pages.json')), rep['wordTimingDone']['output_sha256'])
-        for rel in ('word_timing/caption_pages.json', 'word_timing/word_timing.done.json', 'caption-options.json'):
+        self.assertNotIn('wordTimingDone', rep)                         # the done marker is never read (CF-A67 phase B)
+        for rel in ('word_timing/caption_pages.json', 'caption-options.json'):
             self.assertIn('projects/p1/artifacts/' + rel, g['inputs'])
+        self.assertNotIn('projects/p1/artifacts/word_timing/word_timing.done.json', g['inputs'])
         for name in ('words_by_line.txt', 'line_starts.json', 'caption-joined.json'):
             self.assertEqual((self.art(name)).read_bytes(), (self.rdir / 'derived' / name).read_bytes(), name)
 
@@ -1925,24 +2253,25 @@ class DerivedGateTests(FinalizeBase):
             self.assertIn('byte-identical', g['reason'])
             shutil.copy(PROJECT_TEMPLATE / 'p1' / 'artifacts' / name, self.art(name))
 
-    def test_edited_word_pages_do_not_match_the_word_timing_receipt(self):
+    def test_edited_word_pages_are_not_what_asr_align_derives_from_the_raw(self):
         pages = self.art('word_timing/caption_pages.json')
         data = json.loads(pages.read_text())
         data[0]['words'][0]['s'] = 0.05                 # a hand-shifted timing
         pages.write_text(json.dumps(data))
         self.assertEqual(1, self.run_fin(), self.out)
-        g = self.gate(self.failed(), 'derived')
+        g = self.gate(self.failed(), 'word-timing')
         self.assertEqual('fail', g['status'])
-        self.assertIn('output_sha256', g['reason'])
+        self.assertIn('caption_pages.json is not what asr_align.py derives from raw_asr.json', g['reason'])
 
-    def test_missing_word_timing_receipt_or_pages_is_bad_input(self):
+    def test_the_done_marker_is_never_read_and_missing_pages_are_bad_input(self):
         (self.art('word_timing/word_timing.done.json')).unlink()
-        self.assertEqual(2, self.run_fin())
-        self.assertEqual('bad-input', self.gate(self.failed(), 'derived')['status'])
-        write_word_done(self.proj)
+        self.assertEqual(0, self.run_fin(), self.out)            # progress note only: its absence changes nothing
+        self.deliver.unlink()
+        Path(str(self.deliver) + '.receipt.json').unlink()
         self.art('word_timing/caption_pages.json').unlink()
         self.assertEqual(2, self.run_fin())
         self.assertEqual('bad-input', self.gate(self.failed(), 'derived')['status'])
+        self.assertEqual('bad-input', self.gate(self.failed(), 'word-timing')['status'])
 
     def set_options(self, data):
         self.art('caption-options.json').write_text(data if isinstance(data, str) else json.dumps(data))
@@ -2330,7 +2659,7 @@ class ConsoleSummaryTests(FinalizeBase):
 
 class CheckStateAndInterruptTests(FinalizeBase):
     def popen(self, *extra):
-        return subprocess.Popen([sys.executable, '-B', str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1',
+        return subprocess.Popen([*self.fin_cmd('-B'), '--project', 'projects/p1',
                                  '--deliver', str(self.deliver), *extra], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def wait_for(self, path, secs=15):
@@ -2550,7 +2879,8 @@ class PreflightTests(PreflightBase):
         for n in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift'):
             self.assertIn(os.path.realpath(shutil.which(n)), self.line('ok', 'tool-' + n))          # realpath and version
         self.assertIn(os.path.realpath(sys.executable), self.line('ok', 'python-modules'))
-        self.assertIn('not loaded', self.line('ok', 'word-timing'))
+        self.assertIn('asr_run.sh asr_transcribe.py --check (', self.line('ok', 'word-timing'))
+        self.assertIn('): ok: fake chain', self.line('ok', 'word-timing'))                       # the launcher's --check line
         # nothing is written: no reports directory, no check.json, no lock file of a run
         self.assertFalse((self.proj / 'qc' / 'finalize' / 'check.json').exists())
 
@@ -2637,25 +2967,34 @@ class PreflightTests(PreflightBase):
         self.line('FAIL', 'gate-lock')
         self.line('FAIL', 'fonts')
 
-    def test_word_timing_checks_the_venv_the_extractor_and_the_cached_model_without_loading_anything(self):
-        env_dir = ENV_DIR[0]
-        cases = {
-            'venv': ({'KARAOKE_VENV': str(env_dir / 'no-venv')}, 'karaoke venv python missing'),
-            'tool': ({'EXTRACT_TIMING': str(env_dir / 'missing.py')}, 'extract_timing.py not found'),
-            'cache': ({'HF_HUB_CACHE': str(env_dir / 'empty-hub')}, 'is not in the local HF cache'),
-            'model': ({'WHISPER_MODEL': 'someone/other-model'}, 'someone/other-model is not in the local HF cache'),
-        }
-        for label, (env, text) in cases.items():
-            with mock.patch.dict(os.environ, env):
-                self.assertEqual(4, self.run_pre(), (label, self.out))
-            self.assertIn(text, self.line('FAIL', 'word-timing'), label)
-        # an incomplete snapshot (no weights) does not count, exactly as in word_timing.sh
-        snap = env_dir / 'hub2' / 'models--mlx-community--whisper-large-v3-mlx' / 'snapshots' / 'x'
-        snap.mkdir(parents=True)
-        (snap / 'config.json').write_text('{}')
-        with mock.patch.dict(os.environ, {'HF_HUB_CACHE': str(env_dir / 'hub2')}):
-            self.assertEqual(4, self.run_pre(), self.out)
-        self.line('FAIL', 'word-timing')
+    def test_word_timing_runs_the_chain_check_through_the_launcher_and_a_missing_launcher_is_exit_4_with_the_setup_hint(self):
+        hint = 'run `bash %s/scripts/setup_asr_venv.sh` — a human, not the agent; do not install anything' % self.skill
+        # 1. ok: exactly one call, `/bin/bash <launcher> asr_transcribe.py --check` (no --deep outside finalize --check), minimal env
+        self.assertEqual(0, self.run_pre(), self.out)
+        calls = self.asr_calls()
+        self.assertEqual([['asr_transcribe.py', '--check']], [c['argv'] for c in calls])
+        self.assertEqual({'HOME', 'PATH', 'LANG', 'TMPDIR'}, set(calls[0]['env']) - BASH_OR_OS_ADDED)
+        self.assertEqual(pwd.getpwuid(os.getuid()).pw_dir, calls[0]['env']['HOME'])
+        # 2. the launcher is missing (the module constant, patched in-process: no environment variable can move it)
+        missing = Path(self.tmp) / 'no-launcher' / 'asr_run.sh'
+        self.assertEqual(4, self.run_pre(patch=lambda m: setattr(m, 'ASR_RUN', missing)), self.out)
+        line = self.line('FAIL', 'word-timing')
+        self.assertIn('the ASR launcher %s is missing' % missing, line)
+        self.assertIn(hint, line)
+        # 3. the launcher refuses (manifest mismatch, missing venv, ...): its stderr, exit 4, nothing installed
+        self.asr_behavior(check={'exit': 4, 'stderr': 'ERROR: the interpreter / stdlib / ASR venv differ from asr_venv.manifest; first '
+                                 'differences: > 1f2e  @VENV@/lib/python3.12/site-packages/sitecustomize.py\n'})
+        self.assertEqual(4, self.run_pre(), self.out)
+        line = self.line('FAIL', 'word-timing')
+        self.assertIn('asr_run.sh asr_transcribe.py --check exited 4: ERROR: the interpreter / stdlib / ASR venv differ from '
+                      'asr_venv.manifest; first differences: > 1f2e  @VENV@/lib/python3.12/site-packages/sitecustomize.py', line)
+        self.assertIn('nothing is downloaded or installed', line)
+        self.assertIn(hint, line)                     # the launcher message here carries none, so finalize adds it
+        # 4. its own hint is not repeated
+        self.asr_behavior(check={'exit': 4, 'stderr': "ERROR: the ASR venv /x is not there: run 'bash /s/setup_asr_venv.sh' (a human)\n"})
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertEqual(1, self.line('FAIL', 'word-timing').count('setup_asr_venv.sh'))
+        self.assertEqual(3, len([c for c in self.asr_calls() if '--check' in c['argv']]))       # case 2 spawned nothing
 
     def test_music_library_ok_with_one_usable_track(self):
         self.assertEqual(0, self.run_pre(), self.out)
@@ -2701,7 +3040,7 @@ class PreflightTests(PreflightBase):
         self.assertIn('composer-mismatch', self.line('FAIL', 'gate-lock'))
 
     def test_cli_prints_the_documented_lines_and_exits_0(self):
-        r = subprocess.run([sys.executable, '-B', str(self.skill / 'scripts' / 'finalize.py'), '--preflight'], capture_output=True, text=True,
+        r = subprocess.run([*self.fin_cmd('-B'), '--preflight'], capture_output=True, text=True,
                            cwd=self.tmp)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertTrue(r.stdout.splitlines()[-1].startswith('PREFLIGHT PASS (exit 0)'))
@@ -2768,14 +3107,40 @@ class RealRunEnvironmentTests(PreflightBase):
         self.assertIn("environment: python-modules:", ' | '.join(self.failed()['reasons']))
         self.assertIn('.venv python', ' | '.join(self.failed()['reasons']))
 
-    def test_missing_whisper_cache_fails_the_preflight_but_never_blocks_a_real_run_or_a_check(self):
-        # the one intentional difference: finalize never calls word_timing.sh, the timing / derived gates already vouch for the timing
-        with mock.patch.dict(os.environ, {'HF_HUB_CACHE': str(ENV_DIR[0] / 'empty-hub'), 'KARAOKE_VENV': str(ENV_DIR[0] / 'no-venv')}):
-            self.assertEqual(4, self.run_pre(), self.out)
-            self.line('FAIL', 'word-timing')
-            self.assertEqual(0, self.run_fin('--check'), self.out)
-            self.assertEqual(0, self.run_fin(), self.out)
-            self.assertNotIn('word-timing', self.out)
+    def test_a_missing_launcher_blocks_the_preflight_the_real_run_and_the_check_alike(self):
+        # CF-A67 phases B/C: word-timing re-derives the pages through the launcher in EVERY mode, so the check is not preflight-only
+        missing = Path(self.tmp) / 'no-launcher' / 'asr_run.sh'
+        patch = lambda m: setattr(m, 'ASR_RUN', missing)
+        self.assertEqual(4, self.run_pre(patch=patch), self.out)
+        self.line('FAIL', 'word-timing')
+        for extra in ((), ('--check',)):
+            for f in (Path(str(self.deliver) + '.FAILED.json'), self.rdir / 'check.json'):
+                if f.exists():
+                    f.unlink()
+            self.assertEqual(4, self.run_fin(*extra, patch=patch), (extra, self.out))
+            doc = json.loads((self.rdir / 'check.json').read_text()) if extra else self.failed()      # --check writes no FAILED.json
+            self.assertIn('environment: word-timing: the ASR launcher %s is missing' % missing, ' | '.join(doc['reasons']), extra)
+            self.assertEqual([], doc['gates'])
+            for stem in STEM.values():
+                self.assertFalse(self.ran(stem), (extra, stem))
+            self.assertNotDelivered()
+
+    def test_finalize_check_runs_the_deep_environment_check_a_delivery_does_not(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        self.assertEqual(['asr_transcribe.py', '--check'], self.asr_calls()[0]['argv'])
+        (self.asr / 'calls.jsonl').unlink()
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        self.assertEqual(['asr_transcribe.py', '--check', '--deep'], self.asr_calls()[0]['argv'])
+        self.asr_behavior(check_deep={'exit': 4, 'stderr': 'ERROR: weights content sha256 differs from its blob name\n'})
+        self.assertEqual(4, self.run_fin('--check'), self.out)
+        self.assertIn('asr_run.sh asr_transcribe.py --check --deep exited 4: ERROR: weights content sha256 differs',
+                      ' | '.join(json.loads((self.rdir / 'check.json').read_text())['reasons']))
+        self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
+
+    def test_the_chain_check_failing_blocks_the_real_run_before_any_gate(self):
+        self.asr_behavior(check={'exit': 4, 'stderr': 'ERROR: pins differ\n'})
+        self.assertEqual(4, self.run_pre(), self.out)
+        self.assertRunStopsBeforeAnyGate('word-timing')
 
     def test_the_lock_failure_keeps_exit_3_in_both(self):
         (self.skill / 'scripts' / 'gates.lock.json').unlink()
@@ -2808,8 +3173,11 @@ class MusicPresenceTests(FinalizeBase):
         write_receipts(self.repo, name=self.name)          # the mux receipt describes the new file
 
     def test_the_gate_sits_right_after_loudness(self):
-        self.assertEqual(['frames', 'final-av', 'final-pixels', 'loudness', 'music-presence', 'timing'], [g['name'] for g in
-                                                                                                          self.module().GATES][:6])
+        self.assertEqual(['frames', 'final-av', 'final-pixels', 'mux-audio', 'loudness', 'music-presence'], [g['name'] for g in
+                                                                                                             self.module().active_gates(False)][:6])
+
+    def not_passing(self):
+        return sorted(g['name'] for g in self.failed()['gates'] if g['status'] != 'pass')
 
     def test_sound_after_the_voice_passes_and_the_record_the_report_and_the_receipt_carry_the_measurement(self):
         self.assertEqual(0, self.run_fin(), self.out)
@@ -2851,8 +3219,12 @@ class MusicPresenceTests(FinalizeBase):
         low = self.gate_rec()['mean_db']
         self.assertTrue(low is None or low <= self.floor, low)
         self.noise_at(self.floor + 10)
-        self.assertEqual(0, self.run_fin(), self.out)
-        high = self.gate_rec(self.receipt())['mean_db']
+        # the noise is not what mux_av.sh makes from the avatar + bed, so `mux-audio` refuses it (exit 1) - music-presence itself passes
+        self.assertEqual(1, self.run_fin(), self.out)
+        self.assertEqual(['mux-audio'], self.not_passing())
+        g = self.gate_rec()
+        self.assertEqual('pass', g['status'])
+        high = g['mean_db']
         self.assertGreater(high, self.floor)
         self.assertLess(high, self.floor + 20)
 
@@ -2951,6 +3323,8 @@ class MusicPresenceTests(FinalizeBase):
     def test_the_music_failure_alone_is_exit_1(self):
         self.silent_final()
         self.assertEqual(1, self.run_fin(), self.out)
+        # a silent bed is also not the mux of the approved bed: both audio gates fail with class 1, nothing else
+        self.assertEqual(['music-presence', 'mux-audio'], self.not_passing())
 
     def test_the_constants_and_the_mux_script_still_agree(self):
         m = self.module()
@@ -2987,7 +3361,10 @@ class VoEndAvatarTests(FinalizeBase):
     def avatar(self, seconds):
         path = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
         make_avatar(path, seconds)
+        # the final is the REAL mux of this avatar (the `mux-audio` gate rebuilds it), the episode keeps voEndSec 2.0 / total 4.0
+        final_with_audio(self.proj, audio=real_mux_audio(Path(self.tmp) / 'remux', self.proj / 'renders' / 'visual.mp4', path, LIB_BYTES))
         write_receipts(self.repo, name=self.name)            # the mux receipt binds the avatar by sha256
+        self.rebind_raw()                                    # word_timing.sh re-run on the new avatar (raw_asr.json names its audio)
 
     def test_a_voendsec_one_second_earlier_than_the_avatar_audio_fails_exit_1_although_the_window_has_sound(self):
         self.avatar(3.0)
@@ -3018,7 +3395,14 @@ class VoEndAvatarTests(FinalizeBase):
         path = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
         ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=25:d=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(path))      # video only
         write_receipts(self.repo, name=self.name)
-        self.assertEqual(0, self.run_fin(), self.out)
+        # music-presence falls back to the container duration and passes; mux_av.sh cannot mix an avatar without audio, so the
+        # `mux-audio` gate refuses the final as bad input (class 2) instead of trying to rebuild it
+        self.assertEqual(2, self.run_fin(), self.out)
+        g = self.gate(self.failed(), 'music-presence')
+        self.assertEqual('pass', g['status'])
+        self.assertAlmostEqual(2.0, g['avatar_audio_seconds'], delta=0.1)
+        a = self.gate(self.failed(), 'mux-audio')
+        self.assertEqual(('bad-input', 'the avatar remotion-composer/public/ep1/avatar.mp4 has no readable audio stream'), (a['status'], a['reason']))
 
     def test_a_missing_or_unreadable_avatar_is_bad_input_not_a_second_confusing_tool_failure(self):
         (self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4').unlink()
@@ -3367,7 +3751,7 @@ class RunLockTests2(FinalizeBase):
         sleepers = ('frame_checks', 'measure_loudness', 'timing_check', 'lint_beats', 'lint_captions', 'lint_content')
         self.behavior(**{n: {'sleep': 25} for n in sleepers})
         self.deliver.parent.mkdir(parents=True)
-        p = subprocess.Popen([sys.executable, str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1',
+        p = subprocess.Popen([*self.fin_cmd(), '--project', 'projects/p1',
                               '--deliver', str(self.deliver)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         logs = self.repo / '.stub_logs'
         want = [logs / (n + '.pid') for n in ('frame_checks', 'measure_loudness', 'timing_check')]
@@ -3442,7 +3826,7 @@ class DeliveryOrderAndPathTests(FinalizeBase):
         shutil.rmtree(self.repo / '.git')
         cwd = Path(self.tmp) / 'cwd'
         cwd.mkdir()
-        r = subprocess.run([sys.executable, str(self.skill / 'scripts' / 'finalize.py'), '--project', 'projects/p1', '--deliver',
+        r = subprocess.run([*self.fin_cmd(), '--project', 'projects/p1', '--deliver',
                             str(self.deliver), '--check'], capture_output=True, text=True, cwd=cwd)
         self.assertEqual(3, r.returncode, r.stdout + r.stderr)
         self.assertEqual([], list(cwd.iterdir()))

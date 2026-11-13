@@ -4,14 +4,15 @@
 Local tools only (ffmpeg, numpy, PIL, macOS Vision through scripts/ocr_vision.swift). No network.
 
   frame_checks.py pixels       --video V --in A --out B [--crop x:y:w:h]
-  frame_checks.py watermark    --video V --in A --out B [--crop x:y:w:h] --frames-dir D [--cache-dir C]
+  frame_checks.py watermark    --video V --in A --out B [--crop x:y:w:h] --frames-dir D
   frame_checks.py cutaways     --beats beats.json [--cuts _cuts.json] --media-root DIR [--media-root DIR ...]
-                               --frames-dir D --report R.json [--cache-dir C] [--episode-end SEC]
+                               --frames-dir D --report R.json [--episode-end SEC]
   frame_checks.py crop-propose --video V --in A --out B
   frame_checks.py crop-check   --video V --in A --out B --crop x:y:w:h
 
 Exit codes: 0 = pass, 1 = issues found, 2 = bad input, 4 = a required tool (ffmpeg / swift+Vision) cannot run.
-OCR is never skipped silently: when Vision OCR cannot run the command exits 4.
+OCR is never skipped silently: when Vision OCR cannot run the command exits 4.  The OCR program is compiled into a fresh private
+temp directory on every run (or interpreted with `swift`) and never taken from a cache: there is no --cache-dir (see VisionOcr).
 
 Coordinates: every crop (--crop, beat `srcCrop`, `crop-propose` output) is in pixels of a 1920x1080 source
 frame and is scaled to the real file resolution when the file differs.
@@ -56,6 +57,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -506,47 +508,60 @@ def static_timeline(beats, statics, max_hold):
 # ----------------------------------------------------------------------------------------------
 
 class VisionOcr:
-    """Runs ocr_vision.swift on a batch of images in ONE process. Compiled once per source hash when
-    swiftc works (cache_dir), otherwise interpreted with `swift`. Raises ToolMissing when neither works."""
+    """Runs ocr_vision.swift on a batch of images in ONE process.
 
-    def __init__(self, cache_dir=None, swift_src=None):
+    No executable is EVER taken from a cache or from any directory another process could have written to before this runner
+    existed (CF-A67: an unattended agent can plant a fake `ocr_vision-<hash>` binary in a project cache directory).  The first call
+    compiles ocr_vision.swift with `swiftc -O` into a NEW private temp directory (tempfile.mkdtemp: random name, mode 0700), the
+    binary is used by this runner only, and close() (also called by main(), and by a finalizer when the runner is garbage-collected)
+    deletes the directory.  Without swiftc, or when the compile fails, the source is interpreted with `swift`.
+    Measured on the proof run V261111_001 (395 cutaway frames, 2026-11-13, same OCR lines for every frame): compile 1.2 s + run
+    34.5 s = 35.7 s; interpreted 45.3 s.  Raises ToolMissing when neither works."""
+
+    def __init__(self, swift_src=None):
         self.src = Path(swift_src or SWIFT_SRC)
-        self.cache_dir = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir()) / "yt-news-v4-ocr-cache"
-        self.mode = None            # "compiled" | "interpreted"
+        self.mode = None            # "compiled-fresh" | "interpreted"
         self.compile_seconds = 0.0
         self.run_seconds = 0.0
         self.invocations = 0
+        self.build_dir = None       # the private temp dir of THIS runner (deleted by close())
         self._cmd = None
+        self._finalizer = None
 
     def _prepare(self):
         if self._cmd is not None:
             return
         if not self.src.is_file():
             raise ToolMissing(f"OCR source missing: {self.src}")
-        sha = hashlib.sha256(self.src.read_bytes()).hexdigest()[:16]
         swiftc, swift = shutil.which("swiftc"), shutil.which("swift")
         if swiftc:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            binary = self.cache_dir / f"ocr_vision-{sha}"
-            if not (binary.is_file() and os.access(binary, os.X_OK)):
-                tmp = self.cache_dir / f".build-{os.getpid()}-{sha}"
-                t0 = time.time()
-                try:
-                    r = subprocess.run([swiftc, "-O", str(self.src), "-o", str(tmp)], capture_output=True, timeout=600)
-                except subprocess.TimeoutExpired:
-                    r = None
-                self.compile_seconds = time.time() - t0
-                if r is not None and r.returncode == 0 and tmp.is_file():
-                    os.replace(tmp, binary)
-                else:
-                    tmp.unlink(missing_ok=True)
-            if binary.is_file() and os.access(binary, os.X_OK):
-                self.mode, self._cmd = "compiled", [str(binary)]
+            build = Path(tempfile.mkdtemp(prefix="ocr-vision-build-"))       # 0700, random name: never a shared / predictable path
+            self.build_dir = build
+            self._finalizer = weakref.finalize(self, shutil.rmtree, str(build), True)
+            binary = build / "ocr_vision"
+            t0 = time.time()
+            try:
+                r = subprocess.run([swiftc, "-O", str(self.src), "-o", str(binary)], capture_output=True, timeout=600)
+            except subprocess.TimeoutExpired:
+                r = None
+            self.compile_seconds = time.time() - t0
+            if r is not None and r.returncode == 0 and binary.is_file() and os.access(binary, os.X_OK):
+                self.mode, self._cmd = "compiled-fresh", [str(binary)]
                 return
+            self.close()
         if swift:
             self.mode, self._cmd = "interpreted", [swift, str(self.src)]
             return
         raise ToolMissing("swift / swiftc not found: macOS Vision OCR cannot run")
+
+    def close(self):
+        """Delete the private build directory (idempotent).  A closed compiled runner compiles again on its next call."""
+        if self._finalizer is not None:
+            self._finalizer()
+            self._finalizer = None
+        if self.mode == "compiled-fresh":
+            self._cmd = None
+        self.build_dir = None
 
     def __call__(self, paths):
         paths = [str(p) for p in paths]
@@ -1189,10 +1204,10 @@ def build_parser():
     sp = sub.add_parser("pixels"); rng(sp); sp.add_argument("--crop")
     sp.add_argument("--origin", choices=["stock", "ai", "source"], default="stock",
                     help="blank-frame is an error for stock/ai and a warning for source media")
-    sp = sub.add_parser("watermark"); rng(sp); sp.add_argument("--crop"); sp.add_argument("--frames-dir", required=True); sp.add_argument("--cache-dir")
+    sp = sub.add_parser("watermark"); rng(sp); sp.add_argument("--crop"); sp.add_argument("--frames-dir", required=True)
     sp = sub.add_parser("cutaways")
     sp.add_argument("--beats", required=True); sp.add_argument("--cuts"); sp.add_argument("--media-root", action="append", default=[])
-    sp.add_argument("--frames-dir", required=True); sp.add_argument("--report"); sp.add_argument("--cache-dir")
+    sp.add_argument("--frames-dir", required=True); sp.add_argument("--report")
     sp.add_argument("--episode-end", type=float)
     sp = sub.add_parser("crop-propose"); rng(sp)
     sp = sub.add_parser("crop-check"); rng(sp); sp.add_argument("--crop", required=True)
@@ -1205,8 +1220,8 @@ def main(argv=None, ocr_runner=None):
         args = build_parser().parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
+    runner = ocr_runner or VisionOcr()
     try:
-        runner = ocr_runner or VisionOcr(getattr(args, "cache_dir", None))
         if args.cmd == "pixels":
             out = cmd_pixels(args.video, args.t_in, args.t_out, parse_crop(args.crop), args.origin)
             _emit(out, args.report); return 0 if out["pass"] else 1
@@ -1231,6 +1246,9 @@ def main(argv=None, ocr_runner=None):
     except BadInput as e:
         print(f"frame_checks: bad input: {e}", file=sys.stderr)
         return 2
+    finally:
+        if hasattr(runner, "close"):
+            runner.close()          # the private OCR build directory never outlives the command
     return 2
 
 
