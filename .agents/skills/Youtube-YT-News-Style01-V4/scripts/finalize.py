@@ -26,8 +26,27 @@ a project outside the repository (exit 2).
 
 ONE deadline covers the whole invocation (TOTAL_BUDGET_SEC for a delivery, CHECK_TOTAL_BUDGET_SEC for --check; lock/git
 checks + gates + verification + copy); when it runs out the command ends with exit 4 and a FAILED file (--check:
-check.json) that names the phase.  The tools (node, ffmpeg, ffprobe, git, swift) are resolved once to absolute
-realpaths and the gates run with a fixed minimal PATH.
+check.json) that names the phase.  The tools (node, ffmpeg, ffprobe, git, swift) are resolved once, from fixed candidate
+lists (never $PATH), to absolute realpaths and the gates run with an environment built from scratch (gate_env).
+
+THE OUTSIDE --check INVOCATION (exact; the docs copy this block):
+  /usr/bin/env -i <PY> -I <C>/.claude/skills/Youtube-YT-News-Style01-V4/scripts/finalize.py --check \
+      --project <A>/projects/<slug> --public-root <A>/remotion-composer/public --deliver <the delivered .mp4> \
+      --copy-root <A>/projects [--copy-root <another projects-type dir> ...] --work-dir <empty or new dir>
+  <C>  a clean checkout of the pinned commit (remotion-composer/node_modules installed); <A> the agent's checkout (read only).
+  <PY> a python >= 3.12 venv interpreter with numpy, PIL, pythainlp (e.g. the repo's .venv python), run with -I and WITHOUT -S:
+       finalize hands that venv's site-packages (sysconfig purelib/platlib) to every python gate, which runs `<PY> -I -S -B`.
+  env -i: nothing of the caller's environment is needed or passed on.  Every child gets an environment built from scratch:
+       HOME (passwd entry), PATH (the directories of the fixed tools + /usr/bin:/bin), LANG=en_US.UTF-8, TMPDIR (a private dir
+       of this run).  Tools come from fixed candidate lists (TOOL_CANDIDATES), never from $PATH; check.json records each
+       realpath + version and the python (executable, prefix, site dirs).
+  --copy-root is MANDATORY in --check (exit 4 without it): each is a projects-type dir whose sub-directories are other episodes;
+       lint_content.py compares this episode against them (+ this skill dir + <C>/remotion-composer/src).  A project whose avatar
+       is the same file (sha256) is skipped as a re-do of this video: a V4 project's avatar is <root>/../remotion-composer/public/
+       <assetDir>/<avatarFile> of its artifacts/episode.json, otherwise any *.mp4 in it; an unknown identity is never skipped.
+  PASS = exit 0 AND check.json `certified_final_sha256` == the sha256 of the delivered file (`delivered_path`): --check binds
+       the result to that file (regular file, == renders/final.mp4 the gates checked == the receipt's claim, the receipt's
+       bound_inputs == the current hashes).
 
 Exit codes (precedence): 3 integrity > 4 tool/gate missing, crash or timeout > 2 stale/missing report or bad
 input > 1 quality failure; 0 delivered (or --check: everything would pass).
@@ -40,7 +59,6 @@ import atexit
 import concurrent.futures
 import datetime
 import hashlib
-import importlib
 import json
 import math
 import os
@@ -69,14 +87,14 @@ RECEIPT_SCHEMA = 'yt-news-v4-delivery-receipt'
 # version 2 (CF-A67): + certification, self_reported, input_hashes, relevance {...} (replaces relevance_status).  Readers of
 # older receipts (certified_pair) only use schema + delivered.sha256, which every version carries.
 RECEIPT_VERSION = 2
+# the inputs a receipt binds (`bound_inputs`); finalize --check requires the receipt beside the delivered file to carry exactly these
+# keys with the CURRENT sha256 of each file (the delivery was made from these very inputs)
+RECEIPT_BOUND_KEYS = ('episode', 'script', 'source_script', 'srt', 'words', 'line_starts', 'word_raw', 'word_pages', 'caption_options',
+                      'captions', 'visual', 'final')
 FAILED_SCHEMA = 'yt-news-v4-finalize-failed'
 CHECK_SCHEMA = 'yt-news-v4-finalize-check'
 CHECK_VERSION = 2                          # version 2: + mode / work_dir / public_root, relevance {...} (replaces relevance_status)
 CERTIFICATION = ('not a certification: valid only after finalize.py --check from a clean checkout of the pinned commit passes')
-# claims of the agent that no gate re-derives (visual_evidence.json is read by the content lint as the agent's statement of what
-# each source beat shows; final-review.md is the agent's own review; word_timing.done.json is word_timing.sh's progress note, never
-# read for a verdict).  Paths relative to the project.
-SELF_REPORTED = ('artifacts/visual_evidence.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json')
 RELEVANCE_NOTE = 'not used as evidence (stock/AI footage is not allowed in unattended mode)'
 # One deadline for the whole invocation; unattended commands are killed after ~10 min.  The gates may only use the
 # time up to TOTAL - POST_RESERVE; the rest is kept for verification + delivery.  A delivery copy is only started
@@ -94,6 +112,14 @@ RUN_LOCK_STALE_SEC = 15 * 60     # only a guard against pid reuse: a lock whose 
 FRAME_TOLERANCE_SEC = 0.04       # final duration vs totalDurationSec
 TOOL_NAMES = ('node', 'ffmpeg', 'ffprobe', 'git', 'swift')
 REQUIRED_TOOLS = TOOL_NAMES      # all of them: swift = macOS Vision OCR of the frames gate (no OCR = no watermark/promo check)
+GATE_LANG = 'en_US.UTF-8'
+# python gates: `<this interpreter> -I -S -B -c GATE_BOOT <site dirs> <script> <args>`.  -I: no PYTHON* variables, no cwd / script
+# dir / user site; -S: no site.py, so no .pth line and no sitecustomize of any directory runs.  GATE_BOOT puts the script's own
+# directory first (its sibling modules) and appends THIS interpreter's site-packages (gate_site_dirs, sysconfig purelib/platlib of
+# the venv finalize runs in) explicitly, then runs the script as __main__ with its argv.
+GATE_PY_FLAGS = ('-I', '-S', '-B')
+GATE_BOOT = ("import runpy,sys;a=sys.argv;sys.path[:0]=[a[2].rpartition('/')[0]];sys.path+=[p for p in a[1].split(':') if p];"
+             "sys.argv=a[2:];runpy.run_path(a[2],run_name='__main__')")
 # composer-relative files whose current hashes the layout manifest and the render receipt must carry (CF-A66, 5fe7699)
 ENGINE_REL = 'src/YtNewsStyle01V4.tsx'
 ENTRY_REL = 'src/ytNewsStyle01V4.entry.tsx'
@@ -112,6 +138,19 @@ def passwd_home():
     return pwd.getpwuid(os.getuid()).pw_dir
 
 
+# every tool from a FIXED candidate list, first executable wins; $PATH is never searched (under `env -i` there is none).  node: the
+# owner's node first (<passwd home>/.local/bin/node -> ~/.local/share/node/v22.x, the one the agent session's PATH finds), then
+# Homebrew / /usr/local.  ffmpeg: the word-timing chain's own list (the same binary everywhere).  The resolved realpath + version
+# of each is recorded in check.json / the receipt (`tools`).
+TOOL_CANDIDATES = {
+    'node': (passwd_home() + '/.local/bin/node', '/opt/homebrew/bin/node', '/usr/local/bin/node'),
+    'ffmpeg': ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'),
+    'ffprobe': ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe', '/usr/bin/ffprobe'),
+    'git': ('/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'),
+    'swift': ('/usr/bin/swift', '/opt/homebrew/bin/swift', '/usr/local/bin/swift'),
+}
+
+
 # word timing (CF-A67 phases B + C): the chain word_timing.sh runs (asr_transcribe.py -> raw_asr.json, asr_align.py ->
 # caption_pages.json) is re-checked from its PRIMARY inputs (the avatar audio, script.txt, the raw words); word_timing.done.json is
 # never read for a verdict.  The chain's python is reached ONLY through its launcher: `/bin/bash <SCRIPTS_DIR>/asr_run.sh <script>
@@ -127,7 +166,7 @@ ASR_LANG = 'en_US.UTF-8'                   # = asr_transcribe.ENV_LANG
 ASR_TMPDIR = '/var/empty'                  # = asr_transcribe.ENV_TMPDIR (the chain writes only into its --out / --out-dir)
 # first executable wins, $PATH is never searched (= asr_transcribe.FFMPEG_CANDIDATES and the loop in word_timing.sh): the wav finalize
 # extracts must come from the same ffmpeg binary the chain used (the fingerprint names it)
-CHAIN_FFMPEG_CANDIDATES = ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg')
+CHAIN_FFMPEG_CANDIDATES = TOOL_CANDIDATES['ffmpeg']
 CHAIN_CODE_FILES = ('asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'asr_run.sh')   # = asr_transcribe.CODE_FILES (raw `code`)
 # asr_transcribe.PARAMS as raw_asr.json stores it (tuples become lists); a test reads PARAMS from the script source and compares
 ASR_PARAMS = {'language': 'th', 'temperature': [0.0], 'condition_on_previous_text': False, 'word_timestamps': True}
@@ -385,6 +424,16 @@ DEFAULT_PATHS = {
     'reports': 'qc/finalize',
 }
 OPTIONAL_KEYS = {'source_transcript', 'source_timed', 'evidence', 'chapters', 'relevance', 'source_video'}
+# claims of the agent: files the agent writes (or fetches) that finalize READS but no gate re-derives (receipt `self_reported`;
+# default paths, relative to the project).  visual_evidence.json: the content lint reads it as the agent's statement of what each
+# source beat shows; source_script.txt + avatar.srt: the `script` / `captions` / `timing` gates build on them (script.txt is
+# re-derived FROM them, they are not); transcript.txt / chapters.txt / transcript_timed.json: the content lint's source text
+# (source_timed.py output, never re-run by finalize); relevance.json: presence + sha256 only (RELEVANCE_NOTE); <music bed>
+# .source.json: its sha256 field is checked against the bed, its provenance (provider, track, url) is not; final-review.md:
+# the agent's own review; word_timing.done.json: word_timing.sh's progress note, never read for a verdict.
+SELF_REPORTED_KEYS = ('evidence', 'source_script', 'srt', 'source_transcript', 'chapters', 'source_timed', 'relevance')
+SELF_REPORTED = tuple(DEFAULT_PATHS[k] for k in SELF_REPORTED_KEYS) + (
+    '<music bed>.source.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json')
 # overridable = inputs the agent (or the fetch step) produces; gate-owned outputs, receipts and the raw timing are never
 OVERRIDABLE = {'script', 'source_script', 'srt', 'words', 'line_starts', 'cuts', 'source_transcript', 'source_timed',
                'evidence', 'chapters'}
@@ -458,7 +507,7 @@ GATES = [
                         ['--evidence', 'evidence'], ['--source-timed', 'source_timed']],
          inputs=['episode', 'script', 'words', 'line_starts', 'cuts', 'captions'], needs=[],
          report='{reports}/content.json', limit=60, required=True,
-         after=['frames'], dep_args=[['--frames-report', 'frames']]),
+         after=['frames'], dep_args=[['--frames-report', 'frames']], copy_args=True, validate='copy_search'),
     dict(name='captions', interp='python', script='lint_captions.py',
          args=['--script', '{script}', '--pages', '{captions}', '--source-script', '{source_script}', '--report', '{report}'],
          optional_args=[], inputs=['script', 'captions', 'source_script'],
@@ -629,9 +678,10 @@ class Deadline:
 
 # ---------------------------------------------------------------- tools (resolved once, absolute realpaths)
 def resolve_tools():
+    """{name: realpath | None} from TOOL_CANDIDATES (never $PATH)."""
     out = {}
     for name in TOOL_NAMES:
-        found = shutil.which(name)
+        found = next((c for c in TOOL_CANDIDATES[name] if os.path.isfile(c) and os.access(c, os.X_OK)), None)
         out[name] = os.path.realpath(found) if found else None
     return out
 
@@ -646,18 +696,35 @@ def tool_path_env(tools):
     return ':'.join(dirs + ['/usr/bin', '/bin'])
 
 
-def gate_env(tools):
-    env = {k: v for k, v in os.environ.items()
-           if k not in ('PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONINSPECT', 'NODE_OPTIONS', 'NODE_PATH', 'PATH')
-           and not k.startswith('GIT_')}
-    env['PATH'] = tool_path_env(tools)
-    return env
+def gate_env(tools, tmpdir):
+    """The ONLY environment a gate gets: built from scratch, nothing of os.environ (NODE_OPTIONS, PYTHON*, DYLD_*, GIT_*, ...).
+    tmpdir: the run's private temp dir (removed when the run ends)."""
+    return {'HOME': passwd_home(), 'PATH': tool_path_env(tools), 'LANG': GATE_LANG, 'TMPDIR': str(tmpdir)}
 
 
 def git_env():
-    """No GIT_* from the caller except what is set here."""
-    return {k: v for k, v in os.environ.items() if not k.startswith('GIT_')} | {
-        'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
+    """git's environment, built from scratch (no GIT_* / config redirection of the caller)."""
+    return {'HOME': passwd_home(), 'PATH': '/usr/bin:/bin', 'LANG': GATE_LANG, 'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
+
+
+def gate_site_dirs():
+    """THIS interpreter's site-packages (sysconfig purelib + platlib of sys.prefix, existing dirs, in that order): what a python gate
+    appends to sys.path explicitly (it runs -S).  Valid only when finalize itself runs WITH site (under -S, sys.prefix is the base
+    interpreter's, not the venv's: environment_checks refuses that)."""
+    import sysconfig
+    out = []
+    for key in ('purelib', 'platlib'):
+        p = sysconfig.get_paths().get(key)
+        if p and os.path.isdir(p) and p not in out:
+            out.append(p)
+    return out
+
+
+def python_info():
+    """The interpreter the python gates run under (check.json / receipt `tools.python`)."""
+    return {'path': os.path.realpath(sys.executable), 'executable': sys.executable, 'version': platform.python_version(),
+            'prefix': sys.prefix, 'base_prefix': sys.base_prefix, 'no_site': bool(sys.flags.no_site),
+            'gate_flags': list(GATE_PY_FLAGS), 'site_dirs': gate_site_dirs()}
 
 
 def git_run(tools, repo_root, *args, deadline=None):
@@ -776,6 +843,10 @@ class Ctx:
         self.composer = (self.repo_root / args.composer).resolve()     # code, engine, node_modules: ALWAYS the running checkout
         self.work_dir = Path(work_dir).resolve() if work_dir else None
         self.budget = CHECK_TOTAL_BUDGET_SEC if check else TOTAL_BUDGET_SEC
+        # projects-type roots the content lint searches for a copied episode: --check takes them from the outside system
+        # (--copy-root, mandatory, checked in run() before any gate); a delivery uses the project's own parent dir (its siblings)
+        self.copy_roots = ([Path(r).resolve() for r in (getattr(args, 'copy_root', None) or [])] if check else [self.project.parent])
+        self.tmp = None             # the run's private temp dir: TMPDIR of every gate + finalize's capture files (set by run())
         self.manifest_sha = None
         cfg = dict(DEFAULT_PATHS)
         explicit = set()
@@ -997,8 +1068,30 @@ def final_pixels_validator(report, ctx):
     return probs
 
 
-VALIDATORS = {'final_pixels': final_pixels_validator}
+VALIDATORS = {'final_pixels': final_pixels_validator,
+              'copy_search': lambda data, ctx: [(1, m) for m in copy_search_problems(data, ctx)]}
 GATE_BY_NAME = {g['name']: g for g in GATES}
+
+
+def copy_search_problems(data, ctx):
+    """The content lint's report must say where it searched for a copied episode: a `copy_search` block whose projects-type roots
+    are EXACTLY the roots finalize passed (realpaths; a delivery: the project's parent, --check: every --copy-root) and that is
+    complete.  -> messages (each a class-1 failure of the `content` record)."""
+    cs = data.get('copy_search') if isinstance(data, dict) else None
+    if not isinstance(cs, dict):
+        return ['the content lint report has no copy_search block: where it looked for a copied episode is unknown, so a copy '
+                'cannot be ruled out']
+    out = []
+    roots = cs.get('roots') if isinstance(cs.get('roots'), list) else []
+    got = {r.get('path') for r in roots if isinstance(r, dict) and r.get('kind') == 'projects'}
+    want = {str(r) for r in ctx.copy_roots}
+    if got != want:
+        out.append('the copy search did not cover exactly the projects roots finalize passed: missing %s, unexpected %s'
+                   % (sorted(want - got) or 'none', sorted(got - want, key=str) or 'none'))
+    if cs.get('incomplete') is not False:
+        out.append('the copy search is incomplete (copy_search.incomplete = %r): the run cannot be certified until the search '
+                   'completes; stop and report' % cs.get('incomplete'))
+    return out
 
 
 def gate_report_path(name, ctx):
@@ -1046,6 +1139,11 @@ def build_command(gate, ctx, deps=None):
         if ctx.paths[key].is_file():
             argv += [flag, str(ctx.paths[key])]
             inputs.append(ctx.paths[key])
+    if gate.get('copy_args'):            # every projects-type copy root (--check: the outside system's; a delivery: the project's
+        for root in ctx.copy_roots:      # parent dir) + our avatar (a project with the SAME avatar file is a re-do, not a copy)
+            argv += ['--copy-root', str(root)]
+        if ctx.avatar is not None and ctx.avatar.is_file():
+            argv += ['--avatar', str(ctx.avatar)]
     for name in gate.get('need_dirs', []):
         d = getattr(ctx, name)
         if d is None or not d.is_dir():
@@ -1092,7 +1190,8 @@ def spawn(cmd, ctx, limit, env):
         res['cancelled'] = True
         return res
     t0 = time.monotonic()
-    with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe:
+    tmp = getattr(ctx, 'tmp', None)
+    with tempfile.TemporaryFile(dir=tmp) as fo, tempfile.TemporaryFile(dir=tmp) as fe:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, cwd=str(ctx.repo_root),
                                 start_new_session=True)
         with _ACTIVE_LOCK:
@@ -1148,7 +1247,7 @@ def interps_needed(gate):
 def exe_for(ctx, script_name):
     path = str(SCRIPTS_DIR / script_name)
     if script_name.endswith('.py'):
-        return [sys.executable, '-B', '-E', '-s', path]
+        return [sys.executable, *GATE_PY_FLAGS, '-c', GATE_BOOT, ':'.join(gate_site_dirs()), path]
     return [ctx.tools.get('node') or 'node', path]
 
 
@@ -1842,9 +1941,13 @@ def _fp_show(v):
     return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True)
 
 
+OS_UPDATE_HINT = ('hint: the OS was updated after this word timing was made — redo the word timing step and deliver again')
+
+
 def compare_fingerprint(recorded, current):
     """A copy of asr_transcribe.compare_fingerprint (finalize must not import that module; a test runs both on the same inputs):
-    one line per differing leaf, 'path: <recorded> (production) != <current> (this machine)'; a key on one side only differs."""
+    one line per differing leaf, 'path: <recorded> (production) != <current> (this machine)'; a key on one side only differs.  When
+    platform.release / platform.mac_ver differ, ONE more last line (OS_UPDATE_HINT) says to redo the word timing and deliver again."""
     out = []
 
     def walk(path, a, b):
@@ -1857,6 +1960,8 @@ def compare_fingerprint(recorded, current):
         elif a is _FP_MISSING or b is _FP_MISSING or type(a) is not type(b) or a != b:
             out.append('%s: %s (production) != %s (this machine)' % (path or 'fingerprint', _fp_show(a), _fp_show(b)))
     walk('', recorded, current)
+    if any(l.startswith(('platform.release:', 'platform.mac_ver:')) for l in out):
+        out.append(OS_UPDATE_HINT)                       # one extra line; the failure condition is unchanged (the leaves above already differ)
     return out
 
 
@@ -1898,7 +2003,9 @@ def fingerprint_problem(ctx, raw, limit):
     diff = compare_fingerprint(recorded, current)
     shown = {k: v for k, v in recorded.items() if v is not _FP_MISSING}
     if diff:
-        return shown, '%s: %s' % (TOOLCHAIN_MSG, '; '.join(diff[:6]) + (' ... (+%d more)' % (len(diff) - 6) if len(diff) > 6 else '')), 4
+        leaves = [l for l in diff if l != OS_UPDATE_HINT]       # the hint is not a difference: it is shown after them, never cut off
+        msg = '%s: %s' % (TOOLCHAIN_MSG, '; '.join(leaves[:6]) + (' ... (+%d more)' % (len(leaves) - 6) if len(leaves) > 6 else ''))
+        return shown, msg + (' | %s' % OS_UPDATE_HINT if OS_UPDATE_HINT in diff else ''), 4
     return shown, None, 0
 
 
@@ -1943,21 +2050,21 @@ def timing_check_thresholds():
     return _TC_THRESHOLDS[0]
 
 
-def detect_silences(ctx, wav, th, limit):
-    """[(start, end)] of ffmpeg silencedetect, parsed exactly like timing_check.detect_silences.  -> (silences | None, error, class)"""
-    ff = chain_ffmpeg()
-    res = spawn([ff, '-hide_banner', '-nostats', '-i', str(wav), '-vn', '-af',
-                 'silencedetect=noise=%sdB:d=%s' % (th['silence_noise_db'], th['silence_min_s']), '-f', 'null', '-'], ctx, limit, asr_env())
-    if res['timed_out'] or res['cancelled'] or res['code'] != 0:
-        return None, 'ffmpeg silencedetect failed on the extracted wav: %s' % tail(res['stderr'].strip(), 300), 4
-    out, start = [], None
-    for m in re.finditer(r'silence_(start|end):\s*(-?\d+(?:\.\d+)?)', res['stderr']):
-        if m.group(1) == 'start':
-            start = float(m.group(2))
-        elif start is not None:
-            out.append((max(start, 0.0), float(m.group(2))))
-            start = None
-    return out, None, 0
+_TIMING_DEFECTS = []
+
+
+def detect_silences(wav):
+    """[(start, end)] of ffmpeg silencedetect by the chain's OWN parser, timing_defects.detect_silences (loaded from the certified
+    checkout's source): a silence the audio ends in (no silence_end) is closed at the Duration ffmpeg prints, so a quiet tail is
+    never counted as speech.  Same ffmpeg (chain_ffmpeg) and environment (asr_env) as the chain.  -> (silences | None, error, class)"""
+    if STOP.is_set():
+        return None, 'cancelled: finalize was terminated', 4
+    try:
+        if not _TIMING_DEFECTS:
+            _TIMING_DEFECTS.append(load_sibling('timing_defects'))
+        return [tuple(x) for x in _TIMING_DEFECTS[0].detect_silences(wav, ffmpeg=chain_ffmpeg(), env=asr_env())], None, 0
+    except Exception as e:  # noqa: BLE001 - RuntimeError of the parser, a broken source: never a verdict
+        return None, 'ffmpeg silencedetect failed on the extracted wav: %s' % (str(e) or type(e).__name__)[-300:], 4
 
 
 def raw_words(raw):
@@ -2177,7 +2284,7 @@ def runner_word_timing(gate, ctx, base, report, limit, env):
         th = timing_check_thresholds()
     except Exception as e:  # noqa: BLE001
         return end(4, 'cannot read the silence thresholds of timing_check.py: %s' % e)
-    sil, err, cls = detect_silences(ctx, wav, th, left())
+    sil, err, cls = detect_silences(wav)
     if err:
         return end(cls, err)
     metrics, probs = audio_binding(words, sil, info['duration'], th)
@@ -2308,7 +2415,7 @@ def run_gate(gate, ctx, inputs, deadline, env, deps=None):
             return record(gate, 'missing', 4, 'gate script missing: %s' % name, **base)
     for interp in sorted(interps_needed(gate)):
         if interp != 'python' and not ctx.tools.get(interp):
-            return record(gate, 'missing', 4, '%s not found on PATH' % interp, **base)
+            return record(gate, 'missing', 4, '%s not found at %s' % (interp, ', '.join(TOOL_CANDIDATES.get(interp, ()))), **base)
     block = dependency_block(gate, deps)
     if block:
         return record(gate, 'blocked', block[0], block[1], **base)
@@ -2347,12 +2454,17 @@ def run_gate(gate, ctx, inputs, deadline, env, deps=None):
         data, _err = read_json(report)
     issues = summarize_issues(data)
     base['issues'] = issues
+    if gate.get('copy_args') and isinstance(data, dict) and isinstance(data.get('copy_search'), dict):
+        base['extra'] = {'copy_search': data['copy_search']}       # where the copy detector looked (check.json / receipt: information)
     if code != 0:
         cls = class_for_exit(gate, code)
         if code < 0:
             return record(gate, 'crashed', 4, 'gate was killed by signal %d' % -code, **base)
         if code in (1, 2, 4) or code in gate.get('exit_classes', {}):
-            return record(gate, STATUS_BY_CLASS[cls], cls, 'gate exited with code %d' % code, **base)
+            why = 'gate exited with code %d' % code
+            if gate.get('copy_args') and code == 1:          # a content failure must still say where the copy search looked
+                why = '; '.join([why] + copy_search_problems(data, ctx))
+            return record(gate, STATUS_BY_CLASS[cls], cls, why, **base)
         return record(gate, 'crashed', 4, 'gate exited with unexpected code %d' % code, **base)
     # exit 0: the report must exist, be fresh, parse, and say pass:true
     if not report.is_file():
@@ -2948,13 +3060,15 @@ def summary(records):
 
 
 def tool_versions(tools):
+    env = {'HOME': passwd_home(), 'PATH': '/usr/bin:/bin', 'LANG': GATE_LANG}
+
     def run(cmd):
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, env=env)
             return (r.stdout or r.stderr).strip().splitlines()[0][:200]
         except (OSError, subprocess.TimeoutExpired, IndexError):
             return None
-    out = {'python': {'path': os.path.realpath(sys.executable), 'version': platform.python_version()}}
+    out = {'python': python_info()}
     for name, flag in (('node', '--version'), ('ffmpeg', '-version'), ('ffprobe', '-version'), ('git', '--version'),
                        ('swift', '--version')):
         path = tools.get(name)
@@ -3022,6 +3136,80 @@ def certified_pair(deliver, receipt_p):
         return valid_sha(want) and sha256_file(Path(deliver)) == want.lower()
     except OSError:
         return False
+
+
+def copy_search_of(records):
+    """The content lint's copy_search block of THIS run (information for check.json / the receipt), or None."""
+    rec = next((r for r in records if r['name'] == 'content'), None)
+    return rec.get('copy_search') if rec else None
+
+
+def delivered_binding(ctx, deliver, receipt_p):
+    """--check certifies ONE file: the delivered mp4.  It must be a regular file (lstat), and three values must agree: the sha256
+    finalize computes of it, the sha256 of the renders/final.mp4 the gates checked (ctx.hash: hashed when the gates started, re-checked
+    at the end) and the receipt's `delivered.sha256` (a claim, only compared).  The receipt's bound_inputs must name exactly
+    RECEIPT_BOUND_KEYS with the CURRENT hashes.  -> record `delivered` (verified; pass, or stale = class 2)."""
+    gate = {'name': 'delivered', 'required': True}
+    info = {'path': str(deliver), 'sha256': None, 'final_sha256': None, 'receipt': str(receipt_p), 'receipt_sha256': None}
+    problems = []
+    try:
+        if stat.S_ISREG(os.lstat(deliver).st_mode):
+            info['sha256'] = sha256_file(deliver)
+        else:
+            problems.append('%s is not a regular file (a symlink / directory is never certified)' % deliver)
+    except OSError as e:
+        problems.append('cannot read the delivered file %s: %s' % (deliver, e))
+    try:
+        info['final_sha256'] = ctx.hash(ctx.paths['final'])
+    except OSError as e:
+        problems.append('cannot hash %s: %s' % (ctx.rel(ctx.paths['final']), e))
+    if info['sha256'] and info['final_sha256'] and info['sha256'] != info['final_sha256']:
+        problems.append('the delivered file (sha256 %s...) is not the %s the gates checked (sha256 %s...)'
+                        % (info['sha256'][:12], ctx.rel(ctx.paths['final']), info['final_sha256'][:12]))
+    data, err = read_json(receipt_p)
+    if err or not isinstance(data, dict) or data.get('schema') != RECEIPT_SCHEMA:
+        problems.append('no delivery receipt of finalize at %s (%s)' % (receipt_p, err or 'not a %s document' % RECEIPT_SCHEMA))
+    else:
+        claim = (data.get('delivered') or {}).get('sha256') if isinstance(data.get('delivered'), dict) else None
+        info['receipt_sha256'] = claim if valid_sha(claim) else None
+        if not valid_sha(claim) or claim.lower() != info['sha256']:
+            problems.append('the receipt claims delivered sha256 %s, the delivered file is %s'
+                            % (claim if valid_sha(claim) else repr(claim), info['sha256'] or 'unreadable'))
+        bound = data.get('bound_inputs')
+        if not isinstance(bound, dict) or set(bound) != set(RECEIPT_BOUND_KEYS):
+            problems.append('the receipt\'s bound_inputs do not name exactly %s' % ', '.join(RECEIPT_BOUND_KEYS))
+        else:
+            differ = []
+            for k in RECEIPT_BOUND_KEYS:
+                want = bound[k].get('sha256') if isinstance(bound[k], dict) else None
+                cur = ctx.hash(ctx.paths[k]) if ctx.paths[k].is_file() else None
+                if not (valid_sha(want) and cur == want.lower()):
+                    differ.append(k)
+            if differ:
+                problems.append('the receipt\'s bound_inputs differ from the current files: %s (that delivery was made from other '
+                                'inputs)' % ', '.join(differ))
+    if problems:
+        return record(gate, 'stale', 2, '; '.join(problems), kind='verified', extra={'delivered': info})
+    return record(gate, 'pass', 0, '', kind='verified', extra={'delivered': info})
+
+
+def copy_root_problems(args):
+    """--check only: the projects-type roots the copy detector must search (MANDATORY; a clean checkout has no projects/ of its
+    own, so without them a copied episode would pass).  -> messages (exit 4, before any gate)."""
+    roots = getattr(args, 'copy_root', None) or []
+    if not roots:
+        return ['copy-root: --check needs at least one --copy-root DIR (a projects-type dir whose sub-directories are the other '
+                'episodes, e.g. <agent checkout>/projects): without it a copied episode cannot be found']
+    return ['copy-root: %s does not exist or is not a directory' % r for r in roots if not Path(r).is_dir()]
+
+
+def private_tmp(path):
+    """A new, empty directory only this user can read (mode 0700); an old one of an earlier run is removed first."""
+    path = Path(path)
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(mode=0o700, parents=True)
+    os.chmod(path, 0o700)
+    return path
 
 
 def retire_output(deliver, receipt_p):
@@ -3139,6 +3327,30 @@ def asr_env_check(deep=False):
     return 'word-timing', 'FAIL', '%s exited %d: %s (nothing is downloaded or installed)%s' % (label, r.returncode, err[:700], hint)
 
 
+PY_MODULES_PROBE = ("import sys;sys.path+=[p for p in sys.argv[1].split(':') if p];bad=[]\n"
+                    "for m in sys.argv[2:]:\n"
+                    " try: __import__(m)\n"
+                    " except Exception as e: bad.append('%s (%s)' % (m, (str(e).splitlines() or [type(e).__name__])[0][:80]))\n"
+                    "print('; '.join(bad));sys.exit(1 if bad else 0)")
+
+
+def python_modules_check(tools):
+    """PY_MODULES imported by `<this python> -I -S -B` with this interpreter's site-packages appended (= a gate).  -> (status, detail)"""
+    if sys.flags.no_site:
+        return 'FAIL', ('finalize runs with -S: its venv cannot be found that way (sys.prefix is the base interpreter\'s); run it '
+                        'with -I but without -S, the gates themselves run -I -S')
+    cmd = [sys.executable, *GATE_PY_FLAGS, '-c', PY_MODULES_PROBE, ':'.join(gate_site_dirs()), *PY_MODULES]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+                           env={'HOME': passwd_home(), 'PATH': tool_path_env(tools), 'LANG': GATE_LANG}, cwd='/')
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 'FAIL', 'cannot run %s: %s' % (sys.executable, e)
+    if r.returncode != 0:
+        return 'FAIL', ('cannot import %s with %s -I -S + its site-packages: run finalize with the repo\'s .venv python'
+                        % ((r.stdout.strip() or r.stderr.strip()[-200:]), os.path.realpath(sys.executable)))
+    return 'ok', '%s importable with %s -I -S' % (', '.join(PY_MODULES), os.path.realpath(sys.executable))
+
+
 def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=False, preflight_only=True, public=None, deep=False):
     """Fail-closed environment checks, shared by a real run, `--check` and `finalize.py --preflight`.  Never raises, never touches
     the network, never loads a model.  -> [{name, status: ok|FAIL|skip, detail, cls}] in the order of the preflight listing.
@@ -3161,19 +3373,10 @@ def environment_checks(repo_root, composer_arg, tools, lock_problems, versions=F
             v = (vers.get(n) or {}).get('version')
             add('tool-' + n, 'ok', '%s%s' % (tools[n], ' (%s)' % v if v else ''))
         else:
-            add('tool-' + n, 'FAIL', 'not found on PATH%s' % (' (macOS Vision OCR of the frames gate: no OCR = no watermark check)' if n == 'swift' else ''), 4)
-    # 2. python modules (the gates run under this interpreter)
-    missing = []
-    for mod in PY_MODULES:
-        try:
-            importlib.import_module(mod)
-        except Exception as e:  # noqa: BLE001 - any import failure
-            missing.append('%s (%s)' % (mod, str(e).splitlines()[0][:80] if str(e) else type(e).__name__))
-    if missing:
-        add('python-modules', 'FAIL', 'cannot import %s with %s: run finalize with the repo\'s .venv python (%s)'
-            % (', '.join(missing), os.path.realpath(sys.executable), Path(repo_root) / '.venv' / 'bin' / 'python'), 4)
-    else:
-        add('python-modules', 'ok', '%s importable with %s' % (', '.join(PY_MODULES), os.path.realpath(sys.executable)))
+            add('tool-' + n, 'FAIL', 'not found at %s ($PATH is never searched)%s' % (', '.join(TOOL_CANDIDATES[n]), ' (macOS Vision OCR of the frames gate: no OCR = no watermark check)' if n == 'swift' else ''), 4)
+    # 2. python modules, imported exactly the way a gate imports them: `<this python> -I -S -B` + gate_site_dirs() appended
+    status, detail = python_modules_check(tools)
+    add('python-modules', status, '%s (sys.prefix %s, site dirs %s)' % (detail, sys.prefix, ':'.join(gate_site_dirs()) or 'none'), 4)
     # 3. composer node_modules
     composer = (Path(repo_root) / composer_arg).resolve()
     nm = composer / 'node_modules'
@@ -3269,12 +3472,13 @@ def run(args):
             deliver_problem = '%s exists and is a %s; refusing to deliver there' % (
                 deliver, 'symlink' if stat.S_ISLNK(st.st_mode) else 'directory' if stat.S_ISDIR(st.st_mode) else 'special file')
     except FileNotFoundError:
-        pass
+        if args.check:              # --check certifies the delivered file: no file, nothing to certify
+            deliver_problem = 'nothing to certify: the delivered file %s does not exist (--check binds its result to it)' % deliver
     except OSError as e:
         deliver_problem = 'cannot stat %s: %s' % (deliver, e)
 
     state = {'moved': None, 'check_path': None, 'lock': None, 'ctx': None, 'lock_sha': None, 'head': None, 'repo_root': None, 'collision': False,
-             'external': False, 'work_dir': None, 'work_dir_error': None}
+             'external': False, 'work_dir': None, 'work_dir_error': None, 'certified_sha': None}
 
     def remaining_msg(phase):
         return 'time budget (%ds) exhausted during phase "%s"' % (budget, phase)
@@ -3329,7 +3533,10 @@ def run(args):
                         reasons=reasons, integrity_problems=list(integrity), relevance=relevance,
                         mode='clean-checkout' if state['external'] else 'in-repo', work_dir=str(state['work_dir']) if state['work_dir'] else None,
                         project=str(ctx.project) if ctx else None, public_root=str(ctx.public) if ctx else None,
-                        certification=CERTIFICATION, gates=[public(r, True) for r in records])
+                        delivered_path=str(deliver),
+                        certified_final_sha256=state['certified_sha'] if code == 0 else None,
+                        copy_roots=[str(Path(r).resolve()) for r in (args.copy_root or [])], copy_search=copy_search_of(records),
+                        tools=tool_versions(tools), certification=CERTIFICATION, gates=[public(r, True) for r in records])
             rdir = None
             if state['work_dir_error']:
                 pass                                    # an unusable work dir: nothing is written anywhere
@@ -3417,8 +3624,10 @@ def run(args):
     bad_env = [r for r in environment_checks(repo_root, args.composer, tools, [], preflight_only=False, public=public_dir(args, repo_root),
                                              deep=bool(args.check))
                if r['status'] == 'FAIL']
-    if bad_env:                      # the very checks `finalize.py --preflight` prints: they can never disagree
-        return finish(4, [], ['environment: %s: %s (nothing was run)' % (r['name'], r['detail']) for r in bad_env[:6]])
+    bad_roots = copy_root_problems(args) if args.check else []
+    if bad_env or bad_roots:         # the very checks `finalize.py --preflight` prints: they can never disagree
+        return finish(4, [], ['environment: %s: %s (nothing was run)' % (r['name'], r['detail']) for r in bad_env[:6]]
+                      + ['environment: %s (nothing was run)' % m for m in bad_roots])
 
     # ---- context, run lock, deliver path (class 2 problems; nothing has run yet)
     try:
@@ -3454,7 +3663,8 @@ def run(args):
             if not certified_pair(deliver, receipt_p):
                 remove_quiet(receipt_p)
         purge_pycache(SKILL_DIR)
-        env = gate_env(tools)
+        ctx.tmp = private_tmp(ctx.reports / 'gate-tmp')
+        env = gate_env(tools, ctx.tmp)
 
         # ---- 2. fresh gates (parallel, bounded by the invocation deadline minus the post-verification reserve)
         gate_end = deadline.end - POST_RESERVE_SEC
@@ -3488,6 +3698,8 @@ def run(args):
             return finish(4, records, [remaining_msg('post-verification')])
         vrecs, relevance, vinfo = run_verified(ctx, env, deadline)
         records += vrecs
+        if args.check:                  # the result is bound to the delivered file (a check of the project alone certifies nothing)
+            records.append(delivered_binding(ctx, deliver, receipt_p))
 
         # ---- 4. result
         reasons = ['%s: %s' % (r['name'], r['reason']) for r in records if r['status'] != 'pass' and r.get('required', True)]
@@ -3507,6 +3719,21 @@ def run(args):
         if again:
             return finish(3, records, ['integrity (re-check before delivery): %s' % p for p in again[:20]], again,
                           relevance, hint=RESTORE_HINT)
+        if args.check and code == 0:
+            # re-hash both files right before the pass: the certified sha256 is the one of the file as it is NOW
+            d = next(r for r in records if r['name'] == 'delivered')['delivered']
+            now = []
+            for p in (deliver, ctx.paths['final']):
+                try:
+                    now.append(sha256_file(p) if stat.S_ISREG(os.lstat(p).st_mode) else None)
+                except OSError:
+                    now.append(None)
+            if now != [d['sha256'], d['sha256']]:
+                code = 2
+                reasons.append('delivered: the delivered file or %s changed during the check (sha256 now %s / %s, checked %s)'
+                               % (ctx.rel(ctx.paths['final']), now[0], now[1], d['sha256']))
+            else:
+                state['certified_sha'] = now[0]
         if code != 0 or args.check:
             return finish(code, records, reasons, (), relevance)
         if deadline.remaining() < DELIVER_RESERVE_SEC:
@@ -3515,6 +3742,8 @@ def run(args):
         return deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, receipt_p, receipt_tmp,
                            t_start, started, finish, lexical, tools)
     finally:
+        if state['ctx'] is not None and state['ctx'].tmp is not None:
+            shutil.rmtree(state['ctx'].tmp, ignore_errors=True)
         if state['lock']:
             release_run_lock(state['lock'])
 
@@ -3562,9 +3791,8 @@ def deliver_now(ctx, args, records, relevance, vinfo, state, deliver, partial, r
                    'finalize_sha256': sha256_file(Path(__file__).resolve()),
                    'skill_tree': git_out(tools, ctx.repo_root, 'rev-parse', 'HEAD:' + SKILL_DIR.relative_to(ctx.repo_root).as_posix()),
                    'tools': tool_versions(tools),
-                   'bound_inputs': {k: {'path': ctx.rel(ctx.paths[k]), 'sha256': ctx.hash(ctx.paths[k])}
-                                    for k in ('episode', 'script', 'source_script', 'srt', 'words', 'line_starts', 'word_raw', 'word_pages',
-                                              'caption_options', 'captions', 'visual', 'final')},
+                   'bound_inputs': {k: {'path': ctx.rel(ctx.paths[k]), 'sha256': ctx.hash(ctx.paths[k])} for k in RECEIPT_BOUND_KEYS},
+                   'copy_roots': [str(r) for r in ctx.copy_roots], 'copy_search': copy_search_of(records),
                    'word_timing': ctx.word_timing,
                    'layout': vinfo.get('layout'), 'render': vinfo.get('render'), 'mux': vinfo.get('mux'),
                    'music': vinfo.get('music'), 'video': vinfo.get('video'),
@@ -3649,15 +3877,21 @@ def main(argv=None):
     ap.add_argument('--public-root', default=None,
                     help='--check only: the agent\'s remotion-composer/public (episode media + fonts); code, lock, engine and '
                          'node_modules still come from this checkout')
+    ap.add_argument('--copy-root', action='append', default=None, metavar='DIR',
+                    help='--check only, MANDATORY there (repeatable): a projects-type dir whose sub-directories are other episodes; '
+                         'the content lint compares this episode against them (a delivery uses the project\'s own parent dir)')
     ap.add_argument('--work-dir', default=None,
                     help='--check only: where the fresh reports and check.json go (empty or new; default: a new temp dir, printed '
                          'at the end); nothing is written into the project or the public root')
     args = ap.parse_args(argv)
     if args.preflight:
-        if args.project or args.deliver or args.check or args.manifest or args.public_root or args.work_dir:
+        if args.project or args.deliver or args.check or args.manifest or args.public_root or args.work_dir or args.copy_root:
             ap.error('--preflight takes only --composer / --repo-root')
     elif not (args.project and args.deliver):
         ap.error('--project and --deliver are required (unless --preflight)')
+    elif args.copy_root and not args.check:
+        ap.error('--copy-root is a --check-only option (the outside system names the projects to compare against); a delivery '
+                 'compares against the project\'s own parent dir')
     elif (args.public_root or args.work_dir) and not args.check:
         ap.error('--public-root / --work-dir are --check-only options: a real delivery reads the media of this repository and writes '
                  'its reports into the project')

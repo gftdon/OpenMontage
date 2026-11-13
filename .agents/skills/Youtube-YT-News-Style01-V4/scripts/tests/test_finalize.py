@@ -8,10 +8,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import types
 import time
 import unittest
 from unittest import mock
@@ -47,9 +49,15 @@ logs = cwd / '.stub_logs'
 logs.mkdir(exist_ok=True)
 (logs / (name + '.argv.json')).write_text(json.dumps(a))
 (logs / (name + '.flags.json')).write_text(json.dumps({'ignore_environment': sys.flags.ignore_environment,
-                                                       'no_user_site': sys.flags.no_user_site}))
+                                                       'no_user_site': sys.flags.no_user_site, 'no_site': sys.flags.no_site,
+                                                       'isolated': sys.flags.isolated, 'sys_path': sys.path,
+                                                       'executable': sys.executable, 'site_loaded': 'site' in sys.modules}))
 (logs / (name + '.pid')).write_text(str(os.getpid()))
-(logs / (name + '.env.json')).write_text(json.dumps({'PATH': os.environ.get('PATH'), 'GIT': [k for k in os.environ if k.startswith('GIT_')]}))
+(logs / (name + '.env.json')).write_text(json.dumps({'PATH': os.environ.get('PATH'), 'GIT': [k for k in os.environ if k.startswith('GIT_')],
+                                                     'all': dict(os.environ)}))
+for mod in b.get('imports', []):
+    __import__(mod)
+    (logs / (name + '.imported.' + mod)).write_text(repr(sys.modules[mod].__file__))
 (logs / (name + '.start')).write_text(repr(time.time()))
 (logs / (name + '.frames_report_existed')).write_text(json.dumps(Path(arg('--frames-report')).is_file() if arg('--frames-report') else None))
 if b.get('sleep'):
@@ -65,9 +73,16 @@ if b.get('bg_child'):
 if b.get('signal'):
     os.kill(os.getpid(), signal.SIGKILL)
 report = arg('--report')
+if name == 'lint_content' and 'copy_search' not in b.get('report_extra', {}) and not b.get('no_copy_search'):
+    roots = [a[i + 1] for i, x in enumerate(a) if x == '--copy-root']
+    roots = roots[:len(roots) - b.get('drop_roots', 0)]
+    b.setdefault('report_extra', {})['copy_search'] = {
+        'roots': [{'path': os.path.realpath(r), 'kind': 'projects', 'files': 0, 'skipped_same_avatar': []} for r in roots]
+                 + [{'path': str(Path(sys.argv[0]).resolve().parent.parent), 'kind': 'skill', 'files': 1, 'skipped_same_avatar': []}],
+        'incomplete': b.get('incomplete', False)}
 if report and b.get('write', True):
     Path(report).parent.mkdir(parents=True, exist_ok=True)
-    Path(report).write_text(json.dumps({'pass': b.get('pass', True), 'issues': b.get('issues', [])}))
+    Path(report).write_text(json.dumps(dict({'pass': b.get('pass', True), 'issues': b.get('issues', [])}, **b.get('report_extra', {}))))
     if b.get('old'):
         t = time.time() - 3600
         os.utime(report, (t, t))
@@ -167,7 +182,7 @@ ALL_GATES = ['frames', 'final-av', 'final-pixels', 'mux-audio', 'loudness', 'mus
              'timing', 'schema', 'gate-integrity', 'beats', 'content', 'captions', 'script', 'derived']   # the gates of a delivery
 CHECK_ONLY = ['asr-recheck']                                     # --check only (registered first, own lane)
 ALL_RECORDS = ALL_GATES + ['layout', 'render', 'mux', 'mux-video', 'video-format', 'final-duration']
-CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS
+CHECK_RECORDS = CHECK_ONLY + ALL_RECORDS + ['delivered']          # --check: + the binding to the delivered file
 STEM = {'beats': 'lint_beats', 'content': 'lint_content', 'captions': 'lint_captions', 'frames': 'frame_checks',
         'loudness': 'measure_loudness', 'timing': 'timing_check', 'final-pixels': 'qc_final_pixels', 'schema': 'episode_schema',
         'gate-integrity': 'gate_integrity', 'face-box': 'face_box'}
@@ -748,6 +763,8 @@ class FinalizeBase(unittest.TestCase):
         pages = self.proj / 'artifacts' / 'word_timing' / 'caption_pages.json'
         self.asr = make_asr_stub(Path(self.tmp) / 'asrstub', pages.read_text(encoding='utf-8') if pages.is_file() else '[]',
                                  self.skill / 'scripts')
+        self.copy_root = Path(self.tmp) / 'copyroot'      # the projects-type root every --check of these tests names (empty)
+        self.copy_root.mkdir()
 
     # --- helpers
     def behavior(self, **kw):
@@ -799,10 +816,51 @@ class FinalizeBase(unittest.TestCase):
         to the fake interpreter: the module is loaded exactly as `python finalize.py` would, then main() reads sys.argv."""
         return [sys.executable, *py_flags, '-c', FIN_LAUNCH, str(self.skill / 'scripts' / 'finalize.py'), str(self.asr / 'asr_run.sh')]
 
-    def run_fin(self, *extra, patch=None, deliver=None, check_args=True):
+    def make_delivered(self, deliver=None, project=None):
+        """The agent's delivery as --check finds it: <deliver> = a copy of renders/final.mp4 + a receipt of finalize's schema whose
+        delivered.sha256 and bound_inputs are the CURRENT hashes (what a delivery of exactly these inputs wrote).  No final.mp4 ->
+        no delivered file."""
+        m = self.module()
+        deliver = Path(deliver or self.deliver)
+        project = Path(project or self.proj)
+        try:
+            ctx = m.Ctx(types.SimpleNamespace(project=str(project), manifest=None, check=True, composer='remotion-composer',
+                                              public_root=None, work_dir=None, copy_root=None), self.repo, deliver)
+            paths = ctx.paths
+        except Exception:  # noqa: BLE001 - a fixture whose project Ctx refuses: the default paths
+            paths = {k: project / v for k, v in m.DEFAULT_PATHS.items()}
+        for p in (deliver, Path(str(deliver) + '.receipt.json')):
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+        self._made = None
+        if not paths['final'].is_file():
+            return None
+        deliver.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(paths['final'], deliver)
+        bound = {k: {'path': str(paths[k]), 'sha256': sha(paths[k]) if paths[k].is_file() else None} for k in m.RECEIPT_BOUND_KEYS}
+        Path(str(deliver) + '.receipt.json').write_text(json.dumps({
+            'schema': m.RECEIPT_SCHEMA, 'version': m.RECEIPT_VERSION, 'delivered': {'path': str(deliver), 'sha256': sha(deliver)},
+            'bound_inputs': bound}))
+        self._made = {p: sha(p) for p in (deliver, Path(str(deliver) + '.receipt.json'))}
+        return deliver
+
+    def run_fin(self, *extra, patch=None, deliver=None, check_args=True, delivered=True):
+        """--check: adds `--copy-root <self.copy_root>` (unless given) and, unless delivered=False, (re)writes the delivered file +
+        receipt of the CURRENT inputs first (make_delivered): --check certifies a delivered file."""
         m = self.module()
         if patch:
             patch(m)
+        extra = list(extra)
+        if '--check' in extra:
+            if check_args and '--copy-root' not in extra:
+                extra += ['--copy-root', str(self.copy_root)]
+            if delivered:
+                self.make_delivered(deliver)
+        else:
+            for p, h in (getattr(self, '_made', None) or {}).items():     # the harness's pair is not an earlier delivery
+                if p.is_file() and not p.is_symlink() and sha(p) == h:
+                    p.unlink()
+            self._made = None
         argv = ['--project', 'projects/p1', '--deliver', str(deliver or self.deliver), *extra]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -837,8 +895,13 @@ class FinalizeBase(unittest.TestCase):
         return (self.repo / '.stub_logs' / (stem + '.argv.json')).exists()
 
     def assertNotDelivered(self):
-        self.assertFalse(self.deliver.exists())
-        self.assertFalse(Path(str(self.deliver) + '.receipt.json').exists())
+        made = getattr(self, '_made', None)
+        if made:              # a --check run: the delivered pair the harness wrote is exactly as it was (--check never writes there)
+            for p, h in made.items():
+                self.assertEqual(h, sha(p), p)
+        else:
+            self.assertFalse(self.deliver.exists())
+            self.assertFalse(Path(str(self.deliver) + '.receipt.json').exists())
         self.assertFalse(Path(str(self.deliver) + '.partial').exists())
 
     def layout_path(self):
@@ -904,8 +967,11 @@ class HappyAndGateTests(FinalizeBase):
         self.assertEqual(2, rc['version'])
         self.assertEqual('not a certification: valid only after finalize.py --check from a clean checkout of the pinned commit passes',
                          rc['certification'])
-        self.assertEqual(['artifacts/visual_evidence.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json'],
-                         rc['self_reported'])           # the done marker is progress information only (CF-A67 phase B)
+        self.assertEqual(['artifacts/visual_evidence.json', 'artifacts/source_script.txt', 'assets/avatar.srt',
+                          'assets/ytsource/transcript.txt', 'assets/ytsource/chapters.txt', 'assets/ytsource/transcript_timed.json',
+                          'artifacts/relevance.json', '<music bed>.source.json', 'qc/final-review.md',
+                          'artifacts/word_timing/word_timing.done.json'],
+                         rc['self_reported'])           # FIX1 item 8; the done marker is progress information only (CF-A67 phase B)
         ih = rc['input_hashes']
         avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
         self.assertEqual({'path': 'remotion-composer/public/ep1/avatar.mp4', 'sha256': sha(avatar)}, ih['avatar'])
@@ -953,7 +1019,8 @@ class HappyAndGateTests(FinalizeBase):
         rep = json.loads((self.rdir / 'final-av.json').read_text())
         self.assertEqual(2.0, rep['params']['ignore_from'])
         flags = json.loads((self.repo / '.stub_logs' / 'lint_beats.flags.json').read_text())
-        self.assertEqual({'ignore_environment': 1, 'no_user_site': 1}, flags)
+        self.assertEqual({'ignore_environment': 1, 'no_user_site': 1, 'no_site': 1, 'isolated': 1},
+                         {k: flags[k] for k in ('ignore_environment', 'no_user_site', 'no_site', 'isolated')})     # -I -S (FIX1 item 5)
 
     def test_long_gates_are_registered_first(self):
         names = [g['name'] for g in self.module().GATES]
@@ -1340,7 +1407,7 @@ class IntegrityTests(FinalizeBase):
 
     def test_check_mode_reports_integrity_failure_without_touching_deliver(self):
         (self.skill / 'scripts' / 'lint_beats.py').write_text('x\n')
-        self.assertEqual(3, self.run_fin('--check'))
+        self.assertEqual(3, self.run_fin('--check', delivered=False))
         self.assertFalse(self.deliver.parent.exists())
         self.assertEqual(3, json.loads((self.rdir / 'check.json').read_text())['exit_code'])
 
@@ -1351,7 +1418,7 @@ class LayoutTests(FinalizeBase):
         m = self.module()
         ctx = m.Ctx(type('A', (), {'project': str(self.proj), 'composer': 'remotion-composer', 'manifest': None})(), self.repo,
                     self.repo / 'out' / 'x.mp4', m.resolve_tools())
-        mh, err, cls = m.node_manifest_hash(self.manifest_path(), m.gate_env(ctx.tools), ctx, m.Deadline(60))
+        mh, err, cls = m.node_manifest_hash(self.manifest_path(), m.gate_env(ctx.tools, Path(self.tmp)), ctx, m.Deadline(60))
         self.assertEqual((None, 0), (err, cls))
         self.assertEqual(json.loads(self.layout_path().read_text())['manifestHash'], mh)
 
@@ -1575,7 +1642,7 @@ class ResultHandlingTests(FinalizeBase):
 
     def test_check_mode_never_touches_deliver(self):
         self.assertEqual(0, self.run_fin('--check'))
-        self.assertFalse(self.deliver.parent.exists())
+        self.assertNotDelivered()                              # the delivered pair it certified is exactly as it was
         self.assertIn('CHECK PASS — nothing delivered', self.out)
         chk = json.loads((self.rdir / 'check.json').read_text())
         self.assertTrue(chk['would_deliver'])
@@ -1586,7 +1653,9 @@ class ResultHandlingTests(FinalizeBase):
         self.deliver.write_bytes(b'OLD')
         Path(str(self.deliver) + '.receipt.json').write_text('{"keep": true}')
         self.behavior(lint_beats={'exit': 1, 'pass': False})
-        self.assertEqual(1, self.run_fin('--check'))
+        self.assertEqual(2, self.run_fin('--check', delivered=False))     # beats fails (1); 'OLD' is not final.mp4: delivered stale (2)
+        chk = json.loads((self.rdir / 'check.json').read_text())
+        self.assertEqual(('fail', 'stale'), (self.gate(chk, 'beats')['status'], self.gate(chk, 'delivered')['status']))
         self.assertEqual(b'OLD', self.deliver.read_bytes())
         self.assertEqual('{"keep": true}', Path(str(self.deliver) + '.receipt.json').read_text())
         self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
@@ -2376,7 +2445,7 @@ class MuxVideoAndReceiptFactsTests(FinalizeBase):
         ctx = m.Ctx(type('A', (), {'project': str(self.proj), 'composer': 'remotion-composer', 'manifest': None})(), self.repo,
                     self.repo / 'out' / 'x.mp4', m.resolve_tools())
         dl = m.Deadline(120)
-        env = m.gate_env(ctx.tools)
+        env = m.gate_env(ctx.tools, Path(self.tmp))
         a = m.stream_hash(ctx, tmp / 'visual.mp4', env, dl)
         b = m.stream_hash(ctx, tmp / 'final.mp4', env, dl)
         self.assertEqual((None, 0), (a[1], a[2]))
@@ -2659,6 +2728,9 @@ class ConsoleSummaryTests(FinalizeBase):
 
 class CheckStateAndInterruptTests(FinalizeBase):
     def popen(self, *extra):
+        if '--check' in extra:                       # --check certifies a delivered file and needs a copy root (FIX1 items 1, 2)
+            self.make_delivered()
+            extra = (*extra, '--copy-root', str(self.copy_root))
         return subprocess.Popen([*self.fin_cmd('-B'), '--project', 'projects/p1',
                                  '--deliver', str(self.deliver), *extra], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -2891,7 +2963,8 @@ class PreflightTests(PreflightBase):
                 self.assertNotEqual(0, code, name)                  # the lock / list command cannot run without them either
                 continue
             self.assertEqual(4, code, (name, self.out))
-            self.assertIn('not found on PATH', self.line('FAIL', 'tool-' + name))
+            self.assertIn('not found at ', self.line('FAIL', 'tool-' + name))
+            self.assertIn('$PATH is never searched', self.line('FAIL', 'tool-' + name))
             self.assertTrue(self.lines()[-1].startswith('PREFLIGHT FAIL (exit 4)'), self.out)
 
     def test_missing_node_is_exit_4_not_ok(self):
@@ -3236,7 +3309,7 @@ class MusicPresenceTests(FinalizeBase):
         gate = next(g for g in m.GATES if g['name'] == 'music-presence')
         report = ctx.reports / 'music-presence.json'
         base = dict(report=ctx.rel(report), inputs={}, command='x')
-        return m.runner_music_presence(gate, ctx, base, report, 30, m.gate_env(ctx.tools))
+        return m.runner_music_presence(gate, ctx, base, report, 30, m.gate_env(ctx.tools, Path(self.tmp)))
 
     def test_a_tail_that_is_too_short_is_a_quality_failure_exit_1_with_the_reason(self):
         avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
@@ -3695,21 +3768,91 @@ class ComposerPathTests(FinalizeBase):
         self.assertEqual(0, self.run_fin('--composer', './remotion-composer/'), self.out)
 
 
+def first_candidate(m, name):
+    return os.path.realpath(next(c for c in m.TOOL_CANDIDATES[name] if os.path.isfile(c) and os.access(c, os.X_OK)))
+
+
 class ToolResolutionTests(FinalizeBase):
     def test_tools_are_absolute_realpaths_recorded_in_the_receipt_and_the_path_is_minimal(self):
         self.assertEqual(0, self.run_fin(), self.out)
         tools = self.receipt()['tools']
+        m = self.module()
         for name in ('node', 'ffmpeg', 'ffprobe', 'git'):
-            self.assertEqual(os.path.realpath(shutil.which(name)), tools[name]['path'], name)
+            self.assertEqual(first_candidate(m, name), tools[name]['path'], name)
             self.assertTrue(tools[name]['version'], name)
         self.assertIn('swift', tools)
         self.assertEqual(os.path.realpath(sys.executable), tools['python']['path'])
         node_cmd = self.gate(self.receipt(), 'schema')['command']
         self.assertTrue(node_cmd.startswith(tools['node']['path']), node_cmd)
         env = json.loads((self.repo / '.stub_logs' / 'lint_beats.env.json').read_text())
-        m = self.module()
         self.assertEqual(m.tool_path_env(m.resolve_tools()), env['PATH'])
         self.assertTrue(env['PATH'].endswith(':/usr/bin:/bin'))
+
+    def test_tools_come_from_the_fixed_candidates_never_from_the_callers_path(self):
+        # FIX1 item 5: a PATH full of look-alike tools (and no PATH at all) changes nothing
+        fake = Path(self.tmp) / 'fakebin'
+        fake.mkdir()
+        for name in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift'):
+            (fake / name).write_text('#!/bin/sh\nexit 7\n')
+            (fake / name).chmod(0o755)
+        m = self.module()
+        want = {n: first_candidate(m, n) for n in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift')}
+        for path in (str(fake), None):
+            env = {k: v for k, v in os.environ.items() if k != 'PATH'} | ({'PATH': path} if path else {})
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(want, m.resolve_tools(), path)
+        own = m.passwd_home() + '/.local/bin/node'                 # the owner's node (the one the agent session uses) comes first
+        if os.path.isfile(own) and os.access(own, os.X_OK):
+            self.assertEqual(os.path.realpath(own), want['node'])
+
+    def test_a_gate_gets_an_environment_built_from_scratch(self):
+        # (no DYLD_*: gates_lock.py, not a gate, still hands the caller's environment to its node child -- see the backlog)
+        bogus = {'NODE_OPTIONS': '--require /nonexistent.js', 'PYTHONPATH': '/nonexistent', 'PYTHONSTARTUP': '/nonexistent.py',
+                 'HOME': str(Path(self.tmp) / 'fakehome'), 'TMPDIR': str(Path(self.tmp)), 'SOME_SECRET': 'x', 'LANG': 'C'}
+        with mock.patch.dict(os.environ, bogus):
+            self.assertEqual(0, self.run_fin(), self.out)
+        env = json.loads((self.repo / '.stub_logs' / 'lint_beats.env.json').read_text())['all']
+        m = self.module()
+        self.assertEqual({'HOME', 'PATH', 'LANG', 'TMPDIR'}, set(env) - BASH_OR_OS_ADDED)
+        self.assertEqual(pwd.getpwuid(os.getuid()).pw_dir, env['HOME'])
+        self.assertEqual('en_US.UTF-8', env['LANG'])
+        self.assertEqual(m.tool_path_env(m.resolve_tools()), env['PATH'])
+        self.assertEqual(str(self.rdir / 'gate-tmp'), env['TMPDIR'])         # private to the run ...
+        self.assertFalse((self.rdir / 'gate-tmp').exists())                   # ... and removed when it ends
+
+    def test_python_gates_run_isolated_without_site_and_get_the_venvs_site_packages_explicitly(self):
+        self.behavior(lint_beats={'imports': ['numpy', 'PIL', 'pythainlp']})
+        self.assertEqual(0, self.run_fin(), self.out)
+        flags = json.loads((self.repo / '.stub_logs' / 'lint_beats.flags.json').read_text())
+        m = self.module()
+        self.assertEqual((1, 1, 1, 1), (flags['isolated'], flags['no_site'], flags['ignore_environment'], flags['no_user_site']))
+        self.assertFalse(flags['site_loaded'])                               # no .pth / sitecustomize processing
+        self.assertEqual(str(self.skill / 'scripts'), flags['sys_path'][0])  # the gate's own directory first (its sibling modules)
+        self.assertTrue(m.gate_site_dirs())
+        self.assertEqual(m.gate_site_dirs(), flags['sys_path'][-len(m.gate_site_dirs()):])
+        for mod in ('numpy', 'PIL', 'pythainlp'):
+            where = (self.repo / '.stub_logs' / ('lint_beats.imported.' + mod)).read_text()
+            self.assertTrue(any(d in where for d in m.gate_site_dirs()), (mod, where))
+        cmd = self.gate(self.receipt(), 'beats')['command']
+        self.assertTrue(cmd.startswith(shlex.join([sys.executable, '-I', '-S', '-B', '-c'])), cmd)
+
+    def test_check_json_records_each_tool_and_the_python(self):
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        m = self.module()
+        for name in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift'):
+            self.assertEqual(first_candidate(m, name), doc['tools'][name]['path'], name)
+            self.assertTrue(doc['tools'][name]['version'], name)
+        py = doc['tools']['python']
+        self.assertEqual((sys.executable, sys.prefix, ['-I', '-S', '-B']), (py['executable'], py['prefix'], py['gate_flags']))
+        self.assertEqual(m.gate_site_dirs(), py['site_dirs'])
+
+    def test_preflight_under_an_empty_environment_finds_every_tool(self):
+        # falsification (ng) in the fixture: `env -i <python> finalize.py --preflight` -> every tool found, exit 0
+        r = subprocess.run([*self.fin_cmd('-B'), '--preflight'], capture_output=True, text=True, env={}, cwd=self.tmp, timeout=300)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        for name in ('node', 'ffmpeg', 'ffprobe', 'git', 'swift'):
+            self.assertIn('PREFLIGHT ok tool-%s: ' % name, r.stdout)
 
     def test_git_environment_of_the_caller_is_ignored(self):
         bogus = str(Path(self.tmp) / 'nonexistent-git-dir')
@@ -4018,6 +4161,199 @@ class MuxReceiptTests(unittest.TestCase):
                            capture_output=True, text=True, cwd=tmp)
         self.assertNotEqual(0, r.returncode)
         self.assertFalse(Path(str(out) + '.mux.json').exists())
+
+
+
+
+# ---------------------------------------------------------------------------------------------- FIX1 item 1: --check certifies a FILE
+class DeliveredBindingTests(FinalizeBase):
+    def check_doc(self):
+        return json.loads((self.rdir / 'check.json').read_text())
+
+    def forge(self, mp4_bytes=None, claim=None, bound_patch=None, receipt=True):
+        """--deliver X written by the test: X = mp4_bytes (default: final.mp4), receipt claiming `claim` (default: sha of X) with the
+        current bound_inputs (bound_patch: {key: sha256} replaces entries)."""
+        self.make_delivered()
+        if mp4_bytes is not None:
+            self.deliver.write_bytes(mp4_bytes)
+        rp = Path(str(self.deliver) + '.receipt.json')
+        doc = json.loads(rp.read_text())
+        doc['delivered']['sha256'] = claim or sha(self.deliver)
+        for k, v in (bound_patch or {}).items():
+            doc['bound_inputs'][k]['sha256'] = v
+        if receipt:
+            rp.write_text(json.dumps(doc))
+        else:
+            rp.unlink()
+        self._made = None
+
+    def test_a_pass_is_bound_to_the_delivered_file(self):
+        self.assertEqual(0, self.run_fin('--check'), self.out)
+        doc = self.check_doc()
+        self.assertEqual(str(self.deliver), doc['delivered_path'])
+        self.assertEqual(sha(self.deliver), doc['certified_final_sha256'])
+        self.assertEqual(sha(self.fin), doc['certified_final_sha256'])
+        rec = self.gate(doc, 'delivered')
+        self.assertEqual(('pass', 'verified'), (rec['status'], rec['kind']))
+        self.assertEqual(sha(self.deliver), rec['delivered']['receipt_sha256'])
+
+    def test_a_different_mp4_with_a_receipt_forged_to_match_it_fails(self):
+        # falsification (k): X is another mp4 (the visual render), the receipt claims X's sha256 and the current inputs
+        self.forge(mp4_bytes=(self.proj / 'renders' / 'visual.mp4').read_bytes())
+        self.assertEqual(2, self.run_fin('--check', delivered=False), self.out)
+        doc = self.check_doc()
+        self.assertIsNone(doc['certified_final_sha256'])
+        rec = self.gate(doc, 'delivered')
+        self.assertEqual('stale', rec['status'])
+        self.assertIn('is not the projects/p1/renders/final.mp4 the gates checked', rec['reason'])
+        self.assertIn('delivered: ', ' | '.join(doc['reasons']))
+
+    def test_the_receipt_is_only_a_claim_compared_against(self):
+        for kw, words in (({'claim': 'a' * 64}, 'the receipt claims delivered sha256 ' + 'a' * 64),
+                          ({'bound_patch': {'script': 'b' * 64, 'word_raw': 'c' * 64}}, 'bound_inputs differ from the current files: script, word_raw'),
+                          ({'receipt': False}, 'no delivery receipt of finalize at')):
+            self.forge(**kw)
+            self.assertEqual(2, self.run_fin('--check', delivered=False), (kw, self.out))
+            doc = self.check_doc()
+            self.assertIn(words, self.gate(doc, 'delivered')['reason'], kw)
+            self.assertIsNone(doc['certified_final_sha256'], kw)
+
+    def test_no_delivered_file_or_a_symlink_is_exit_2_before_any_gate(self):
+        elsewhere = Path(self.tmp) / 'elsewhere.mp4'
+        shutil.copyfile(self.fin, elsewhere)
+        for make in (lambda: None, lambda: os.symlink(elsewhere, self.deliver)):
+            for p in (self.deliver, Path(str(self.deliver) + '.receipt.json')):
+                if os.path.lexists(p):
+                    os.unlink(p)
+            shutil.rmtree(self.repo / '.stub_logs', ignore_errors=True)
+            self.deliver.parent.mkdir(parents=True, exist_ok=True)
+            make()
+            self.assertEqual(2, self.run_fin('--check', delivered=False), self.out)
+            doc = self.check_doc()
+            self.assertEqual([], doc['gates'])
+            self.assertIsNone(doc['certified_final_sha256'])
+            self.assertRegex(' | '.join(doc['reasons']), 'nothing to certify|is a symlink')
+            for stem in STEM.values():
+                self.assertFalse(self.ran(stem), stem)
+
+    def test_a_delivered_file_that_changes_during_the_check_is_exit_2(self):
+        def patch(m):
+            real = m.delivered_binding
+
+            def binding_then_change(ctx, deliver, receipt_p):
+                rec = real(ctx, deliver, receipt_p)
+                with open(deliver, 'ab') as f:            # swapped right after it was compared
+                    f.write(b'x')
+                return rec
+            m.delivered_binding = binding_then_change
+        self.assertEqual(2, self.run_fin('--check', patch=patch), self.out)
+        doc = self.check_doc()
+        self.assertIn('changed during the check', ' | '.join(doc['reasons']))
+        self.assertIsNone(doc['certified_final_sha256'])
+        self._made = None
+
+
+# ---------------------------------------------------------------------------------------------- FIX1 item 2: the copy roots
+class CopyRootTests(FinalizeBase):
+    def test_check_without_a_copy_root_is_exit_4_before_any_gate(self):
+        self.assertEqual(4, self.run_fin('--check', check_args=False), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        self.assertIn('environment: copy-root: --check needs at least one --copy-root DIR', ' | '.join(doc['reasons']))
+        self.assertEqual([], doc['gates'])
+        for stem in STEM.values():
+            self.assertFalse(self.ran(stem), stem)
+
+    def test_a_copy_root_that_does_not_exist_is_exit_4_before_any_gate(self):
+        missing = Path(self.tmp) / 'no-such-projects'
+        self.assertEqual(4, self.run_fin('--check', '--copy-root', str(self.copy_root), '--copy-root', str(missing)), self.out)
+        doc = json.loads((self.rdir / 'check.json').read_text())
+        self.assertIn('environment: copy-root: %s does not exist or is not a directory' % missing, ' | '.join(doc['reasons']))
+        self.assertFalse(self.ran('lint_content'))
+
+    def test_every_root_and_our_avatar_reach_the_lint(self):
+        other = Path(self.tmp) / 'more-projects'
+        other.mkdir()
+        self.assertEqual(0, self.run_fin('--check', '--copy-root', str(self.copy_root), '--copy-root', str(other)), self.out)
+        argv = self.argv_of('lint_content')
+        avatar = self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4'
+        tail_ = argv[argv.index('--copy-root'):argv.index('--copy-root') + 6]
+        self.assertEqual(['--copy-root', str(self.copy_root), '--copy-root', str(other), '--avatar', str(avatar)], tail_)
+        self.assertEqual([str(self.copy_root), str(other)], json.loads((self.rdir / 'check.json').read_text())['copy_roots'])
+
+    def test_a_delivery_passes_the_projects_dir_and_the_avatar_and_needs_no_flag(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        argv = self.argv_of('lint_content')
+        i = argv.index('--copy-root')
+        self.assertEqual(['--copy-root', str(self.repo / 'projects'), '--avatar',
+                          str(self.repo / 'remotion-composer' / 'public' / 'ep1' / 'avatar.mp4')], argv[i:i + 4])
+        self.assertEqual(1, argv.count('--copy-root'))
+        self.assertEqual([str(self.repo / 'projects')], self.receipt()['copy_roots'])
+
+    def test_copy_root_is_refused_in_a_delivery(self):
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.run_fin('--copy-root', str(self.copy_root))
+        self.assertEqual(2, cm.exception.code)
+        self.assertIn('--copy-root is a --check-only option', err.getvalue())
+        self.assertNotDelivered()
+
+    def test_lint_exit_4_is_an_environment_failure(self):
+        self.behavior(lint_content={'exit': 4, 'pass': False})
+        self.assertEqual(4, self.run_fin('--check'), self.out)
+        rec = self.gate(json.loads((self.rdir / 'check.json').read_text()), 'content')
+        self.assertEqual('missing', rec['status'])
+
+    def test_the_copy_search_block_goes_into_check_json_and_the_receipt(self):
+        for root, run in ((self.copy_root, lambda: self.run_fin('--check')), (self.repo / 'projects', lambda: self.run_fin())):
+            block = {'roots': [{'path': str(root), 'kind': 'projects', 'files': 3, 'skipped_same_avatar': ['p0']},
+                               {'path': str(self.skill), 'kind': 'skill', 'files': 9, 'skipped_same_avatar': []}], 'incomplete': False}
+            self.behavior(lint_content={'report_extra': {'copy_search': block}})
+            self.assertEqual(0, run(), self.out)
+            doc = json.loads((self.rdir / 'check.json').read_text()) if root == self.copy_root else self.receipt()
+            self.assertEqual(block, doc['copy_search'])
+            self.assertEqual(block, self.gate(doc, 'content')['copy_search'])
+
+    def content_reason(self, *extra):
+        self.assertEqual(1, self.run_fin('--check', *extra), self.out)
+        rec = self.gate(json.loads((self.rdir / 'check.json').read_text()), 'content')
+        self.assertEqual('fail', rec['status'])
+        return rec['reason']
+
+    def test_a_lint_report_that_drops_a_root_fails_the_content_record(self):
+        other = Path(self.tmp) / 'more-projects'
+        other.mkdir()
+        self.behavior(lint_content={'drop_roots': 1})
+        why = self.content_reason('--copy-root', str(self.copy_root), '--copy-root', str(other))
+        self.assertIn("the copy search did not cover exactly the projects roots finalize passed: missing ['%s'], unexpected none" % other, why)
+
+    def test_a_lint_report_without_copy_search_fails_the_content_record(self):
+        self.behavior(lint_content={'no_copy_search': True})
+        self.assertIn('the content lint report has no copy_search block', self.content_reason())
+        self.behavior(lint_content={'no_copy_search': True, 'exit': 1, 'pass': False})          # a failing lint must say it too
+        why = self.content_reason()
+        self.assertIn('gate exited with code 1; the content lint report has no copy_search block', why)
+
+    def test_an_incomplete_copy_search_fails_the_content_record(self):
+        self.behavior(lint_content={'incomplete': True})
+        self.assertIn('the copy search is incomplete (copy_search.incomplete = True): the run cannot be certified', self.content_reason())
+
+
+# ---------------------------------------------------------------------------------------------- FIX1 item 8: self_reported
+class SelfReportedTests(FinalizeBase):
+    def test_every_agent_written_input_read_but_not_re_derived_is_listed(self):
+        self.assertEqual(0, self.run_fin(), self.out)
+        m = self.module()
+        want = ['artifacts/visual_evidence.json', 'artifacts/source_script.txt', 'assets/avatar.srt', 'assets/ytsource/transcript.txt',
+                'assets/ytsource/chapters.txt', 'assets/ytsource/transcript_timed.json', 'artifacts/relevance.json',
+                '<music bed>.source.json', 'qc/final-review.md', 'artifacts/word_timing/word_timing.done.json']
+        self.assertEqual(want, self.receipt()['self_reported'])
+        # each key is really READ by a gate (an input, an optional input or an argument template) or recorded (relevance)
+        used = set()
+        for g in m.GATES:
+            used |= set(g.get('inputs', [])) | {k for _f, k in g.get('optional_args', [])}
+            used |= {k for a in g.get('args', []) for k in re.findall(r'\{(\w+)\}', a)}
+        for k in m.SELF_REPORTED_KEYS:
+            self.assertTrue(k in used or k == 'relevance', k)
+        self.assertNotIn('script', m.SELF_REPORTED_KEYS)            # re-derived by the `script` gate
 
 
 if __name__ == '__main__':

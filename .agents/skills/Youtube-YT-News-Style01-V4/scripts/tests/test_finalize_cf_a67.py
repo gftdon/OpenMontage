@@ -52,6 +52,9 @@ class Base(FinalizeBase):
         m = self.module()
         if patch:
             patch(m)
+        argv = list(argv)
+        if '--check' in argv and '--copy-root' not in argv:       # --check needs a projects-type copy root (FIX1 item 2)
+            argv += ['--copy-root', self.copy_root]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             code = m.main([str(a) for a in argv])
@@ -458,7 +461,9 @@ class CleanCheckoutCheckTests(Base):
         write_receipts(self.repo, name=self.name, proj=self.aproj, public=self.apub)
         self.wd = Path(self.tmp) / 'work'
 
-    def check(self, *extra, work=True, public=True, patch=None):
+    def check(self, *extra, work=True, public=True, patch=None, delivered=True):
+        if delivered:                    # the agent's delivery of these inputs (--check certifies that file)
+            self.make_delivered(project=self.aproj)
         argv = ['--check', '--project', self.aproj, '--deliver', self.deliver]
         argv += ['--public-root', self.apub] if public else []
         argv += ['--work-dir', self.wd] if work else []
@@ -475,7 +480,7 @@ class CleanCheckoutCheckTests(Base):
         for f in ('frames.json', 'cuts.json', 'mux-audio.json', 'face-box.json', 'derived.json', 'script.json'):
             self.assertTrue((self.wd / f).is_file(), f)
         self.assertIn('CHECK WORK DIR: %s' % self.wd, self.out)
-        self.assertFalse(self.deliver.exists())
+        self.assertNotDelivered()                                   # the delivered pair is exactly as it was
         self.assertFalse(Path(str(self.deliver) + '.FAILED.json').exists())
         self.assertFalse((self.wd / '.finalize.lock').exists())
 

@@ -266,6 +266,25 @@ class WordTimingGateTests(ChainBase):
         self.assertIn('newpart: <missing> (production) != {"x": 1} (this machine)', g['reason'])
         self.assertEqual([], self.transcriptions())
 
+    def test_an_os_update_surfaces_the_redo_hint_in_the_record_same_class(self):
+        # FIX1 item 9: a difference only in platform.release / platform.mac_ver is still a toolchain difference (class 4), and the
+        # record ends with the chain's OS_UPDATE_HINT; any other leaf adds no hint
+        hint = self.module().OS_UPDATE_HINT
+        plat = dict(tf.FAKE_FP['platform'], release='25.0.0', mac_ver='26.0')
+        self.set_raw(tf.raw_doc(platform=plat))
+        self.asr_behavior(fingerprint_patch={'platform': dict(plat, release='25.1.0', mac_ver='26.1')})
+        self.assertEqual(4, self.run_fin(), self.out)
+        g = self.gate_rec('word-timing')
+        self.assertEqual('missing', g['status'])
+        self.assertIn('platform.mac_ver: 26.0 (production) != 26.1 (this machine); platform.release: 25.0.0 (production) != 25.1.0 '
+                      '(this machine) | ' + hint, g['reason'])
+        self.assertTrue(g['reason'].endswith(hint), g['reason'])
+        self.again()
+        self.set_raw(tf.raw_doc())
+        self.asr_behavior(fingerprint_patch={'mlx': {'version': '0.32.0'}})
+        self.assertEqual(4, self.run_fin(), self.out)
+        self.assertNotIn(hint, self.gate_rec('word-timing')['reason'])
+
     def test_the_fingerprint_tool_failing_is_exit_4_never_a_pass(self):
         for beh in ({'exit': 4, 'stderr': 'ERROR: venv pins differ\n'}, {'stdout': 'not json'}):
             self.again()
@@ -385,13 +404,12 @@ class AudioBindingTests(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix='binding-')).resolve()
         cls.m = load_finalize()
         cls.th = cls.m.timing_check_thresholds()
-        ctx = types.SimpleNamespace(repo_root=cls.tmp)
         cls.sil = {}
         for name, spans in (('a', SPEECH_A), ('b', SPEECH_B)):
             wav = cls.tmp / name / 'vo16k.wav'
             wav.parent.mkdir()
             speech_wav(wav, spans)
-            sil, err, _cls = cls.m.detect_silences(ctx, wav, cls.th, 30)
+            sil, err, _cls = cls.m.detect_silences(wav)
             assert err is None, err
             cls.sil[name] = sil
 
@@ -408,6 +426,9 @@ class AudioBindingTests(unittest.TestCase):
             self.assertEqual(th[k], self.th[k], k)
         self.assertEqual((0.1, 0.4, 0.005), (self.th['silenceInteriorLeadS'], self.th['silenceInteriorTrailS'], self.th['maxInSilenceShare']))
         self.assertNotIn('0.005', ''.join(l for l in chain_source('finalize.py').splitlines() if not l.lstrip().startswith('#')))
+        # the silencedetect values of the chain's parser (timing_defects, the one finalize uses) are timing_check's
+        self.assertEqual((th['silence_noise_db'], th['silence_min_s']),
+                         (chain_constant('timing_defects.py', 'SILENCE_NOISE_DB'), chain_constant('timing_defects.py', 'SILENCE_MIN_S')))
 
     def test_the_silences_are_measured(self):
         self.assertEqual(4, len(self.sil['a']))         # 2-3, 5-6, 8.5-9.5, 11.5-12
@@ -443,6 +464,29 @@ class AudioBindingTests(unittest.TestCase):
         self.assertEqual([], p)
         m, p = self.bind(sorted(tiled_words(SPEECH_A) + [(2.2, 2.5, 'inside')]))
         self.assertEqual(1, m['wordsInSilence'])
+
+    def test_audio_ending_in_two_seconds_of_silence_passes_rule_c(self):
+        # FIX1 item 6: ONE silence parser (timing_defects.detect_silences).  An ffmpeg that prints no silence_end for the silence the
+        # audio ends in (the stand-in below; ffmpeg 8.1 does print one for a wav) must not turn the quiet tail into speech: the open
+        # silence is closed at the Duration ffmpeg printed.
+        d = self.tmp / 'tail'
+        d.mkdir()
+        wav = d / 'vo16k.wav'
+        speech_wav(wav, [(0.0, 1.0)], dur=3.0)
+        old_ffmpeg = d / 'ffmpeg'
+        old_ffmpeg.write_text('#!/bin/sh\necho "  Duration: 00:00:03.00, start: 0.000000, bitrate: 256 kb/s" >&2\n'
+                              'echo "[Parsed_silencedetect_0 @ 0x1] silence_start: 1.0" >&2\nexit 0\n')
+        old_ffmpeg.chmod(0o755)
+        words = tiled_words([(0.0, 1.0)])
+        for label, cands in (('real ffmpeg', self.m.CHAIN_FFMPEG_CANDIDATES), ('no silence_end at EOF', (str(old_ffmpeg),))):
+            with mock.patch.object(self.m, 'CHAIN_FFMPEG_CANDIDATES', cands):
+                sil, err, _cls = self.m.detect_silences(wav)
+            self.assertIsNone(err, label)
+            self.assertAlmostEqual(1.0, sil[-1][0], delta=0.05, msg=label)
+            self.assertAlmostEqual(3.0, sil[-1][1], delta=0.05, msg=label)
+            m, p = self.m.audio_binding(words, sil, 3.0, self.th)
+            self.assertEqual([], p, label)
+            self.assertLessEqual(m['speechAfterLastWord'], 0.05, label)
 
     def test_speech_after_the_last_word(self):
         words = [w for w in tiled_words(SPEECH_A) if w[1] <= 10.5]
@@ -605,15 +649,19 @@ class ChainContractTests(unittest.TestCase):
     def test_compare_fingerprint_is_the_chains_own(self):
         tree = ast.parse(chain_source('asr_transcribe.py'))
         keep = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in ('compare_fingerprint', '_show'))
-                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_MISSING' for t in n.targets))]
-        self.assertEqual(3, len(keep))
+                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in ('_MISSING', 'OS_UPDATE_HINT') for t in n.targets))]
+        self.assertEqual(4, len(keep))
+        self.assertEqual(chain_constant('asr_transcribe.py', 'OS_UPDATE_HINT'), self.m.OS_UPDATE_HINT)
         ns = {'json': json}
         exec(compile(ast.Module(body=keep, type_ignores=[]), 'asr_transcribe.py', 'exec'), ns)
         other_manifest = dict(tf.FAKE_FP, venv=dict(tf.FAKE_FP['venv'], manifest_sha256='c' * 64))
         cases = [({'a': 1}, {'a': 1}), ({'a': 1}, {'a': 2}), ({'a': {'b': [1, 2]}}, {'a': {'b': [1]}}), ({'a': 1}, {}),
                  ({}, {'x': {'y': 'z'}}), ({'v': '1'}, {'v': 1}), ({'l': [1, {'k': True}]}, {'l': [1, {'k': False}]}),
                  (dict(tf.FAKE_FP), dict(tf.FAKE_FP, mlx={'version': '0.32'})), (dict(tf.FAKE_FP), other_manifest),
-                 (dict(tf.FAKE_FP, venv={'python': {'version': '3.12.0'}, 'distributions': {}}), dict(tf.FAKE_FP))]
+                 (dict(tf.FAKE_FP, venv={'python': {'version': '3.12.0'}, 'distributions': {}}), dict(tf.FAKE_FP)),
+                 ({'platform': {'release': '25.0.0', 'mac_ver': '26.0'}}, {'platform': {'release': '25.1.0', 'mac_ver': '26.0'}}),
+                 ({'platform': {'release': '25.0.0', 'mac_ver': '26.0'}}, {'platform': {'release': '25.0.0', 'mac_ver': '26.1'}}),
+                 ({'platform': {'release': '25.0.0'}, 'mlx': 1}, {'platform': {'release': '25.1.0'}, 'mlx': 2})]
         for a, b in cases:
             self.assertEqual(ns['compare_fingerprint'](a, b), self.m.compare_fingerprint(a, b), (a, b))
         self.assertEqual(['venv.manifest_sha256: %s (production) != %s (this machine)' % ('b' * 64, 'c' * 64)],
