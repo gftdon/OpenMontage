@@ -27,7 +27,7 @@ $PY "$SKILL/scripts/source_timed.py" merge $P/assets/ytsource/part_*.json --out 
 $PY -c "import json,sys;print('\n'.join(r['text'] for r in json.load(open(sys.argv[1]))))" $P/assets/ytsource/transcript_timed.json > $P/assets/ytsource/transcript.txt
 ```
 
-exit 4 = ไม่มี model/venv (ไม่ดาวน์โหลดให้) → ขั้นล้ม รายงานเหตุผล; exit 2 = อินพุตผิด; exit 1 = ล้มอื่น ๆ (`from-audio` ที่เสร็จแล้วรันซ้ำด้วยอาร์กิวเมนต์เดิมจะพิมพ์ "already done")
+exit 4 = ASR venv ของ V4 / model / pin ไม่ตรง (ไม่ดาวน์โหลด ไม่ติดตั้ง ไม่สร้างหรือซ่อม venv — คนเป็นผู้รัน `setup_asr_venv.sh`) → ขั้นล้ม รายงานเหตุผล; exit 2 = อินพุตผิด; exit 1 = ล้มอื่น ๆ (`from-audio` ที่เสร็จแล้วรันซ้ำด้วยอาร์กิวเมนต์เดิมจะพิมพ์ "already done")
 
 ## 2. Look before you cut (ต้องเปิดภาพดูด้วยเครื่องมือ Read ทุกครั้ง)
 
@@ -48,7 +48,7 @@ cp $P/assets/ytsource/clips/_cuts.json $P/artifacts/_cuts.json   # ทำทุ�
 mkdir -p remotion-composer/public/<assetDir>/broll && cp $P/assets/ytsource/clips/yt_*.mp4 remotion-composer/public/<assetDir>/broll/
 ```
 
-- ตั้งชื่อ `yt_<topic>` (ต้องตรงกับ `^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`) ไม่ชนกับ stock
+- ตั้งชื่อ `yt_<topic>` (ต้องตรงกับ `^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`) และต้องขึ้นต้น `yt_` เสมอ (clip ที่ไม่ใช่วิดีโอต้นฉบับ = `stock-not-allowed`)
 - **`from`** ใน `episode.json` = วินาทีที่เริ่มเล่น **ภายในไฟล์ที่ตัดแล้ว** (ไม่ใช่เวลาในวิดีโอต้นฉบับ; เวลาต้นฉบับอยู่ใน `_cuts.json`: `source_in` + `from` = เวลาที่เห็นจริง) ไม่ใส่ = เล่นตั้งแต่เฟรมแรก ซึ่งพลาดสิ่งที่ป้ายอ้างถึงได้ง่าย ถ้าภาพที่ต้องการเริ่มที่วินาทีที่ 9 ของ clip ให้ตั้ง `from:9` หรือ (ดีกว่า) ตัดใหม่ให้เริ่มที่นั่น เว้นช่วงนำ 0.5–1 วินาทีเผื่อ transition
 - ตัดให้ "สิ่งที่ป้ายพูดถึง" อยู่บนจอ**ตลอด beat** ไม่ใช่แค่เฟรมแรก: จำนวนวินาทีที่แสดง **บวกหางของภาพเก่าตอนเปลี่ยนฉาก (สูงสุด 0.92 s)** ต้อง ≤ `brollDur[src] − from − ~0.1 s` เพราะ source beat เล่นวน/ค้างเฟรมสุดท้ายไม่ได้ (schema S09 และ `source-loop` = error) beat ยาว 12 s ต้องมี clip ≥ ~13 s หลัง `from` (ข้อความ error ของ S09 บอกจำนวนวินาทีที่ต้องลด `from`)
 - `brollDur[src]` ใน `episode.json` = ความยาวจริงของไฟล์ใน **public** (`ffprobe`) ไม่ใช่ตัวเลขที่ `cut_clips.sh` พิมพ์จากความตั้งใจ และไฟล์ใน `public/<assetDir>/broll/` ต้องเป็นไฟล์เดียวกับใน `assets/ytsource/clips/` (`cmp`)
@@ -64,7 +64,7 @@ mkdir -p remotion-composer/public/<assetDir>/broll && cp $P/assets/ytsource/clip
 | Cold open / ประโยคเปิดที่อ้างผลลัพธ์ | ฉากสาธิต/ผลลัพธ์ของต้นฉบับ (`media:"clip"`, `layout:"stage"`) |
 | "ตัวที่ N คือ…" แนะนำเครื่องมือ | หน้าจอ UI ของเครื่องมือนั้น (`clip` stage, หรือ `wide` เมื่อรายละเอียดบนจอสำคัญ) |
 | ขั้นตอน/การตรวจสอบ | หน้าจอ dashboard / โค้ด / ผลตัดสิน (`clip`) |
-| ประโยคทั่วไปที่ต้นฉบับไม่มีภาพให้ | **การ์ดข้อความจาก script** (`media:"typo"`) ไม่ใช่ stock |
+| ประโยคทั่วไปที่ต้นฉบับไม่มีภาพให้ | **การ์ดข้อความจาก script** (`media:"typo"`) หรือ clip อื่นของต้นฉบับ ไม่ใช่ stock/ภาพ AI (ห้ามทุกกรณี) |
 | สรุป | การ์ด `summary3`/`final4` จาก script หรือการ์ดสถิติของต้นฉบับถ้าถูกพูดถึง |
 
 - ข้อความบน beat (`headline`/`sub`/`stats`/การ์ด) ต้องมาจากสิ่งที่พูดใน script หรือแสดงในต้นฉบับ ตัวเลข/ลำดับ (รอบที่ 1, 8/10 ฯลฯ) ที่ไม่มีทั้งสองที่ห้ามใส่ (`provenance-number`, `provenance-ordinal`)
@@ -73,20 +73,20 @@ mkdir -p remotion-composer/public/<assetDir>/broll && cp $P/assets/ytsource/clip
 - ต้องสลับ media สม่ำเสมอ ~7 beat ต่อนาที beat ละ ~3–10 วินาที; presenter-only รวม ≤ 25 % ของ VO, ช่วงต่อเนื่อง ≤ 12 s ที่เหลือเติมด้วย source หรือการ์ด
 - Source beat แสดง `SOURCE · <ช่อง>` ผ่าน `officialTag` ของ episode (เครดิตอยู่ใน chrome ของจอ และ `endcard`)
 
-## 5. `srcCrop` (เมื่อภาพสำคัญเป็นแค่ส่วนหนึ่งของเฟรมต้นฉบับ)
+## 5. `srcCrop` (ค่าเริ่มต้น = ไม่ใส่)
 
-**ค่าเริ่มต้นคือไม่ใส่ `srcCrop`** — ช่องภาพเป็น 16:9 เหมือน clip ต้นฉบับ จึงแสดงทั้งเฟรมอยู่แล้ว ใส่เฉพาะเมื่อตั้งใจซูมไปที่ส่วนหนึ่งของเฟรม `srcCrop {x,y,w,h}` เป็นพิกเซลบนเฟรม 1920×1080 ของต้นฉบับ สัดส่วน ≈16:9 (คลาดเกิน 25 % = error, เกิน 10 % = warning); ใส่แล้วภาพถูก cover ลงกรอบ (V4 ไม่มี punch บน footage) **ไม่มี gate ใดตรวจว่ากรอบตัดเนื้อหา/ข้อความของต้นฉบับหรือไม่** (S11 และ `crop-check` ตรวจแค่ขอบเขต สัดส่วน ขนาดต่ำสุด และภาพว่างในกรอบ) ผู้เขียนต้องเปิดเฟรมดูเอง คำสั่งด้านล่างคือขั้นตอนสำหรับกรณีซูมโดยตั้งใจเท่านั้น
+ช่องภาพเป็น 16:9 เหมือน clip ต้นฉบับ จึงแสดงทั้งเฟรมอยู่แล้ว **ไม่ต้องใส่ `srcCrop`** ถ้าตั้งใจซูมแล้วใส่ ส่วนของเฟรมต้นฉบับที่หายจากภาพที่ผู้ชมเห็นต้อง **≤ 2 % ของแต่ละด้าน** — เกิน = error `crop-trims-source` ไม่มีข้อยกเว้น (`lint_content.py` วัดหลัง cover-fit ลงกรอบ; ข้อความ error บอก % ของแต่ละด้านกับคำสั่ง ffmpeg วาดกรอบให้ดู) แก้ด้วยการลบ `srcCrop` `srcCrop {x,y,w,h}` เป็นพิกเซลบนเฟรม 1920×1080 ของต้นฉบับ สัดส่วน ≈16:9 (คลาดเกิน 25 % = error, เกิน 10 % = warning; S11 และ `crop-check` ตรวจขอบเขต สัดส่วน ขนาดต่ำสุด และภาพว่างในกรอบ) gate วัดแค่ % ของขอบ ไม่รู้ว่าสิ่งที่ตัดคืออะไร: ถ้ายังใส่ ให้เปิดเฟรมที่ crop ดูว่าไม่ตัดเนื้อหาหรือข้อความ
 
 ```bash
 $PY "$SKILL/scripts/frame_checks.py" crop-propose --video remotion-composer/public/<assetDir>/broll/<src>.mp4 --in <A> --out <B> --report $P/qc/crop_<src>.json
 $PY "$SKILL/scripts/frame_checks.py" crop-check   --video <เดิม> --in <A> --out <B> --crop x:y:w:h --report $P/qc/cropcheck_<src>.json
 ```
 
-`crop-propose` เป็นข้อเสนอเท่านั้น: **เปิดเฟรมที่ crop แล้วดู** ว่าสิ่งที่ป้ายอ้างถึงอยู่ครบ ไม่ถูกตัดขอบ และไม่ติดแถบดำ/watermark `--in/--out` = วินาทีภายในไฟล์ clip ช่วงที่แสดงจริง
+`crop-propose` เป็นข้อเสนอเท่านั้น (กรอบที่เสนอยังต้องผ่านกฎ 2 % ข้างต้น): **เปิดเฟรมที่ crop แล้วดู** ว่าสิ่งที่ป้ายอ้างถึงอยู่ครบ ไม่ถูกตัดขอบ และไม่ติดแถบดำ/watermark `--in/--out` = วินาทีภายในไฟล์ clip ช่วงที่แสดงจริง
 
 ## 6. หลักฐานภาพ (`artifacts/visual_evidence.json`)
 
-หลังเขียน `episode.json` ให้ดึงเฟรมจากช่วงที่ "แสดงจริง" ของทุก source cutaway แล้วเปิดดูทีละภาพ (`frame_checks.py cutaways` เขียน jpg ชื่อ `b<idx 3 หลัก>_<src>_<ms 8 หลัก>.jpg` ใน `--frames-dir`) แล้วเขียนหนึ่ง entry ต่อ source beat: `{ "t": <beat.t>, "src": "yt_...", "cue_line": <เลขบรรทัด script ที่พูดตอนนั้น>, "subject_terms": ["<คำภาษาอังกฤษตามที่ปรากฏในเสียง/บนจอของต้นฉบับ>"], "seen": "<สิ่งที่เห็นจริงในเฟรม>" }` `lint_content.py` ตรวจว่า `cue_line` ทับ beat นั้น และ `subject_terms` ครบทุกคำอยู่ในช่วงที่แสดง (transcript ±3 s / OCR เฟรม / chapter) ถ้าสิ่งที่เห็นไม่ใช่สิ่งที่บรรทัดนั้นพูดถึง ให้แก้ **การตัด** (`from`, ช่วงตัด, clip อื่น, หรือเปลี่ยนเป็นการ์ด) ไม่ใช่แก้หลักฐาน
+หลังเขียน `episode.json` ให้ดึงเฟรมจากช่วงที่ "แสดงจริง" ของทุก source cutaway แล้วเปิดดูทีละภาพ (`frame_checks.py cutaways` เขียน jpg ชื่อ `b<idx 3 หลัก>_<src>_<ms 8 หลัก>.jpg` ใน `--frames-dir`) แล้วเขียนหนึ่ง entry ต่อ source beat: `{ "t": <beat.t>, "src": "yt_...", "cue_line": <เลขบรรทัด script ที่พูดตอนนั้น>, "subject_terms": ["<คำภาษาอังกฤษตามที่ปรากฏในเสียง/บนจอของต้นฉบับ>"], "seen": "<สิ่งที่เห็นจริงในเฟรม>" }` `lint_content.py` ตรวจว่า `cue_line` ทับ beat นั้น และ `subject_terms` ครบทุกคำอยู่ในช่วงที่แสดง (transcript ±3 s / OCR เฟรม / chapter) `seen` ห้ามซ้ำข้าม entry (`evidence-seen-duplicate`) และไฟล์นี้เป็นคำกล่าวของคุณเอง (`self_reported` ใน receipt) ไม่มี gate รับรองว่าภาพตรงจริง — ห้ามเขียนที่ไม่ได้เปิดเฟรมดู ถ้าสิ่งที่เห็นไม่ใช่สิ่งที่บรรทัดนั้นพูดถึง ให้แก้ **การตัด** (`from`, ช่วงตัด, clip อื่น, หรือเปลี่ยนเป็นการ์ด) ไม่ใช่แก้หลักฐาน
 
 ## 7. สิ่งที่ใช้ร่วมกับ format web-news
 
