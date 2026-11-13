@@ -21,13 +21,13 @@
      "punch": [{"at": 3, "z": 1.2}],
      "lower": {"at": 1, "dur": 3, "title": "Gemini", "sub": "รุ่นใหม่"}},
     {"t": 5, "mode": "pip", "media": "clip", "src": "yt_gemini_demo", "origin": "source", "layout": "stage",
-     "srcCrop": {"x": 0, "y": 0, "w": 1280, "h": 720}, "from": 0,
-     "headline": "ทำงานต่อเนื่อง 20 ชั่วโมง"},
+     "from": 0,
+     "headline": "รันต่อเนื่อง 20 ชั่วโมง"},
     {"t": 12, "mode": "pip", "media": "typo", "typo": "summary3", "layout": "stage",
      "headline": "คะแนน เริ่มต้น",
      "items": [{"at": 13, "text": "คะแนน 3 เต็ม 10"}, {"at": 17.5, "text": "รอบที่ 65"}, {"at": 19, "text": "บรรทัด"}]},
     {"t": 20, "mode": "pip", "media": "clip", "src": "yt_code_lines", "origin": "source", "layout": "stage", "from": 4,
-     "headline": "โค้ดเกือบ 13,000 บรรทัด",
+     "headline": "เขียนโค้ดเกือบ 13,000 บรรทัด",
      "stats": [{"at": 21.0, "dur": 4.0, "big": "13,000", "label": "บรรทัด"}]},
     {"t": 28, "mode": "full"}
   ]

@@ -75,6 +75,28 @@ THRESHOLDS.update({
 # (the provenance-thai test). starting value set by the implementer, not an acceptance threshold -- report to lead.
 THRESHOLDS['typoFillerMaxShare'] = 0.30
 
-# crop-trims-source (lint_content.py, warning only): a beat's srcCrop that trims any edge of the 1920x1080 source frame by MORE than this
-# many percent of that side is listed so the author looks at the frame. starting value proposed by the implementer, accepted by lead 2026-11-12; warning only
-CROP_TRIM_WARN_PERCENT = 2.0
+# crop-trims-source (lint_content.py, ERROR): a beat's srcCrop that trims any edge of the 1920x1080 source frame by MORE than this many
+# percent of that side fails the lint. No exceptions: the default is "no srcCrop" (show the whole source frame). Decided by the project lead
+# 2026-11-12 after the proof run, where an unattended agent kept srcCrop on 42 of 44 clips (trimming up to 15 % of an edge). 2.0 was the
+# warning threshold before and is unchanged. Module constants below are NOT overridable with `lint_content.py --set` on purpose (a gate an
+# unattended agent can switch off from the command line is not a gate).
+CROP_TRIM_MAX_PERCENT = 2.0
+
+# episode-copied (lint_content.py, ERROR): the episode fails when at least this share of its beats (those that have a `src` or a `headline`)
+# has a counterpart (same media, same headline, same footage: the same normalised `src` name OR the same cut of the same source video, see
+# lint_content.norm_copy_text / _same_footage) among the beats of ONE other episode-format JSON file found under the skill directory or under
+# another project of the repo, OR at least this share of THAT file's beats has a counterpart here (padding the episode with new beats does not
+# dilute a copy), AND at least COPY_MIN_SAME beats are the same (a handful of shared headlines in two short episodes is not a copy).
+# Measured (beat times are not part of the metric; see the W2b result packet for the full table):
+#   proof-run episode (projects/V261111_001, agent-made) vs the real episode it copied: 58 of 68 eligible beats = 85.3 %
+#     (the proof run's own count was 67 of 79 beats identical in media, src, headline AND kicker = 85 %)
+#   same proof-run episode vs the engine sample ytNewsStyle01V4Sample.json (a different video): 0 of 68 = 0.0 %
+# an independent episode is expected at ~0 %; 20 % leaves a wide margin on both sides and still catches a half-rewritten copy.
+COPY_MAX_SHARE = 0.20
+COPY_MIN_SAME = 5
+
+# The copy search reads other JSON files: only regular files up to this size (an episode is a few hundred KB; a bigger .json is skipped and
+# counted in metrics.copy.skipped_large), and the whole search must finish within this many seconds (the content gate's own limit is 60 s;
+# a search that does not finish fails with copy-search-incomplete: "no copy found" must never mean "did not look").
+COPY_MAX_FILE_BYTES = 5 * 1024 * 1024
+COPY_WALK_BUDGET_SECONDS = 30.0

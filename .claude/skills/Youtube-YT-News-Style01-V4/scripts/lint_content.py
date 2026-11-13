@@ -6,9 +6,18 @@ a missing or unreadable input exits 2. issue = {code, severity:'error'|'warn', t
 only 'error' fails the run.
 
 Checks: schema (delegated to episode_schema.mjs), provenance-number / -ordinal / -latin / -thai,
-card-timing-*, presenter-share/-run, cta-length, punch-forbidden, stock-unverified, source-reuse, and
+card-timing-*, presenter-share/-run, cta-length, punch-forbidden, stock-not-allowed, source-reuse, crop-trims-source, and
 the shown-vs-said checks on source clips (evidence-missing, cue-mismatch, window-evidence-unavailable,
-subject-not-in-window, evidence-weak, label-latin-not-in-window), typo-filler. Thresholds: content_thresholds.py.
+subject-not-in-window, evidence-weak, evidence-seen-duplicate, label-latin-not-in-window), typo-filler,
+episode-copied. Thresholds: content_thresholds.py.
+
+Hardening (CF-A67, the lint is run by an unattended agent that may take any shortcut): stock / AI footage is never allowed, a
+relevance file is never evidence; srcCrop trimming an edge by more than CROP_TRIM_MAX_PERCENT is an error; two evidence entries with
+the same `seen` text (after Unicode NFKC, removal of invisible characters and whitespace collapsing) are an error; an episode that shares
+COPY_MAX_SHARE of its beats (same media, headline and footage, compared after normalisation) with another episode-format file (the skill
+directory, or another project under <repo>/projects), or whose beats make up COPY_MAX_SHARE of that file, is an error (episode-copied; at
+least COPY_MIN_SAME beats). The episode itself must be a regular file inside its own project (episode-not-regular-file), and the search for
+copies must finish (copy-search-incomplete); the walk reads regular files only and never follows a link.
 
 What the evidence checks prove, plainly: that a subject term (a word of >= 4 characters, not a stopword) occurs in the ORIGINAL video's
 transcript or in the OCR of the frames at the time the clip was cut from. They do NOT prove that the picture matches the narration; that needs
@@ -18,23 +27,25 @@ Structural episode rules (S01-S20, including S09 clip length, S12 punch, S20 las
 workstream's episode_schema.mjs; this file calls it and does not re-implement them. The only copy kept is
 punch-forbidden for legacy (list / TSX) replay data, where there is no schema.
 
---relevance accepted formats (see load_relevance): the `results` rows of the report written by
-score_relevance.py / batch_relevance.py (matched to a beat by `src` if the row has one, else by beat start
-`t`), a bare list of such rows, or {"<src>": row}. A row passes only when
-score_relevance.verification_status(row, beat_origin) == 'verified' (derived from score / readable_text /
-pending flags -- a stored `verification_status` label is never trusted).
+--relevance is still read (formats: see load_relevance) but ONLY to report it in metrics.relevance as "not used as evidence":
+no verdict, however good, makes a stock / AI beat pass.
 """
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+import time
+import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import episode_data as ed
-from content_thresholds import THRESHOLDS, LEGACY_OVERRIDES, CROP_TRIM_WARN_PERCENT
+from content_thresholds import (THRESHOLDS, LEGACY_OVERRIDES, CROP_TRIM_MAX_PERCENT, COPY_MAX_SHARE, COPY_MIN_SAME, COPY_MAX_FILE_BYTES,
+                                COPY_WALK_BUDGET_SECONDS)
 
 SCHEMA = 'yt-news-v4-content-lint'
 VERSION = 1
@@ -82,7 +93,7 @@ class Inputs:
     """Everything the checks read besides the episode."""
 
     def __init__(self, script_lines, tokens, line_starts, cuts, source=None, relevance=None, relevance_given=False,
-                 evidence=None, frames=None, timed=None, chapters=None, legacy=False, frames_given=False, frame_counts=None):
+                 evidence=None, frames=None, timed=None, chapters=None, legacy=False, frames_given=False, frame_counts=None, copy_search=None):
         self.script_lines = [ed.norm_digits(l) for l in script_lines]
         self.script = '\n'.join(self.script_lines)
         self.script_nospace = re.sub(r'\s+', '', self.script)
@@ -101,6 +112,7 @@ class Inputs:
         self.legacy = legacy
         self.relevance = relevance
         self.relevance_given = relevance_given
+        self.copy_search = copy_search      # see copy_search_for(); None = the episode-copied search is not run (library callers / unit tests)
         corpus = self.script + '\n' + self.source['all']
         self.latin_corpus = {w.lower() for w in LATIN.findall(corpus)}
 
@@ -555,32 +567,50 @@ def load_relevance(path):
     return [r for r in rows if isinstance(r, dict)]
 
 
-def check_stock(ep, inp, issues):
-    verification_status = None
+def check_stock(ep, inp, issues, metrics):
+    """stock-not-allowed (error, every case): a footage beat (media broll / clip) whose origin is not the source video. Stock / AI footage
+    never passes, not even with a `verified` relevance verdict (a hand-written verdict file passed before CF-A67); the relevance file is only
+    reported in metrics.relevance. The old code `stock-unverified` is gone (it meant "allowed with a verdict")."""
+    rows = inp.relevance or []
+    metrics['relevance'] = {'given': bool(inp.relevance_given), 'rows': len(rows), 'usedAsEvidence': False,
+                            'note': 'a relevance file is not evidence: stock / ai footage is always an error'}
     for b in ep['beats']:
-        if b.get('media') not in ('broll', 'clip') or b.get('origin') not in ('stock', 'ai'):
+        if b.get('media') not in ('broll', 'clip') or b.get('origin') == 'source':
             continue
-        src = b.get('src')
-        if not inp.relevance_given:
-            issues.append(_issue('stock-unverified', 'error', b['t'], 'src', src, 'no --relevance file: %s clip has no relevance verdict (fail closed)' % b['origin']))
-            continue
-        rows = [r for r in inp.relevance if r.get('src') == src]
-        if not rows:
-            rows = [r for r in inp.relevance if 'src' not in r and ed.num(r.get('t')) is not None and abs(ed.num(r['t']) - b['t']) < 0.05]
-        if not rows:
-            issues.append(_issue('stock-unverified', 'error', b['t'], 'src', src, 'no relevance verdict for %s clip %s' % (b['origin'], src)))
-            continue
-        if verification_status is None:
-            from score_relevance import verification_status
-        bad = [r for r in rows if verification_status(r, b['origin']) != 'verified']
-        if bad:
-            issues.append(_issue('stock-unverified', 'error', b['t'], 'src', src,
-                                 'relevance verdict is not passing (score=%s readable_text=%s)' % (bad[0].get('score'), bad[0].get('readable_text'))))
+        origin = b.get('origin')
+        issues.append(_issue('stock-not-allowed', 'error', b['t'], 'src', b.get('src'),
+                             '%s footage (media %s, origin %s) is not allowed: only the source video may be shown; use source footage or a `typo` '
+                             'text card built from the script (a relevance verdict does not change this)' % (
+                                 origin if origin in ('stock', 'ai') else 'non-source', b.get('media'), repr(origin) if origin is not None else 'missing')))
+
+
+def _edge_trims(x, y, w, h):
+    """Percent of each side of the 1920x1080 frame that lies outside the rectangle (x, y, w, h)."""
+    return {'left': x / ed.SOURCE_W * 100.0, 'right': (ed.SOURCE_W - (x + w)) / ed.SOURCE_W * 100.0,
+            'top': y / ed.SOURCE_H * 100.0, 'bottom': (ed.SOURCE_H - (y + h)) / ed.SOURCE_H * 100.0}
+
+
+def crop_visible_trims(layout, crop):
+    """-> (trims, how): the percent of each side of the source frame the srcCrop REMOVES from what the viewer sees. The renderer cover-fits the
+    crop into the picture box, so a crop whose shape is not the box's trims the other axis too: the VISIBLE region (ed.visible_region) is
+    measured, relative to the visible region of the same layout without a crop (which is ~0 for the 16:9-ish boxes, and keeps a full-frame
+    crop from being blamed for the box's own shape). Never less than the crop rectangle's own trims. `how` is 'visible', or 'rectangle'
+    when the visible region cannot be computed (unknown layout, lanes file unusable): the rectangle alone, which is never more lenient than before."""
+    x, y, w, h = (ed.num(crop.get(k)) for k in ('x', 'y', 'w', 'h'))
+    rect = _edge_trims(x, y, w, h)
+    try:
+        vx, vy, vw, vh = ed.visible_region(layout, ed.SOURCE_W, ed.SOURCE_H, crop)
+        bx, by, bw, bh = ed.visible_region(layout, ed.SOURCE_W, ed.SOURCE_H, None)
+    except ValueError:
+        return rect, 'rectangle'
+    vis, base = _edge_trims(vx, vy, vw, vh), _edge_trims(bx, by, bw, bh)
+    return {k: max(rect[k], vis[k] - max(base[k], 0.0)) for k in rect}, 'visible'
 
 
 def check_crop_trims(ep, issues):
-    """crop-trims-source (warn only): a srcCrop that trims an edge of the source frame by more than CROP_TRIM_WARN_PERCENT of that side.
-    A malformed srcCrop is the schema's business: skipped here."""
+    """crop-trims-source (ERROR, no exceptions): a srcCrop that removes more than CROP_TRIM_MAX_PERCENT of an edge of the source frame from what
+    the viewer sees (crop_visible_trims: the cover-fitted visible region, not only the crop rectangle). The default is no srcCrop (the whole
+    source frame). A malformed srcCrop is the schema's business: skipped here."""
     for idx, b in enumerate(ep['beats']):
         crop = b.get('srcCrop')
         if not isinstance(crop, dict):
@@ -588,9 +618,9 @@ def check_crop_trims(ep, issues):
         x, y, w, h = (ed.num(crop.get(k)) for k in ('x', 'y', 'w', 'h'))
         if None in (x, y, w, h) or w <= 0 or h <= 0:
             continue
-        trims = {'left': x / ed.SOURCE_W * 100.0, 'right': (ed.SOURCE_W - (x + w)) / ed.SOURCE_W * 100.0,
-                 'top': y / ed.SOURCE_H * 100.0, 'bottom': (ed.SOURCE_H - (y + h)) / ed.SOURCE_H * 100.0}
-        if not any(v > CROP_TRIM_WARN_PERCENT for v in trims.values()):
+        trims, how = crop_visible_trims(b.get('layout'), crop)
+        rect = _edge_trims(x, y, w, h)
+        if not any(v > CROP_TRIM_MAX_PERCENT for v in trims.values()):
             continue
         t = b['t']
         at = (ed.num(b.get('from')) or 0.0) + (b['end'] - t) / 2.0        # middle of the shown range, in the source file
@@ -600,10 +630,15 @@ def check_crop_trims(ep, issues):
         pct = ' '.join('%s %.1f%%' % (k, trims[k]) for k in ('left', 'right', 'top', 'bottom'))
         cmd = 'ffmpeg -ss %.1f -i %s -frames:v 1 -vf "drawbox=x=%s:y=%s:w=%s:h=%s:color=red:t=4" crop_check.jpg' % (
             at, media, _fmt_num(x), _fmt_num(y), _fmt_num(w), _fmt_num(h))
-        issues.append(_issue('crop-trims-source', 'warn', t, 'srcCrop', src,
-                             'beat %d (t=%.2f) srcCrop trims the source frame of %s: %s (limit %.1f%% per edge); no gate can tell whether the crop cuts content, '
-                             'look at the frame with: %s' % (idx, t, src, pct, CROP_TRIM_WARN_PERCENT, cmd),
-                             trimPercent={k: round(v, 2) for k, v in trims.items()}))
+        issues.append(_issue('crop-trims-source', 'error', t, 'srcCrop', src,
+                             'beat %d (t=%.2f) srcCrop trims the source frame of %s: %s (limit %.1f%% per edge); to see what it cuts: %s; '
+                             'remove srcCrop (default: show the whole source frame)' % (idx, t, src, pct, CROP_TRIM_MAX_PERCENT, cmd),
+                             trimPercent={k: round(v, 2) for k, v in trims.items()}, measuredOn=how,
+                             rectTrimPercent={k: round(v, 2) for k, v in rect.items()}))
+
+
+def _fmt_t(t):
+    return 'None' if t is None else '%g' % t
 
 
 def _fmt_num(v):
@@ -705,7 +740,25 @@ def check_evidence(ep, inp, th, issues, metrics):
     pad = th['evidenceWindowPadSeconds']
     allow = {w.lower() for w in th['latinAllowlist']}
     title_words = {w.lower() for w in LATIN.findall(inp.source.get('title', ''))}
-    m = {'sourceBeats': 0, 'withEvidence': 0, 'derivedFromSlug': 0, 'windowUnavailable': 0, 'weak': 0, 'matches': []}
+    m = {'sourceBeats': 0, 'withEvidence': 0, 'derivedFromSlug': 0, 'windowUnavailable': 0, 'weak': 0, 'duplicateSeen': 0, 'matches': []}
+    # evidence-seen-duplicate: one entry = one frame of one beat, so no two entries may carry the same `seen` text (whitespace collapsed and
+    # trimmed, case-sensitive). The proof run wrote 28 distinct texts for 44 entries.
+    first_seen = {}
+    for e in inp.evidence:
+        txt = e.get('seen')
+        key = norm_text(txt) if isinstance(txt, str) else ''
+        if not key:
+            continue                                    # missing / empty `seen` is evidence-weak's business
+        et = ed.num(e.get('t'))
+        if key not in first_seen:
+            first_seen[key] = (et, e.get('src'))
+            continue
+        m['duplicateSeen'] += 1
+        ft, fsrc = first_seen[key]
+        issues.append(_issue('evidence-seen-duplicate', 'error', et, 'seen', txt,
+                             'evidence entry t=%s src=%s has the same `seen` text as the entry t=%s src=%s: each entry must describe what ITS OWN frames show '
+                             '(look at the frames of this beat and write a new description)' % (_fmt_t(et), e.get('src'), _fmt_t(ft), fsrc),
+                             other_t=ft, other_src=fsrc))
     for b in ep['beats']:
         if b.get('origin') != 'source' or b.get('media') not in ('clip', 'broll'):
             continue
@@ -796,6 +849,424 @@ def _frames_key(counts, t, src):
     return None
 
 
+# ------------------------------ episode-copied ----------------------------------
+#
+# Contract (CF-A67 W2 / W2b): the episode fails when it shares too many beats with ONE other episode-format JSON file found under the skill
+# directory or under another project of the repo. "The same beat" = same media AND same headline AND same footage, compared after
+# normalisation (see norm_copy_text / footage identity below) so that renaming a clip, a zero-width character, a Unicode look-alike, a
+# trailing full stop or a changed case does not hide a copy. Beat times, kicker, sub, cards are not part of it.
+
+EPISODE_SCHEMA_PREFIX = 'yt-news-v4-episode'
+COPY_SKIP_DIRS = {'node_modules', '.git', '__pycache__'}
+COPY_CUTS_NAMES = ('_cuts.json', 'cuts.json')       # the clip table that sits next to an episode file (project artifacts/ or a fixture folder)
+COPY_FOOTAGE_OVERLAP = 0.5                          # two clips of the same source video count as the same footage when they overlap by this
+                                                    # share of the shorter one (an agent that re-cuts a copied clip by a second keeps the footage)
+# Characters that render as nothing but are not Unicode category Cf: combining grapheme joiner, variation selectors, Mongolian free variation
+# selectors, Hangul fillers. (Thai vowels / tone marks are category Mn and are NOT removed: they are letters of the text.)
+_INVISIBLE = {0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0} | set(range(0xFE00, 0xFE10)) | set(range(0x180B, 0x180F)) | set(range(0xE0100, 0xE01F0))
+
+
+def _strip_invisible(s):
+    return ''.join(c for c in s if unicodedata.category(c) != 'Cf' and ord(c) not in _INVISIBLE)
+
+
+def norm_text(text):
+    """One normalisation for every text comparison of this file: Unicode NFKC, every format character (category Cf: zero-width space /
+    joiner / non-joiner, word joiner, BOM, soft hyphen, bidi marks ...) and the few invisible non-Cf marks removed, all whitespace collapsed to
+    one space, trimmed. Case and punctuation are kept (evidence-seen-duplicate is case-sensitive by the lead's decision)."""
+    s = unicodedata.normalize('NFKC', _strip_invisible(text))
+    return re.sub(r'\s+', ' ', _strip_invisible(s)).strip()
+
+
+def norm_copy_text(text):
+    """norm_text, then Thai digits -> Arabic, case-folded, every punctuation character (category P*) and then ALL whitespace removed: the
+    copy comparison must not be sidestepped by a full stop, a case change, a hyphen instead of a space, or an extra space."""
+    s = ed.norm_digits(norm_text(text)).casefold()
+    return ''.join(c for c in s if not c.isspace() and not unicodedata.category(c).startswith('P'))
+
+
+def _footage_of(clip):
+    """Identity of the FOOTAGE behind a clip table entry: (sha256 of the source video, source_in, source_out), or None when the entry does not
+    carry all three. The name of a clip (`src`) is chosen by whoever cut it; the source video's hash and the span cut from it are not."""
+    if not isinstance(clip, dict):
+        return None
+    sha, s_in, s_out = clip.get('source_sha256'), ed.num(clip.get('source_in')), ed.num(clip.get('source_out'))
+    if not isinstance(sha, str) or not sha or s_in is None or s_out is None or s_out <= s_in:
+        return None
+    return (sha.lower(), s_in, s_out)
+
+
+def _same_footage(a, b):
+    if a is None or b is None or a[0] != b[0]:
+        return False
+    overlap = min(a[2], b[2]) - max(a[1], b[1])
+    return overlap > 0 and overlap >= COPY_FOOTAGE_OVERLAP * min(a[2] - a[1], b[2] - b[1])
+
+
+def beat_triples(beats, cuts=None):
+    """-> [(media, src, headline, footage)] of every beat that has a src or a headline. media / src / headline are norm_copy_text-normalised;
+    `footage` is the identity of the clip from `cuts` (a {slug: clip} table) or None. Beat times are NOT part of it: a legitimate re-edit of
+    the same audio shares them."""
+    out = []
+    for b in beats:
+        if not isinstance(b, dict):
+            continue
+        src = b.get('src')
+        head = b.get('headline')
+        src_raw = src if isinstance(src, str) else ''
+        src = norm_copy_text(src_raw)
+        head = norm_copy_text(head) if isinstance(head, str) else ''
+        if not src and not head:
+            continue
+        media = b.get('media')
+        footage = _footage_of(cuts.get(src_raw.strip())) if cuts and src_raw.strip() else None
+        out.append((norm_copy_text(media) if isinstance(media, str) else '', src, head, footage))
+    return out
+
+
+def _sibling_cuts(path):
+    """The clip table next to an episode file (_cuts.json / cuts.json in the same folder), {} when there is none or it is unusable."""
+    for name in COPY_CUTS_NAMES:
+        p = Path(path).parent / name
+        try:
+            st = os.lstat(str(p))
+            if not stat.S_ISREG(st.st_mode) or st.st_size > COPY_MAX_FILE_BYTES:
+                continue
+            data = json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError, MemoryError):
+            continue
+        clips = data.get('clips', data) if isinstance(data, dict) else None
+        if isinstance(clips, dict):
+            return clips
+    return {}
+
+
+def _beats_of(data):
+    """The beats list of a parsed episode-format JSON, None when it is some other JSON."""
+    if not isinstance(data, dict):
+        return None
+    beats, schema = data.get('beats'), data.get('schema')
+    is_episode = (isinstance(schema, str) and schema.startswith(EPISODE_SCHEMA_PREFIX)) or isinstance(beats, list)
+    if not is_episode or not isinstance(beats, list) or not all(isinstance(b, dict) for b in beats):
+        return None
+    return beats
+
+
+def _read_regular(path):
+    """Bytes of a REGULAR file of at most COPY_MAX_FILE_BYTES, never following a symlink and never blocking on a FIFO / device: opened
+    O_NONBLOCK | O_NOFOLLOW and fstat-ed before the first read (a path swapped after the directory walk's lstat is caught here).
+    Raises OSError (not a regular file / symlink) or ValueError (too large)."""
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError('not a regular file')
+        if st.st_size > COPY_MAX_FILE_BYTES:
+            raise ValueError('file too large')
+        data = b''
+        while len(data) <= COPY_MAX_FILE_BYTES:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > COPY_MAX_FILE_BYTES:
+            raise ValueError('file too large')
+        return data
+    finally:
+        os.close(fd)
+
+
+def _episode_beats(path, stats=None):
+    """-> (beats, cuts) when `path` is an episode-format JSON, None when it is some other JSON.
+    Pre-filter: the file is read whole (<= COPY_MAX_FILE_BYTES = 5 MB, a bigger .json is not an episode) and parsed only when its bytes contain
+    the key `"beats"` (stats.parsed counts the files that were parsed): the main checkout's projects/ holds thousands of JSON files (transcripts, word timings, reports), and parsing them is
+    the expensive part, reading them is not. Raises OSError / ValueError when the file cannot be read or parsed."""
+    raw = _read_regular(path)
+    if b'"beats"' not in raw:
+        return None
+    if stats is not None:
+        stats['parsed'] += 1
+    beats = _beats_of(json.loads(raw.decode('utf-8')))
+    if beats is None:
+        return None
+    return beats, _sibling_cuts(path)
+
+
+def _json_files(root, stats, deadline=None):
+    """Every `*.json` regular file under `root`, symlinks never followed (neither directories nor files), FIFOs / devices / sockets never
+    opened. Counted into `stats`: skipped_nonregular (symlink, FIFO, ...), unreadable_dirs (os.walk could not list them). Stops (stats.complete
+    = False) when time.monotonic() passes `deadline`."""
+    def onerror(_e):
+        stats['unreadable_dirs'] += 1
+    for dirpath, dirnames, filenames in os.walk(str(root), onerror=onerror, followlinks=False):
+        if deadline is not None and time.monotonic() > deadline:
+            stats['complete'] = False
+            return
+        dirnames[:] = sorted(d for d in dirnames if d not in COPY_SKIP_DIRS)
+        for name in sorted(filenames):
+            if not name.lower().endswith('.json'):
+                continue
+            p = os.path.join(dirpath, name)
+            try:
+                mode = os.lstat(p).st_mode
+            except OSError:
+                stats['unreadable_files'] += 1
+                continue
+            if not stat.S_ISREG(mode):
+                stats['skipped_nonregular'] += 1
+                continue
+            yield p
+
+
+def _lexical_project(beats_path, projects_dir):
+    """-> (own_project, own_file, problem) from the episode path AS GIVEN (os.path.abspath, symlinks not resolved).
+    Walks the lexical ancestors of the path looking for the projects dir (os.path.samefile, so a symlinked /tmp or a differently spelled
+    mount does not matter). Below it, no component may be a symlink and the episode must be a regular file: otherwise `problem` says why.
+    Outside the projects dir (or without one) only the file itself is checked."""
+    lex = os.path.abspath(str(beats_path))
+    own_project, rel_parts, anchor = None, None, None
+    if projects_dir is not None:
+        parts = Path(lex).parts
+        for i in range(len(parts) - 1, 0, -1):
+            cand = os.path.join(*parts[:i])
+            try:
+                if os.path.samefile(cand, str(projects_dir)):
+                    anchor, rel_parts = cand, parts[i:]
+                    break
+            except OSError:
+                continue
+        if anchor is not None and len(rel_parts) >= 2:
+            own_project = rel_parts[0]
+    problem = None
+    chain = []
+    if anchor is not None and rel_parts:
+        cur = anchor
+        for part in rel_parts:
+            cur = os.path.join(cur, part)
+            chain.append(cur)
+    else:
+        chain = [lex]
+    for p in chain:
+        try:
+            mode = os.lstat(p).st_mode
+        except OSError:
+            continue                                    # a missing file is the loader's problem (exit 2), not this check's
+        if stat.S_ISLNK(mode):
+            problem = '%s is a symbolic link' % p
+            break
+        if p == chain[-1] and not stat.S_ISREG(mode):
+            problem = '%s is not a regular file' % p
+    if anchor is not None and rel_parts:
+        own_file = Path(os.path.realpath(str(projects_dir))) / Path(*rel_parts)
+    else:
+        own_file = Path(os.path.realpath(os.path.dirname(lex))) / os.path.basename(lex)
+    return own_project, own_file, problem
+
+
+def copy_search_for(beats_path, script_file=None):
+    """The roots the episode-copied check searches for the episode at `beats_path`: this skill's directory (the script's own, found from
+    __file__), and <repo>/projects when the skill sits in <repo>/.claude|.agents/skills/<skill>/scripts. `own_project` is the project folder
+    the episode itself lives in (never compared against), `own_file` the episode file, `own_problem` a reason why the episode is not a regular
+    file inside its own project (a symlink somewhere below projects/, or not a regular file) or None. The project is taken from the path as
+    given, NOT from where a symlink points: a symlinked episode must not make the project it points into "its own"."""
+    here = Path(script_file or __file__).resolve()
+    parents = here.parents
+    skill_dir = parents[1]
+    projects_dir = None
+    if len(parents) > 4 and parents[2].name == 'skills' and parents[3].name in ('.claude', '.agents'):
+        cand = parents[4] / 'projects'
+        projects_dir = cand if cand.is_dir() else None
+    composer_src = None
+    if len(parents) > 4 and parents[2].name == 'skills' and parents[3].name in ('.claude', '.agents'):
+        cand = parents[4] / 'remotion-composer' / 'src'
+        composer_src = cand if cand.is_dir() else None
+    own_project, own_file, problem = _lexical_project(beats_path, projects_dir)
+    return {'skill_dir': skill_dir, 'projects_dir': projects_dir, 'own_file': own_file, 'own_project': own_project, 'own_problem': problem,
+            'composer_src': composer_src}
+
+
+def copy_candidates(search, stats, deadline=None):
+    """Every .json (regular files only) under the skill dir and under projects/<name>/ for every project but the episode's own, minus the
+    episode file itself. A project folder that is a symlink is not entered (counted in stats.skipped_nonregular)."""
+    roots = []
+    if search.get('skill_dir'):
+        roots.append(Path(search['skill_dir']))
+    pdir = search.get('projects_dir')
+    if pdir and Path(pdir).is_dir():
+        try:
+            children = sorted(Path(pdir).iterdir())
+        except OSError:
+            stats['unreadable_dirs'] += 1
+            children = []
+        for child in children:
+            if child.name == search.get('own_project'):
+                continue
+            try:
+                mode = os.lstat(str(child)).st_mode
+            except OSError:
+                stats['unreadable_dirs'] += 1
+                continue
+            if stat.S_ISLNK(mode):
+                stats['skipped_nonregular'] += 1
+            elif stat.S_ISDIR(mode):
+                roots.append(child)
+    own = search.get('own_file')
+    own_abs = os.path.abspath(str(own)) if own else None
+    own_real = os.path.realpath(str(own)) if own and not search.get('own_problem') else None
+
+    def is_own(p):
+        return own_abs is not None and (os.path.abspath(p) == own_abs or (own_real is not None and os.path.realpath(p) == own_real))
+    cdir = search.get('composer_src')
+    if cdir:                                    # <repo>/remotion-composer/src/*.json, NOT recursive; problems here are never counted
+        try:
+            names = sorted(os.listdir(str(cdir)))
+        except OSError:
+            names = []
+        for name in names:
+            p = os.path.join(str(cdir), name)
+            if not name.lower().endswith('.json'):
+                continue
+            try:
+                if not stat.S_ISREG(os.lstat(p).st_mode):
+                    continue
+            except OSError:
+                continue
+            if not is_own(p):
+                yield p
+    for root in roots:
+        for p in _json_files(root, stats, deadline):
+            if not is_own(p):
+                yield p
+
+
+def _matches(mine, theirs):
+    """(same_mine, same_theirs): how many of my beats have a counterpart among theirs, and how many of theirs have one among mine.
+    Counterpart = same media AND same headline AND (same normalised src OR same footage, see _same_footage)."""
+    index = {}
+    for tr in theirs:
+        index.setdefault((tr[0], tr[2]), []).append(tr)
+
+    def hit(a, b):
+        return a[1] == b[1] or _same_footage(a[3], b[3])
+    mine_idx = {}
+    for tr in mine:
+        mine_idx.setdefault((tr[0], tr[2]), []).append(tr)
+    same_mine = sum(1 for tr in mine if any(hit(tr, o) for o in index.get((tr[0], tr[2]), ())))
+    same_theirs = sum(1 for tr in theirs if any(hit(tr, o) for o in mine_idx.get((tr[0], tr[2]), ())))
+    return same_mine, same_theirs
+
+
+def _headline_matches(mine, theirs):
+    """Second signal, (head_same_mine, head_n_mine, head_same_theirs, head_n_theirs): beats whose normalised headline (norm_copy_text) equals a
+    headline of the other file, whatever the media and the clip name / footage are. Only beats that HAVE a headline count (also in the
+    denominator). It catches a copy whose clips were renamed and re-cut: the words on screen are what a viewer sees."""
+    hm = [tr[2] for tr in mine if tr[2]]
+    ht = [tr[2] for tr in theirs if tr[2]]
+    sm, st = set(hm), set(ht)
+    return sum(1 for h in hm if h in st), len(hm), sum(1 for h in ht if h in sm), len(ht)
+
+
+def _signal(same_mine, n_mine, same_theirs, n_theirs, max_share, min_same):
+    share_mine = same_mine / n_mine if n_mine else 0.0
+    share_theirs = same_theirs / n_theirs if n_theirs else 0.0
+    flagged = bool(n_mine and share_mine >= max_share and same_mine >= min_same) or bool(n_theirs and share_theirs >= max_share and same_theirs >= min_same)
+    return {'flagged': flagged, 'share_mine': share_mine, 'same_mine': same_mine, 'eligible_mine': n_mine,
+            'share_theirs': share_theirs, 'same_theirs': same_theirs, 'eligible_theirs': n_theirs}
+
+
+def check_copy(ep, search, issues, metrics, max_share=COPY_MAX_SHARE, cuts=None, min_same=COPY_MIN_SAME, budget=COPY_WALK_BUDGET_SECONDS):
+    """episode-copied (error): at least `max_share` of this episode's beats (with a src or a headline) have a counterpart in ONE other
+    episode-format file under the search roots (see copy_search_for / copy_candidates), OR at least `max_share` of THAT file's beats have one
+    here (padding this episode with new beats does not dilute the copy), and at least `min_same` beats are the same. `cuts` = this episode's
+    clip table ({slug: {source_sha256, source_in, source_out}}), used to compare the footage instead of the clip's name. `search` None = not run.
+    Two signals, either one fires the same issue (`signals` lists which): the beat signal above, and the headline signal (_headline_matches:
+    same normalised headline, whatever the media / clip / footage; same share and minimum). Search roots: the skill dir, every other
+    projects/<name>/, and <repo>/remotion-composer/src/*.json (non-recursive; other JSON there is skipped silently).
+    episode-not-regular-file (error): the episode is a symlink / not a regular file / below a symlink inside projects/ (search['own_problem']).
+    copy-search-incomplete (error): the walk ran out of `budget` seconds (a search that did not finish proves nothing)."""
+    mine = beat_triples(ep['beats'], cuts)
+    m = {'searched': search is not None, 'compared_files': 0, 'unreadable_files': 0, 'unreadable_dirs': 0, 'skipped_nonregular': 0,
+         'skipped_large': 0, 'files_seen': 0, 'parsed': 0, 'complete': True, 'seconds': 0.0,
+         'max_share': max_share, 'min_same': min_same, 'best_match': None}
+    metrics['copy'] = m
+    if search is None:
+        return
+    problem = search.get('own_problem')
+    if problem:
+        issues.append(_issue('episode-not-regular-file', 'error', None, None, str(search.get('own_file')),
+                             'the episode must be a regular file inside its own project folder, not a link to another file (%s); '
+                             'write the episode itself into <project>/artifacts/episode.json' % problem))
+    if not mine:
+        return
+    started = time.monotonic()
+    results = []
+    for f in copy_candidates(search, m, started + budget):
+        if time.monotonic() - started > budget:
+            m['complete'] = False
+            break
+        silent = bool(search.get('composer_src')) and os.path.dirname(f) == str(search['composer_src'])     # composer src: only episodes take part
+        if not silent:
+            m['files_seen'] += 1
+        try:
+            got = _episode_beats(f, m)
+        except ValueError as e:
+            if silent:
+                continue
+            if 'too large' in str(e):
+                m['skipped_large'] += 1
+            else:
+                m['unreadable_files'] += 1
+            continue
+        except (OSError, UnicodeDecodeError, RecursionError, MemoryError):
+            if not silent:
+                m['unreadable_files'] += 1
+            continue
+        if got is None:
+            continue
+        other_beats, other_cuts = got
+        theirs = beat_triples(other_beats, other_cuts)
+        if not theirs:
+            continue
+        m['compared_files'] += 1
+        sm, st = _matches(mine, theirs)
+        hsm, hnm, hst, hnt = _headline_matches(mine, theirs)
+        sigs = {'beat': _signal(sm, len(mine), st, len(theirs), max_share, min_same),
+                'headline': _signal(hsm, hnm, hst, hnt, max_share, min_same)}
+        fired = [k for k, v in sigs.items() if v['flagged']]
+        # the signal that decides (and is named in the message): the strongest one that fired, else the beat signal
+        main = max(fired or ['beat'], key=lambda k: (max(sigs[k]['share_mine'], sigs[k]['share_theirs']), k == 'beat'))
+        mm = sigs[main]
+        if mm['share_theirs'] > mm['share_mine']:
+            side = (mm['share_theirs'], mm['same_theirs'], mm['eligible_theirs'])
+        else:
+            side = (mm['share_mine'], mm['same_mine'], mm['eligible_mine'])
+        results.append({'flag': bool(fired), 'file': str(f), 'share': side[0], 'same': side[1], 'eligible': side[2],
+                        'share_mine': mm['share_mine'], 'same_mine': mm['same_mine'], 'eligible_mine': mm['eligible_mine'],
+                        'share_theirs': mm['share_theirs'], 'same_theirs': mm['same_theirs'], 'eligible_theirs': mm['eligible_theirs'],
+                        'signals': fired, 'by_signal': {k: {kk: (round(vv, 4) if isinstance(vv, float) else vv) for kk, vv in v.items()} for k, v in sigs.items()}})
+    m['seconds'] = round(time.monotonic() - started, 3)
+    if not m['complete']:
+        issues.append(_issue('copy-search-incomplete', 'error', None, None, None,
+                             'the search for a copied episode did not finish within %.0f s (%d files looked at): remove the files that are not needed '
+                             'from the skill directory and from the other project folders, then run the check again' % (budget, m['files_seen'])))
+    if not results:
+        return
+    results.sort(key=lambda r: (not r['flag'], -r['share'], r['file']))
+    best = results[0]
+    m['best_match'] = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in best.items() if k != 'flag'}
+    over = [r for r in results if r['flag']]
+    if over:
+        issues.append(_issue('episode-copied', 'error', None, None, best['file'],
+                             'this episode is a copy of %s: %d of its %d beats are also in that file (%.0f %%), and %d of that '
+                             'file\'s %d beats are also here (%.0f %%) (limit %.0f %%, at least %d beats): an episode must be written from THIS '
+                             'video\'s script and source, not copied from another episode; delete the copy and build the beats from the script' % (
+                                 best['file'], best['same_mine'], best['eligible_mine'], best['share_mine'] * 100, best['same_theirs'],
+                                 best['eligible_theirs'], best['share_theirs'] * 100, max_share * 100, min_same),
+                             share=round(best['share'], 4), same=best['same'], eligible=best['eligible'],
+                             share_mine=round(best['share_mine'], 4), share_theirs=round(best['share_theirs'], 4), signals=best['signals'],
+                             others=[{'file': r['file'], 'share': round(r['share'], 4)} for r in over[1:6]]))
+
+
 def run_schema(episode_path, captions_path, validator, timeout=60):
     """Run episode_schema.mjs validate -> (issues, summary). Raises EpisodeFormatError on exit 2 / unusable output."""
     cmd = ['node', str(validator), 'validate', str(episode_path)]
@@ -833,10 +1304,11 @@ def lint_content(ep, inp, thresholds=None):
     check_presenter(ep, th, issues, metrics)
     check_cta(ep, th, issues, metrics)
     check_punch(ep, issues, schema_owns=(ep['format'] == 'json-object' and not inp.legacy))
-    check_stock(ep, inp, issues)
+    check_stock(ep, inp, issues, metrics)
     check_source_reuse(ep, inp, th, issues)
     check_crop_trims(ep, issues)
     check_evidence(ep, inp, th, issues, metrics)
+    check_copy(ep, inp.copy_search, issues, metrics, cuts=inp.cuts)
     metrics['beats'] = len(ep['beats'])
     metrics['voEnd'] = ep['vo_end']
     metrics['episodeFormat'] = ep['format']
@@ -866,7 +1338,7 @@ def main(argv=None):
     ap.add_argument('--source-transcript')
     ap.add_argument('--source-meta')
     ap.add_argument('--chapters')
-    ap.add_argument('--relevance')
+    ap.add_argument('--relevance', help='relevance report; only reported in metrics.relevance, never evidence (stock / ai footage is always an error)')
     ap.add_argument('--evidence', help='visual_evidence.json: [{t, src, cue_line, subject_terms[], seen}]')
     ap.add_argument('--frames-report', help='frame_checks.py cutaways report (OCR text per beat)')
     ap.add_argument('--source-timed', help='timed transcript of the ORIGINAL video: [{start,end,text}]')
@@ -923,7 +1395,7 @@ def main(argv=None):
         return 2
     inp = Inputs(script_lines, tokens, line_starts, cuts, source, relevance, relevance_given=bool(a.relevance),
                  evidence=evidence, frames=frames, timed=timed, chapters=chapters, legacy=a.legacy,
-                 frames_given=bool(a.frames_report), frame_counts=frame_counts)
+                 frames_given=bool(a.frames_report), frame_counts=frame_counts, copy_search=copy_search_for(a.beats))
     issues, metrics = lint_content(ep, inp, thresholds)
     issues = schema_issues + issues
     metrics['schema'] = schema_summary

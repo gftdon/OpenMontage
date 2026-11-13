@@ -644,30 +644,39 @@ class SimpleCheckTests(unittest.TestCase):
     def stock(self, origin='stock', src='desk', t=10):
         return [dict(t=0, mode='full'), dict(t=t, mode='pip', media='broll', src=src, origin=origin, layout='stage', chrome=False), dict(t=50, mode='full')]
 
-    def test_stock_without_relevance_fails_closed(self):
-        self.assertIn('stock-unverified', codes(self.lint(self.stock())))
-        self.assertIn('stock-unverified', codes(self.lint(self.stock('ai', 'ai_x'))))
-        inp = make_inputs([at_time(0, ['x'])], relevance=[], relevance_given=True)
-        self.assertIn('stock-unverified', codes(self.lint(self.stock(), inp=inp)))
+    def test_stock_and_ai_footage_is_always_an_error(self):
+        """stock-not-allowed: no relevance file, an empty one, or a passing verdict by src or by time: every case fails (CF-A67)."""
+        for origin, src in (('stock', 'desk'), ('ai', 'ai_x')):
+            with self.subTest(origin=origin, relevance='none'):
+                got = [i for i in self.lint(self.stock(origin, src)) if i['code'] == 'stock-not-allowed']
+                self.assertEqual(1, len(got))
+                self.assertEqual('error', got[0]['severity'])
+                self.assertEqual(10, got[0]['t'])
+                self.assertIn('use source footage or a `typo` text card built from the script', got[0]['detail'])
+            for relevance in ([], [{'src': src, 'score': 2}], [{'src': src, 'score': 2, 'readable_text': False, 'verification_status': 'verified'}],
+                              [{'beat': 'b2', 't': 10.0, 'end': 50.0, 'score': 2, 'reason': 'ok'}]):
+                with self.subTest(origin=origin, relevance=relevance):
+                    inp = make_inputs([at_time(0, ['x'])], relevance=relevance, relevance_given=True)
+                    self.assertIn('stock-not-allowed', codes(self.lint(self.stock(origin, src), inp=inp), 'error'))
 
-    def test_stock_with_passing_verdict_by_src_or_time(self):
-        by_src = make_inputs([at_time(0, ['x'])], relevance=[{'src': 'desk', 'score': 2}])
-        self.assertNotIn('stock-unverified', codes(self.lint(self.stock(), inp=by_src)))
-        by_t = make_inputs([at_time(0, ['x'])], relevance=[{'beat': 'b2', 't': 10.0, 'end': 50.0, 'score': 1, 'reason': 'ok'}])
-        self.assertNotIn('stock-unverified', codes(self.lint(self.stock(), inp=by_t)))
+    def test_stock_unverified_is_gone_and_a_passing_verdict_no_longer_matters(self):
+        inp = make_inputs([at_time(0, ['x'])], relevance=[{'src': 'desk', 'score': 2}])
+        got = codes(self.lint(self.stock(), inp=inp))
+        self.assertNotIn('stock-unverified', got)
+        self.assertIn('stock-not-allowed', got)
 
-    def test_stock_failing_or_stale_label_verdicts_fail(self):
-        for row in ({'src': 'desk', 'score': 0}, {'src': 'desk', 'score': None}, {'src': 'desk', 'score': 2, 'pending_zero': True},
-                    {'src': 'desk', 'score': 0, 'verification_status': 'verified'}):
-            with self.subTest(row=row):
-                inp = make_inputs([at_time(0, ['x'])], relevance=[row])
-                self.assertIn('stock-unverified', codes(self.lint(self.stock(), inp=inp)))
+    def test_footage_without_a_source_origin_is_not_allowed_but_source_and_presenter_and_typo_are(self):
+        self.assertIn('stock-not-allowed', codes(self.lint([dict(t=0, mode='full'), pip(10, origin=None), dict(t=50, mode='full')])))
+        self.assertIn('stock-not-allowed', codes(self.lint([dict(t=0, mode='full'), pip(10, origin='source', media='broll', **{'src': 'x'}) | {'origin': 'pixabay'}, dict(t=50, mode='full')])))
+        ok = [dict(t=0, mode='full'), pip(10), dict(t=20, mode='pip', media='typo', layout='stage', headline='x'), dict(t=50, mode='full')]
+        self.assertNotIn('stock-not-allowed', codes(self.lint(ok)))
 
-    def test_ai_needs_readable_text_false(self):
-        ai = make_inputs([at_time(0, ['x'])], relevance=[{'src': 'ai_x', 'score': 2}])
-        self.assertIn('stock-unverified', codes(self.lint(self.stock('ai', 'ai_x'), inp=ai)))
-        ok = make_inputs([at_time(0, ['x'])], relevance=[{'src': 'ai_x', 'score': 2, 'readable_text': False}])
-        self.assertNotIn('stock-unverified', codes(self.lint(self.stock('ai', 'ai_x'), inp=ok)))
+    def test_relevance_is_reported_as_not_used_as_evidence(self):
+        inp = make_inputs([at_time(0, ['x'])], relevance=[{'src': 'desk', 'score': 2}, {'src': 'a', 'score': 1}])
+        issues, metrics = lc.lint_content(episode(self.stock(), 100.0), inp, {})
+        self.assertEqual({'given': True, 'rows': 2, 'usedAsEvidence': False}, {k: metrics['relevance'][k] for k in ('given', 'rows', 'usedAsEvidence')})
+        none = lc.lint_content(episode(self.stock(), 100.0), make_inputs([at_time(0, ['x'])]), {})[1]['relevance']
+        self.assertEqual((False, 0, False), (none['given'], none['rows'], none['usedAsEvidence']))
 
     def test_relevance_report_format_from_batch_relevance(self):
         report = {'schema': 'a44-native-batch-1', 'results': [{'beat': 'x', 't': 10.0, 'end': 50.0, 'score': 2, 'verification_status': 'verified'}]}
@@ -679,13 +688,6 @@ class SimpleCheckTests(unittest.TestCase):
             rows_map = lc.load_relevance(p)
         self.assertEqual(1, len(rows))
         self.assertEqual('desk', rows_map[0]['src'])
-
-    def test_agrees_with_score_relevance_verification_status(self):
-        import score_relevance as sr
-        for row, origin in (({'score': 1}, 'stock'), ({'score': 0}, 'stock'), ({'score': 2, 'readable_text': True}, 'ai'), ({'score': 2, 'readable_text': False}, 'ai')):
-            inp = make_inputs([at_time(0, ['x'])], relevance=[{**row, 'src': 'desk'}])
-            failed = 'stock-unverified' in codes(self.lint(self.stock(origin), inp=inp))
-            self.assertEqual(sr.verification_status(row, origin) != 'verified', failed)
 
     def source_beats(self, gap, from2=0, src2='yt_b'):
         return [dict(t=0, mode='full'), pip(10, src='yt_a'), pip(10 + gap, src=src2, **{'from': from2}), dict(t=10 + gap + 8, mode='full')]
@@ -716,7 +718,7 @@ class SimpleCheckTests(unittest.TestCase):
 
 
 class CropTrimsSourceTests(unittest.TestCase):
-    """crop-trims-source: warning-only, a srcCrop that trims an edge by more than 2 % of that side of the 1920x1080 frame."""
+    """crop-trims-source: ERROR on every clip, a srcCrop that trims an edge by more than 2 % of that side of the 1920x1080 frame."""
 
     def lint(self, crop, asset_dir='demo', **kw):
         beat = pip(5.0, **kw)
@@ -740,35 +742,79 @@ class CropTrimsSourceTests(unittest.TestCase):
                 self.assertIn('-i yt_a.mp4 ', msg)
                 self.assertNotIn('remotion-composer', msg)
 
-    def test_trimmed_crop_warns_with_percentages_and_command(self):
+    def test_trimmed_crop_is_an_error_with_percentages_command_and_remedy(self):
         crop = {'x': 60, 'y': 120, 'w': 1440, 'h': 810}
         got = self.hits(crop)
         self.assertEqual(1, len(got), got)
-        self.assertEqual('warn', got[0]['severity'])
+        self.assertEqual('error', got[0]['severity'])
         self.assertEqual(5.0, got[0]['t'])
         msg = got[0]['detail']
-        for part in ('left 3.1%', 'right 21.9%', 'top 11.1%', 'bottom 13.9%', 'yt_a', 'drawbox=x=60:y=120:w=1440:h=810', 'beat 1', 't=5.00', 'no gate can tell'):
+        for part in ('left 3.1%', 'right 21.9%', 'top 11.1%', 'bottom 13.9%', 'yt_a', 'drawbox=x=60:y=120:w=1440:h=810', 'beat 1', 't=5.00'):
             self.assertIn(part, msg)
         self.assertIn('ffmpeg -ss 5.0 -i remotion-composer/public/demo/broll/yt_a.mp4 -frames:v 1', msg)
-        self.assertIn('-frames:v 1', msg)
         self.assertIn('crop_check.jpg', msg)
+        self.assertTrue(msg.endswith('remove srcCrop (default: show the whole source frame)'), msg)
         self.assertNotIn('\n', msg)
 
-    def test_warning_never_changes_errors_or_pass(self):
+    def test_crop_error_fails_the_run_and_without_crop_it_is_clean(self):
         with_crop = self.lint({'x': 60, 'y': 120, 'w': 1440, 'h': 810})
         without = self.lint(None)
+        self.assertIn('crop-trims-source', codes(with_crop, 'error'))
+        self.assertEqual([], [i for i in with_crop if i['code'] == 'crop-trims-source' and i['severity'] != 'error'])
+        self.assertNotIn('crop-trims-source', codes(without))
         errs = lambda issues: sorted(i['code'] for i in issues if i['severity'] == 'error')
-        self.assertEqual(errs(without), errs(with_crop))
-        self.assertEqual([], [i for i in with_crop if i['code'] == 'crop-trims-source' and i['severity'] != 'warn'])
+        self.assertEqual(sorted(errs(without) + ['crop-trims-source']), errs(with_crop))
 
-    def test_full_frame_crop_does_not_warn(self):
+    def test_every_edge_counts_and_no_clip_is_exempt(self):
+        for crop in ({'x': 40, 'y': 0, 'w': 1880, 'h': 1080}, {'x': 0, 'y': 0, 'w': 1880, 'h': 1080}, {'x': 0, 'y': 23, 'w': 1920, 'h': 1057},
+                     {'x': 0, 'y': 0, 'w': 1920, 'h': 1057}):
+            for kw in ({}, {'layout': 'wide'}, {'chrome': False}, {'from': 3}):
+                with self.subTest(crop=crop, kw=kw):
+                    self.assertEqual(1, len(self.hits(crop, **kw)))
+                    self.assertEqual('error', self.hits(crop, **kw)[0]['severity'])
+
+    def test_constant_is_renamed_and_not_a_command_line_threshold(self):
+        import content_thresholds as ct
+        self.assertEqual(2.0, ct.CROP_TRIM_MAX_PERCENT)
+        self.assertFalse(hasattr(ct, 'CROP_TRIM_WARN_PERCENT'))
+        self.assertNotIn('CROP_TRIM_MAX_PERCENT', ct.THRESHOLDS)
+
+    def test_full_frame_crop_is_fine(self):
         self.assertEqual([], self.hits({'x': 0, 'y': 0, 'w': 1920, 'h': 1080}))
 
     def test_threshold_is_strictly_greater_than_two_percent(self):
         self.assertEqual([], self.hits({'x': 38, 'y': 0, 'w': 1882, 'h': 1080}))        # 1.98 % left
         self.assertEqual(1, len(self.hits({'x': 39, 'y': 0, 'w': 1881, 'h': 1080})))    # 2.03 % left
 
-    def test_beat_without_src_crop_does_not_warn(self):
+    # a crop whose RECTANGLE trims every edge by less than 2 % (left 1.98, right 1.98, top 0, bottom 1.94) but whose shape (1844 x 1059) is wider
+    # than the picture box, so the renderer's cover fit also cuts the top and bottom of the crop: the viewer loses 2.96 % at the bottom
+    NON_16_9 = {'x': 38, 'y': 0, 'w': 1844, 'h': 1059}
+
+    def test_the_visible_region_is_measured_not_only_the_crop_rectangle(self):
+        for layout in ('stage', 'wide'):
+            with self.subTest(layout):
+                got = self.hits(self.NON_16_9, layout=layout)
+                self.assertEqual(1, len(got), got)
+                self.assertEqual('error', got[0]['severity'])
+                self.assertEqual('visible', got[0]['measuredOn'])
+                self.assertGreater(got[0]['trimPercent']['bottom'], 2.0)
+                self.assertLess(max(got[0]['rectTrimPercent'].values()), 2.0)           # the old rectangle measure would have passed
+                self.assertIn('bottom 3.0%', got[0]['detail'])
+                self.assertTrue(got[0]['detail'].endswith('remove srcCrop (default: show the whole source frame)'))
+
+    def test_a_crop_that_fits_the_box_shape_and_trims_little_is_clean(self):
+        for crop in ({'x': 38, 'y': 21, 'w': 1844, 'h': 1038}, {'x': 0, 'y': 0, 'w': 1920, 'h': 1080}, {'x': 19, 'y': 10, 'w': 1882, 'h': 1058}):
+            for layout in ('stage', 'wide'):
+                with self.subTest(crop=crop, layout=layout):
+                    self.assertEqual([], self.hits(crop, layout=layout))
+
+    def test_without_a_usable_layout_the_rectangle_is_measured(self):
+        self.assertEqual([], self.hits(self.NON_16_9, layout='nonsense'))                     # rectangle only: below 2 %
+        got = self.hits({'x': 60, 'y': 120, 'w': 1440, 'h': 810}, layout='nonsense')
+        self.assertEqual(1, len(got))
+        self.assertEqual('rectangle', got[0]['measuredOn'])
+
+    def test_beat_without_src_crop_is_fine(self):
         self.assertEqual([], self.hits(None))
 
     def test_malformed_src_crop_is_skipped_without_exception(self):
@@ -787,7 +833,12 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual('ติดตามช่องไว้นะ', ed.episode_cta(ep))
         self.assertEqual([0, 5, 12, 20, 28], [b['t'] for b in ep['beats']])
         self.assertEqual([5, 12, 20, 28, 30], [b['end'] for b in ep['beats']])
-        self.assertEqual({'x': 0, 'y': 0, 'w': 1280, 'h': 720}, ep['beats'][1]['srcCrop'])  # passed through
+        self.assertNotIn('srcCrop', ep['beats'][1])                 # the clean fixture has none: the default is the whole source frame
+        with tempfile.TemporaryDirectory() as d:
+            raw = json.loads((FIX / 'episode_object.json').read_text(encoding='utf-8'))
+            raw['beats'][1]['srcCrop'] = {'x': 0, 'y': 0, 'w': 1280, 'h': 720}
+            (Path(d) / 'c.json').write_text(json.dumps(raw, ensure_ascii=False), encoding='utf-8')
+            self.assertEqual({'x': 0, 'y': 0, 'w': 1280, 'h': 720}, ed.load_episode(Path(d) / 'c.json')['beats'][1]['srcCrop'])  # passed through
         self.assertEqual(4, ep['beats'][3]['from'])
         fields = {f[0]: f for f in ed.text_fields(ep['beats'][3])}
         self.assertEqual((21.0, 25.0, 'timed'), fields['stats[0].big'][2:])      # [at, at+dur), not cut at beat end
@@ -1030,6 +1081,651 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse([c for c in codes(issues) if c in ('evidence-missing', 'subject-not-in-window', 'label-latin-not-in-window')])
 
 
+class EvidenceSeenDuplicateTests(unittest.TestCase):
+    """evidence-seen-duplicate: one entry = one frame of one beat; two entries with the same `seen` text are an error."""
+    CUTS = EvidenceTests.CUTS
+    TIMED = EvidenceTests.TIMED
+    ENTRY = EvidenceTests.ENTRY
+
+    def lint(self, entries):
+        inp = make_inputs([at_time(390, ['x', 'y']), at_time(400, ['z'])], cuts=self.CUTS, legacy=False, evidence=entries, timed=self.TIMED)
+        beats = [dict(t=0, mode='full'), pip(399.0, src='yt_jet_engine', headline='สร้างภาพตัดขวางเครื่องยนต์'), dict(t=408.0, mode='full')]
+        return lc.lint_content(episode(beats, 420), inp, {})
+
+    def dups(self, entries):
+        return [i for i in self.lint(entries)[0] if i['code'] == 'evidence-seen-duplicate']
+
+    def test_same_seen_text_twice_is_an_error_listing_both_times(self):
+        other = {**self.ENTRY, 't': 411.0, 'src': 'yt_other'}
+        got = self.dups([self.ENTRY, other])
+        self.assertEqual(1, len(got))
+        self.assertEqual('error', got[0]['severity'])
+        self.assertEqual(411.0, got[0]['t'])
+        self.assertEqual(399.0, got[0]['other_t'])
+        self.assertIn('t=411', got[0]['detail'])
+        self.assertIn('t=399', got[0]['detail'])
+        self.assertEqual(1, self.lint([self.ENTRY, other])[1]['evidence']['duplicateSeen'])
+
+    def test_each_repeat_is_reported_against_the_first_entry(self):
+        entries = [self.ENTRY] + [{**self.ENTRY, 't': 411.0 + k, 'src': 'yt_o%d' % k} for k in range(3)]
+        self.assertEqual(3, len(self.dups(entries)))
+        self.assertEqual(3, self.lint(entries)[1]['evidence']['duplicateSeen'])
+
+    def test_whitespace_is_collapsed_and_trimmed_but_case_matters(self):
+        spaced = {**self.ENTRY, 't': 411.0, 'src': 'yt_o', 'seen': '  engine \n cutaway\tdrawing  '}
+        self.assertEqual(1, len(self.dups([self.ENTRY, spaced])))
+        cased = {**self.ENTRY, 't': 411.0, 'src': 'yt_o', 'seen': 'Engine cutaway drawing'}
+        self.assertEqual([], self.dups([self.ENTRY, cased]))
+
+    def test_invisible_characters_and_unicode_variants_do_not_make_a_text_distinct(self):
+        base = self.ENTRY['seen']
+        variants = {'zero width space': base.replace(' ', ' \u200b'), 'zero width joiner inside a word': base.replace('engine', 'eng\u200dine'),
+                    'word joiner / BOM': '\ufeff' + base + '\u2060', 'soft hyphen': base.replace('cutaway', 'cut\u00adaway'),
+                    'no-break and ideographic space': base.replace(' ', '\u00a0\u3000'), 'fullwidth letters (NFKC)': base.replace('engine', '\uff45ngine'),
+                    'superscript / circled forms (NFKC)': base.replace('drawing', 'dr\u24b6wing').replace('\u24b6', '\u24d0'),
+                    'variation selector': base.replace('engine', 'engine\ufe0f')}
+        for name, text in variants.items():
+            with self.subTest(name):
+                other = {**self.ENTRY, 't': 411.0, 'src': 'yt_o', 'seen': text}
+                self.assertNotEqual(base, text)
+                self.assertEqual(1, len(self.dups([self.ENTRY, other])))
+        self.assertEqual('a b', lc.norm_text('a\u200b b'))
+
+    def test_a_genuinely_different_text_with_an_invisible_character_still_passes(self):
+        other = {**self.ENTRY, 't': 411.0, 'src': 'yt_o', 'seen': 'a rotating \u200bturbine seen from the front'}
+        self.assertEqual([], self.dups([self.ENTRY, other]))
+
+    def test_distinct_texts_pass_and_missing_seen_is_not_a_duplicate(self):
+        two = {**self.ENTRY, 't': 411.0, 'src': 'yt_o', 'seen': 'a rotating turbine seen from the front'}
+        issues, metrics = self.lint([self.ENTRY, two])
+        self.assertNotIn('evidence-seen-duplicate', codes(issues))
+        self.assertEqual(0, metrics['evidence']['duplicateSeen'])
+        blank = [{**self.ENTRY, 't': 411.0 + k, 'src': 'yt_o%d' % k, 'seen': seen} for k, seen in enumerate((None, '', '   ', 5))]
+        self.assertEqual([], self.dups([self.ENTRY] + blank))
+        self.assertEqual([], self.dups([]))
+
+
+class EpisodeCopiedTests(unittest.TestCase):
+    """episode-copied: >= 20 % of the episode's beats (or of the other file's beats) shared with ONE other episode-format file under the
+    skill directory or under another projects/<name>/ folder (never the episode's own project), and at least 5 beats the same. The search roots
+    are parameters."""
+
+    @staticmethod
+    def beats(n, prefix='h'):
+        return [{'t': float(i * 5), 'mode': 'pip', 'media': 'clip', 'src': 'yt_%s%d' % (prefix, i), 'origin': 'source', 'layout': 'stage',
+                 'headline': 'หัวข้อ %s %d' % (prefix, i)} for i in range(n)]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / 'skill').mkdir()
+        (self.root / 'projects' / 'own').mkdir(parents=True)
+        (self.root / 'projects' / 'other').mkdir(parents=True)
+
+    def write(self, rel, data):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        return p
+
+    def search(self, own='projects/own/artifacts/episode.json', own_project='own'):
+        return {'skill_dir': self.root / 'skill', 'projects_dir': self.root / 'projects', 'own_file': self.root / own, 'own_project': own_project}
+
+    def check(self, beats, search=None, **kw):
+        issues, metrics = [], {}
+        lc.check_copy(episode(beats, 2000.0), search if search is not None else self.search(), issues, metrics, **kw)
+        return issues, metrics['copy']
+
+    def episode_file(self, rel, beats, schema=True):
+        return self.write(rel, {'schema': 'yt-news-v4-episode/1', 'beats': beats} if schema else {'beats': beats})
+
+    def test_triples_use_media_src_headline_only_normalised_and_skip_empty_beats(self):
+        beats = [{'t': 0, 'mode': 'full'}, {'t': 5, 'media': 'clip', 'src': ' yt_a ', 'headline': 'A   b\nc.', 'kicker': 'K', 't2': 1},
+                 {'t': 9, 'media': 'typo', 'headline': 'x'}, {'t': 12, 'media': 'clip', 'src': 'yt_z'}, {'t': 15, 'kicker': 'only'}, 'junk']
+        self.assertEqual([('clip', 'yta', 'abc', None), ('typo', '', 'x', None), ('clip', 'ytz', '', None)], lc.beat_triples(beats))
+        shifted = [{**b, 't': 99.0 + i} if isinstance(b, dict) else b for i, b in enumerate(beats)]
+        self.assertEqual(lc.beat_triples(beats), lc.beat_triples(shifted))          # times are not part of the metric
+
+    def test_a_copy_of_another_project_fails_naming_the_file_and_the_share(self):
+        base = self.beats(10)
+        other = self.episode_file('projects/other/artifacts/episode.json', base)
+        issues, m = self.check(base)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual('error', issues[0]['severity'])
+        self.assertIn(str(other), issues[0]['detail'])
+        self.assertIn('100 %', issues[0]['detail'])
+        self.assertIn('10 of its 10 beats', issues[0]['detail'])
+        for field in ('src', 'headline', 'media', 'triple', 'kicker'):                  # the message must not say WHICH fields matched
+            self.assertNotIn(field, issues[0]['detail'])
+        self.assertEqual({'file': str(other), 'share': 1.0, 'same': 10, 'eligible': 10}, {k: m['best_match'][k] for k in ('file', 'share', 'same', 'eligible')})
+        self.assertEqual((1.0, 1.0), (m['best_match']['share_mine'], m['best_match']['share_theirs']))
+        self.assertEqual(1, m['compared_files'])
+
+    def test_independent_episode_passes_with_a_measured_zero(self):
+        self.episode_file('projects/other/artifacts/episode.json', self.beats(10, 'x'))
+        self.episode_file('skill/tests/fixtures/ep.json', self.beats(10, 'y'))
+        issues, m = self.check(self.beats(10))
+        self.assertEqual([], issues)
+        self.assertEqual(2, m['compared_files'])
+        self.assertEqual(0.0, m['best_match']['share'])
+        self.assertEqual(0, m['best_match']['same'])
+
+    def test_threshold_is_twenty_percent_inclusive(self):
+        base = self.beats(25)
+        self.episode_file('projects/other/artifacts/episode.json', base[:5] + self.beats(20, 'q'))         # 5 of 25 shared = 20 %
+        issues, m = self.check(base)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual(0.2, m['best_match']['share'])
+        self.episode_file('projects/other/artifacts/episode.json', base[:4] + self.beats(21, 'q'))         # 4 of 25 = 16 %
+        issues, m = self.check(base)
+        self.assertEqual([], issues)
+        self.assertEqual(0.16, m['best_match']['share'])
+        self.assertEqual(0.2, lc.COPY_MAX_SHARE)
+        self.assertEqual(5, lc.COPY_MIN_SAME)
+
+    def test_one_other_file_is_enough_but_shares_are_not_added_across_files(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/a.json', base[:1] + self.beats(9, 'q'))      # 10 % each: no single file reaches 20 %
+        self.episode_file('projects/other/b.json', base[1:2] + self.beats(9, 'r'))
+        self.episode_file('skill/c.json', base[2:3] + self.beats(9, 's'))
+        issues, m = self.check(base)
+        self.assertEqual([], issues)
+        self.assertEqual(3, m['compared_files'])
+
+    def test_beat_times_and_kicker_do_not_matter_and_beats_without_src_or_headline_do_not_count(self):
+        base = self.beats(10)
+        shifted = [{**b, 't': b['t'] + 1000.0, 'kicker': 'different'} for b in base]
+        self.episode_file('projects/other/artifacts/episode.json', shifted)
+        self.assertEqual(['episode-copied'], codes(self.check(base)[0]))
+        # 10 presenter-only beats around 2 eligible ones: only the eligible ones are counted (2 of 2 = 100 %)
+        padded = [{'t': 500.0 + i, 'mode': 'full', 'kicker': 'k'} for i in range(10)] + base[:2]
+        _, m = self.check(padded)
+        self.assertEqual(2, m['best_match']['eligible'])
+
+    def test_the_episodes_own_project_and_own_file_are_never_compared(self):
+        base = self.beats(10)
+        self.episode_file('projects/own/artifacts/episode.json', base)
+        self.episode_file('projects/own/artifacts/episode.backup.json', base)
+        self.episode_file('skill/me.json', base)
+        issues, m = self.check(base, self.search(own='skill/me.json', own_project=None) | {'projects_dir': self.root / 'projects'})
+        # skill/me.json is the episode itself (skipped); the two files of projects/own are another project here and DO match
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual(2, m['compared_files'])
+        issues, m = self.check(base)                                    # now as the real own project: nothing else exists
+        self.assertEqual(['episode-copied'], codes(issues))             # skill/me.json is an ordinary file for projects/own/artifacts/episode.json
+        self.assertEqual(1, m['compared_files'])
+        (self.root / 'skill' / 'me.json').unlink()
+        issues, m = self.check(base)
+        self.assertEqual([], issues)
+        self.assertEqual(0, m['compared_files'])
+        self.assertIsNone(m['best_match'])
+
+    def test_unreadable_and_non_episode_json_are_skipped_but_unreadable_ones_are_counted(self):
+        base = self.beats(10)
+        self.write('projects/other/bad.json', '{"beats": not json')
+        bad_utf8 = self.root / 'projects/other/binary.json'
+        bad_utf8.write_bytes(b'\xff\xfe{"beats": []}')
+        self.write('projects/other/empty.json', '')                      # no "beats" key: not an episode, never parsed
+        self.write('projects/other/notepisode.json', {'foo': 1})
+        self.write('projects/other/list.json', [{'t': 0}])
+        self.write('projects/other/beats-not-list.json', {'schema': 'yt-news-v4-episode/1', 'beats': 'x'})
+        self.write('projects/other/notes.txt', 'not json at all')
+        self.episode_file('projects/other/ok.json', self.beats(10, 'z'))
+        issues, m = self.check(base)
+        self.assertEqual([], issues)
+        self.assertEqual(1, m['compared_files'])
+        self.assertEqual(2, m['unreadable_files'])
+        self.assertEqual(4, m['parsed'])                                 # only files whose bytes contain "beats" are parsed (the 2 bad ones included)
+
+    def test_both_episode_formats_are_recognised(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/with-schema.json', base)
+        self.assertEqual(['episode-copied'], codes(self.check(base)[0]))
+        (self.root / 'projects/other/with-schema.json').unlink()
+        self.episode_file('projects/other/only-beats.json', base, schema=False)
+        self.assertEqual(['episode-copied'], codes(self.check(base)[0]))
+
+    def test_not_searched_without_search_roots_and_metrics_say_so(self):
+        issues, metrics = [], {}
+        lc.check_copy(episode(self.beats(10), 100.0), None, issues, metrics)
+        self.assertEqual([], issues)
+        self.assertFalse(metrics['copy']['searched'])
+
+    def test_node_modules_and_git_are_not_searched(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/node_modules/x/ep.json', base)
+        self.episode_file('projects/other/.git/ep.json', base)
+        self.assertEqual([], self.check(base)[0])
+
+    # ---- W2b: the bypasses of the copy rule ----
+
+    def cuts_table(self, n, prefix='h', sha='a' * 64, shift=0.0, slug=None):
+        """{slug: clip} for beats(n, prefix): clip i is the span [i*20 + shift, i*20 + 15 + shift] of ONE source video."""
+        return {(slug or 'yt_%s%%d' % prefix) % i: {'origin': 'source', 'source_sha256': sha, 'source_in': i * 20.0 + shift, 'source_out': i * 20.0 + 15.0 + shift}
+                for i in range(n)}
+
+    def test_renaming_every_src_is_still_a_copy_when_the_cuts_identify_the_footage(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        self.write('projects/other/artifacts/_cuts.json', {'clips': self.cuts_table(10)})
+        renamed = [{**b, 'src': b['src'] + '_b'} for b in base]
+        mine = {slug + '_b': clip for slug, clip in self.cuts_table(10).items()}
+        issues, m = self.check(renamed, cuts=mine)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual(1.0, m['best_match']['share'])
+        self.assertEqual(['beat', 'headline'], issues[0]['signals'])
+        # the same renamed episode cut from ANOTHER source video (or other spans of it) is not the same footage: the beat signal stays silent
+        # (the headline signal still fires on the identical headlines, see the headline tests)
+        for cuts in ({slug + '_b': c for slug, c in self.cuts_table(10, sha='b' * 64).items()},
+                     {slug + '_b': c for slug, c in self.cuts_table(10, shift=500.0).items()}, {}):
+            self.assertEqual(['headline'], self.check(renamed, cuts=cuts)[0][0]['signals'])
+            self.assertEqual([], self.check([{**b, 'headline': 'ใหม่ %d' % i} for i, b in enumerate(renamed)], cuts=cuts)[0])
+
+    def test_a_recut_of_the_same_footage_by_a_second_is_still_the_same_footage(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        self.write('projects/other/artifacts/_cuts.json', {'clips': self.cuts_table(10)})
+        renamed = [{**b, 'src': b['src'] + '_b'} for b in base]
+        near = {slug + '_b': c for slug, c in self.cuts_table(10, shift=1.0).items()}          # overlaps 14 of 15 s
+        self.assertEqual(['beat', 'headline'], self.check(renamed, cuts=near)[0][0]['signals'])
+        far = {slug + '_b': c for slug, c in self.cuts_table(10, shift=10.0).items()}          # overlaps 5 of 15 s: a different moment
+        self.assertEqual(['headline'], self.check(renamed, cuts=far)[0][0]['signals'])
+
+    def test_the_clip_table_next_to_a_fixture_episode_also_identifies_footage(self):
+        base = self.beats(10)
+        self.episode_file('skill/tests/fixtures/ep.json', base)
+        self.write('skill/tests/fixtures/cuts.json', self.cuts_table(10))                     # bare {slug: clip} map, not {clips: ...}
+        renamed = [{**b, 'src': 'x_' + b['src']} for b in base]
+        mine = {'x_' + slug: c for slug, c in self.cuts_table(10).items()}
+        self.assertEqual(['episode-copied'], codes(self.check(renamed, cuts=mine)[0]))
+
+    def test_invisible_characters_unicode_variants_case_and_punctuation_do_not_hide_a_copy(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        variants = {
+            'zero width space': lambda h: '​'.join(h),
+            'word joiner and BOM': lambda h: '⁠' + h.replace(' ', ' ﻿'),
+            'soft hyphen': lambda h: h.replace('ข้อ', 'ข้­อ'),
+            'variation selector': lambda h: h.replace('h', 'h️'),
+            'fullwidth letters and digits (NFKC)': lambda h: h.replace('h', 'ｈ').replace('0', '０').replace('1', '１'),
+            'non-breaking and ideographic spaces': lambda h: h.replace(' ', ' 　'),
+            'upper case': lambda h: h.upper(),
+            'trailing full stop and quotes': lambda h: '“' + h + '.”',
+            'hyphens instead of spaces': lambda h: h.replace(' ', '-'),
+            'thai digits': lambda h: h.replace('0', '๐').replace('1', '๑'),
+        }
+        self.assertEqual([], self.check(self.beats(10, 'z'))[0])          # control: an independent episode is clean
+        for name, f in variants.items():
+            with self.subTest(name):
+                mine = [{**b, 'headline': f(b['headline'])} for b in base]
+                self.assertNotEqual([b['headline'] for b in base], [b['headline'] for b in mine])
+                self.assertEqual(['episode-copied'], codes(self.check(mine)[0]))
+
+    # ---- W2b follow-up: the headline signal and the composer src root ----
+
+    def test_headline_signal_catches_renamed_recut_and_remediated_media(self):
+        """Renamed src + a re-cut beyond the footage-overlap rule + another media, but the same words on screen: flagged by the headline signal only."""
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        self.write('projects/other/artifacts/_cuts.json', {'clips': self.cuts_table(10)})
+        mine = [{**b, 'src': 'z_' + b['src'], 'media': 'broll'} for b in base]
+        far = {'z_' + slug: c for slug, c in self.cuts_table(10, shift=10.0).items()}              # 5 of 15 s overlap: not the same footage
+        issues, m = self.check(mine, cuts=far)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual(['headline'], issues[0]['signals'])
+        self.assertEqual(['headline'], m['best_match']['signals'])
+        self.assertEqual(10, m['best_match']['same'])
+        self.assertFalse(m['best_match']['by_signal']['beat']['flagged'])
+        self.assertTrue(m['best_match']['by_signal']['headline']['flagged'])
+        for field in ('src', 'headline', 'media', 'triple', 'kicker'):                      # still no field names in the message
+            self.assertNotIn(field, issues[0]['detail'])
+
+    def test_headline_signal_uses_the_same_threshold_and_minimum_and_normalisation(self):
+        other = self.beats(25)
+        self.episode_file('projects/other/artifacts/episode.json', other)
+
+        def mine(n_shared, f=lambda h: h):
+            return ([{**b, 'src': 'n%d' % i, 'headline': f(b['headline'])} for i, b in enumerate(other[:n_shared])] + self.beats(25 - n_shared, 'own'))
+        self.assertEqual(['episode-copied'], codes(self.check(mine(5))[0]))                      # 5 of 25 = 20 %, 5 beats
+        issues, m = self.check(mine(4))                                                           # 16 % and 4 beats
+        self.assertEqual([], issues)
+        self.assertEqual(4, m['best_match']['by_signal']['headline']['same_mine'])
+        self.assertEqual(['episode-copied'], codes(self.check(mine(5, lambda h: '\u200b' + h.upper() + '.'))[0]))   # same normalisation as the beat signal
+
+    def test_generic_headlines_shared_by_independent_episodes_are_not_a_copy(self):
+        generic = ['สรุป', 'ติดตามต่อ', 'ขอบคุณที่รับชม', 'ข่าวด่วน']
+        theirs = [{'t': float(i), 'media': 'typo', 'headline': g} for i, g in enumerate(generic)] + self.beats(26, 'x')
+        self.episode_file('projects/other/artifacts/episode.json', theirs)
+        mine = [{'t': float(i), 'media': 'typo', 'headline': g} for i, g in enumerate(generic)] + self.beats(26, 'y')
+        issues, m = self.check(mine)                                                              # 4 of 30 shared = 13 %, and fewer than 5
+        self.assertEqual([], issues)
+        self.assertEqual(4, m['best_match']['by_signal']['headline']['same_mine'])
+        short = [{'t': float(i), 'media': 'typo', 'headline': g} for i, g in enumerate(generic)] + self.beats(2, 'y')
+        short_other = [{'t': float(i), 'media': 'typo', 'headline': g} for i, g in enumerate(generic)] + self.beats(2, 'x')
+        self.episode_file('projects/other/artifacts/episode.json', short_other)
+        self.assertEqual([], self.check(short)[0])                                                # 4 of 6 = 67 % but only 4 beats
+
+    def test_only_beats_with_a_headline_count_for_the_headline_signal(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        srconly = [{'t': 500.0 + i, 'media': 'clip', 'src': 'q%d' % i} for i in range(90)]
+        issues, m = self.check([{**b, 'src': 'r' + b['src']} for b in base] + srconly)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual(10, m['best_match']['by_signal']['headline']['eligible_mine'])
+
+    def composer(self, search=None):
+        (self.root / 'repo' / 'remotion-composer' / 'src').mkdir(parents=True, exist_ok=True)
+        return (search or self.search()) | {'composer_src': self.root / 'repo' / 'remotion-composer' / 'src'}
+
+    def test_composer_src_json_is_a_search_root_non_recursive_and_other_json_is_skipped_silently(self):
+        import os
+        base = self.beats(10)
+        search = self.composer()
+        self.episode_file('repo/remotion-composer/src/sample.json', base)
+        self.write('repo/remotion-composer/src/theme.json', {'colors': ['#fff']})
+        self.write('repo/remotion-composer/src/broken.json', '{"beats": [')
+        (self.root / 'repo/remotion-composer/src/binary.json').write_bytes(b'\xff\xfe"beats"')
+        self.write('repo/remotion-composer/src/notes.txt', 'x')
+        self.episode_file('repo/remotion-composer/src/deep/nested.json', self.beats(10, 'q'))      # not recursive
+        os.symlink(str(self.root / 'repo/remotion-composer/src/sample.json'), str(self.root / 'repo/remotion-composer/src/alias.json'))
+        issues, m = self.check(base, search)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertIn('sample.json', issues[0]['detail'])
+        self.assertEqual(1, m['compared_files'])                      # sample.json only
+        self.assertEqual((0, 0, 0), (m['unreadable_files'], m['skipped_nonregular'], m['files_seen']))    # nothing there is counted as a problem
+        issues, m = self.check(self.beats(10, 'z'), search)
+        self.assertEqual([], issues)
+
+    def test_only_json_files_of_the_composer_src_dir_take_part(self):
+        base = self.beats(10)
+        self.write('repo/remotion-composer/src/sample.json.txt', {'schema': 'yt-news-v4-episode/1', 'beats': base})
+        self.write('repo/remotion-composer/src/sample.ts', {'schema': 'yt-news-v4-episode/1', 'beats': base})
+        self.assertEqual([], self.check(base, self.composer())[0])
+
+    def test_the_composer_sample_itself_is_not_its_own_copy(self):
+        base = self.beats(10)
+        sample = self.episode_file('repo/remotion-composer/src/sample.json', base)
+        search = self.composer(self.search(own='repo/remotion-composer/src/sample.json', own_project=None))
+        self.assertEqual([], self.check(base, search)[0])
+        self.assertEqual(0, self.check(base, search)[1]['compared_files'])
+        self.assertTrue(sample.exists())
+
+    def test_a_different_headline_is_not_a_copy_even_with_the_same_src(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        self.assertEqual([], self.check([{**b, 'headline': 'หัวข้อใหม่ %d' % i} for i, b in enumerate(base)])[0])
+
+    def test_padding_the_episode_with_new_beats_does_not_dilute_the_copy(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        issues, m = self.check(base + self.beats(90, 'pad'))             # 10 of 100 of mine (10 %) but 10 of 10 of theirs
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertEqual(0.1, m['best_match']['share_mine'])
+        self.assertEqual(1.0, m['best_match']['share_theirs'])
+        self.assertEqual(1.0, m['best_match']['share'])
+        self.assertEqual(10, m['best_match']['eligible_theirs'])
+        self.assertEqual(100, m['best_match']['eligible_mine'])
+        self.assertEqual(['episode-copied'], codes(self.check(base[:5] + self.beats(95, 'pad'))[0]))          # 5 shared: the minimum
+
+    def test_fewer_than_five_shared_beats_is_not_a_copy_however_large_the_share(self):
+        base = self.beats(4)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        issues, m = self.check(base)                                     # 4 of 4 = 100 % on both sides
+        self.assertEqual([], issues)
+        self.assertEqual(1.0, m['best_match']['share'])
+        self.assertEqual(4, m['best_match']['same'])
+        base5 = self.beats(5)
+        self.episode_file('projects/other/artifacts/episode.json', base5)
+        self.assertEqual(['episode-copied'], codes(self.check(base5)[0]))
+
+    def test_the_walk_does_not_hang_or_crash_on_fifos_symlink_loops_and_unreadable_dirs_and_counts_them(self):
+        import os
+        import signal
+
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        other = self.root / 'projects' / 'other'
+        os.mkfifo(str(other / 'pipe.json'))
+        os.symlink(str(other / 'loop.json'), str(other / 'loop.json'))                    # a symlink that points at itself
+        os.symlink(str(other), str(other / 'back'))                                       # a directory loop
+        os.symlink(str(other / 'artifacts' / 'episode.json'), str(other / 'alias.json'))  # a symlink to a real episode: not followed
+        locked = other / 'locked'
+        locked.mkdir()
+        (locked / 'x.json').write_text('{}')
+        os.chmod(str(locked), 0)
+        self.addCleanup(os.chmod, str(locked), 0o755)
+
+        def alarm(*_):
+            raise AssertionError('the copy search hung')
+        old = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(30)
+        try:
+            issues, m = self.check(base)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+        self.assertEqual(['episode-copied'], codes(issues))                                 # the real episode was still found
+        self.assertEqual(1, m['compared_files'])
+        self.assertGreaterEqual(m['skipped_nonregular'], 3)                                 # pipe.json, loop.json, alias.json (and not `back`)
+        if os.geteuid() != 0:
+            self.assertGreaterEqual(m['unreadable_dirs'], 1)
+
+    def test_a_symlinked_project_folder_is_not_entered(self):
+        import os
+        self.episode_file('elsewhere/ep.json', self.beats(10))
+        os.symlink(str(self.root / 'elsewhere'), str(self.root / 'projects' / 'linked'))
+        issues, m = self.check(self.beats(10))
+        self.assertEqual([], issues)
+        self.assertEqual(0, m['compared_files'])
+        self.assertEqual(1, m['skipped_nonregular'])
+
+    def test_a_file_over_the_size_limit_is_skipped_and_counted_not_parsed(self):
+        from unittest import mock
+        base = self.beats(10)
+        big = self.episode_file('projects/other/artifacts/episode.json', base)
+        with mock.patch.object(lc, 'COPY_MAX_FILE_BYTES', 100):
+            issues, m = self.check(base)
+        self.assertGreater(big.stat().st_size, 100)
+        self.assertEqual([], issues)
+        self.assertEqual(1, m['skipped_large'])
+        self.assertEqual(0, m['compared_files'])
+        self.assertEqual(['episode-copied'], codes(self.check(base)[0]))                    # and with the real limit it is found
+        self.assertEqual(5 * 1024 * 1024, lc.COPY_MAX_FILE_BYTES)
+
+    def test_a_search_that_runs_out_of_time_fails_instead_of_passing(self):
+        base = self.beats(10)
+        self.episode_file('projects/other/artifacts/episode.json', base)
+        issues, m = self.check(base, budget=-1.0)
+        self.assertEqual(['copy-search-incomplete'], codes(issues))
+        self.assertFalse(m['complete'])
+        issues, m = self.check(base, budget=60.0)
+        self.assertEqual(['episode-copied'], codes(issues))
+        self.assertTrue(m['complete'])
+
+    def test_the_search_reports_files_seen_parsed_and_seconds(self):
+        self.episode_file('projects/other/artifacts/episode.json', self.beats(10, 'x'))
+        self.write('projects/other/words.json', {'words': []})
+        _, m = self.check(self.beats(10))
+        self.assertEqual((2, 1, 1), (m['files_seen'], m['parsed'], m['compared_files']))
+        self.assertIsInstance(m['seconds'], float)
+
+    def test_own_problem_symlinked_episode_is_reported_and_the_target_is_still_compared(self):
+        issues, _ = self.check(self.beats(10), self.search() | {'own_problem': '/x/episode.json is a symbolic link'})
+        self.assertEqual(['episode-not-regular-file'], codes(issues))
+        self.assertEqual('error', issues[0]['severity'])
+        self.assertIn('is a symbolic link', issues[0]['detail'])
+        issues, _ = self.check(self.beats(10), self.search() | {'own_problem': None})
+        self.assertEqual([], issues)
+
+    def test_normalisation_functions(self):
+        self.assertEqual('a b c', lc.norm_text(' a​   b\t\nc⁠ '))
+        self.assertEqual('ab', lc.norm_text('ａｂ'))                              # NFKC
+        self.assertEqual('fi', lc.norm_text('ﬁ'))                                    # ligature
+        self.assertEqual('A b', lc.norm_text('A b'))                                      # case kept
+        self.assertEqual('a,b', lc.norm_text('a,b'))                                      # punctuation kept
+        self.assertEqual('หัวข้อ', lc.norm_text('หัวข้อ'))                                  # Thai vowels / tone marks are not removed
+        self.assertEqual(lc.norm_text('กำ'), lc.norm_text('กํา'))                          # NFKC splits SARA AM the same way on both sides
+        self.assertEqual('ab12', lc.norm_copy_text(' A​-B, ๑２ .'))
+        self.assertEqual(lc.norm_copy_text('หัวข้อ h 1'), lc.norm_copy_text('หัวข้อ-H-๑'))
+        self.assertNotEqual(lc.norm_copy_text('หัวข้อ 1'), lc.norm_copy_text('หัวข้อ 2'))
+
+    def test_synthetic_fixtures_are_independent_of_everything_in_the_skill(self):
+        """Fixture hygiene: the episodes the CLI tests lint share nothing with any episode-format file of the real skill directory."""
+        skill = SCRIPTS.parent
+        for name in ('episode_object.json', 'synthetic_v4_episode.json'):
+            with self.subTest(name):
+                ep = ed.load_episode(FIX / name)
+                search = {'skill_dir': skill, 'projects_dir': None, 'own_file': FIX / name, 'own_project': None}
+                issues, metrics = [], {}
+                lc.check_copy(ep, search, issues, metrics)
+                self.assertEqual([], issues, metrics)
+                self.assertGreater(metrics['copy']['compared_files'], 5)
+
+
+class EpisodeCopiedCliTests(unittest.TestCase):
+    """End to end in a temp repo: <repo>/.claude/skills/<skill>/scripts/lint_content.py finds <repo>/projects/* from its own location."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name)
+        scripts = self.repo / '.claude' / 'skills' / 'Some-Skill' / 'scripts'
+        scripts.mkdir(parents=True)
+        for f in ('lint_content.py', 'episode_data.py', 'content_thresholds.py'):
+            (scripts / f).write_bytes((SCRIPTS / f).read_bytes())
+        self.script = scripts / 'lint_content.py'
+
+    def put(self, project, source):
+        dst = self.repo / 'projects' / project / 'artifacts' / 'episode.json'
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(Path(source).read_bytes())
+        return dst
+
+    def lint(self, beats):
+        report = self.repo / 'report.json'
+        argv = [sys.executable, '-B', str(self.script), '--beats', str(beats), '--script', str(FIX / 'script.txt'), '--words', str(FIX / 'words_by_line.txt'),
+                '--line-starts', str(FIX / 'line_starts.json'), '--cuts', str(FIX / 'cuts.json'), '--source-transcript', str(FIX / 'source_transcript.txt'),
+                '--source-meta', str(FIX / 'source_meta.json'), '--source-timed', str(FIX / 'source_timed.json'), '--evidence', str(FIX / 'visual_evidence.json'),
+                '--schema-validator', str(FIX / 'schema_stub_valid.mjs'), '--report', str(report)]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        return proc, json.loads(report.read_text())
+
+    def test_copy_in_another_project_fails_and_own_project_is_ignored(self):
+        first = self.put('V1', FIX / 'synthetic_v4_episode.json')        # 10 beats with a src or a headline (the rule needs >= 5 shared)
+        proc, rep = self.lint(first)                          # alone in the repo: its own project is not compared
+        self.assertNotIn('episode-copied', [i['code'] for i in rep['issues']])
+        self.assertEqual(0, rep['metrics']['copy']['compared_files'])
+        second = self.put('V2', FIX / 'synthetic_v4_episode.json')
+        proc, rep = self.lint(second)                         # a byte copy in another project
+        self.assertEqual(1, proc.returncode)
+        hits = [i for i in rep['issues'] if i['code'] == 'episode-copied']
+        self.assertEqual(1, len(hits))
+        self.assertIn(str(first), hits[0]['detail'])
+        self.assertEqual(1.0, rep['metrics']['copy']['best_match']['share'])
+        self.assertEqual(1, rep['metrics']['copy']['compared_files'])
+
+    def test_independent_episode_in_another_project_passes_and_reports_zero(self):
+        self.put('V1', FIX / 'synthetic_v4_episode.json')
+        mine = self.put('V2', FIX / 'episode_object.json')
+        proc, rep = self.lint(mine)
+        self.assertEqual(0, proc.returncode, proc.stdout)
+        self.assertEqual(0.0, rep['metrics']['copy']['best_match']['share'])
+        self.assertEqual(1, rep['metrics']['copy']['compared_files'])
+
+    def test_copy_search_for_finds_the_composer_src_dir(self):
+        self.assertIsNone(lc.copy_search_for(self.repo / 'projects' / 'V1' / 'artifacts' / 'episode.json', self.script)['composer_src'])
+        (self.repo / 'remotion-composer' / 'src').mkdir(parents=True)
+        search = lc.copy_search_for(self.repo / 'projects' / 'V1' / 'artifacts' / 'episode.json', self.script)
+        self.assertEqual((self.repo / 'remotion-composer' / 'src').resolve(), search['composer_src'])
+        stray = self.repo / 'x' / 'scripts' / 'lint_content.py'
+        self.assertIsNone(lc.copy_search_for(self.repo / 'projects' / 'V1' / 'e.json', stray)['composer_src'])
+
+    def test_a_copy_of_a_composer_src_episode_fails_end_to_end(self):
+        src = self.repo / 'remotion-composer' / 'src'
+        src.mkdir(parents=True)
+        (src / 'sample.json').write_bytes((FIX / 'synthetic_v4_episode.json').read_bytes())
+        (src / 'tokens.json').write_text('{"a": 1}')
+        mine = self.put('V1', FIX / 'synthetic_v4_episode.json')
+        proc, rep = self.lint(mine)
+        hits = [i for i in rep['issues'] if i['code'] == 'episode-copied']
+        self.assertEqual(1, len(hits))
+        self.assertIn('sample.json', hits[0]['detail'])
+        self.assertEqual(0, rep['metrics']['copy']['unreadable_files'])
+
+    # ---- W2b: the episode must be a regular file inside its own project ----
+
+    def symlink_case(self, kind):
+        """A real episode in project OTHER and a link to it from project MINE; -> the path to lint."""
+        import os
+        other = self.put('OTHER', FIX / 'synthetic_v4_episode.json')
+        mine = self.repo / 'projects' / 'MINE'
+        if kind == 'file':
+            (mine / 'artifacts').mkdir(parents=True)
+            os.symlink(str(other), str(mine / 'artifacts' / 'episode.json'))
+        elif kind == 'artifacts-dir':
+            mine.mkdir(parents=True)
+            os.symlink(str(other.parent), str(mine / 'artifacts'))
+        elif kind == 'project-dir':
+            os.symlink(str(other.parents[1]), str(mine))
+        return other, mine / 'artifacts' / 'episode.json'
+
+    def test_a_symlinked_episode_is_an_error_and_the_project_it_points_into_is_still_compared(self):
+        for kind in ('file', 'artifacts-dir', 'project-dir'):
+            with self.subTest(kind):
+                import shutil
+                shutil.rmtree(self.repo / 'projects', ignore_errors=True)
+                other, link = self.symlink_case(kind)
+                search = lc.copy_search_for(link, self.script)
+                self.assertEqual('MINE', search['own_project'])                      # from the path as given, not from where the link points
+                self.assertIsNotNone(search['own_problem'])
+                proc, rep = self.lint(link)
+                found = [i['code'] for i in rep['issues']]
+                self.assertIn('episode-not-regular-file', found)
+                self.assertIn('episode-copied', found)                               # OTHER is not "its own project"
+                self.assertEqual(1, proc.returncode)
+                hits = [i for i in rep['issues'] if i['code'] == 'episode-copied']
+                self.assertIn(str(other), hits[0]['detail'])
+
+    def test_a_regular_episode_in_its_own_project_has_no_problem_even_through_a_symlinked_tmp(self):
+        mine = self.put('MINE', FIX / 'synthetic_v4_episode.json')
+        search = lc.copy_search_for(mine, self.script)
+        self.assertIsNone(search['own_problem'])
+        self.assertEqual('MINE', search['own_project'])
+        proc, rep = self.lint(mine)
+        self.assertNotIn('episode-not-regular-file', [i['code'] for i in rep['issues']])
+
+    def test_an_episode_outside_projects_is_checked_for_being_a_symlink_too(self):
+        import os
+        real = self.repo / 'elsewhere' / 'real.json'
+        real.parent.mkdir()
+        real.write_bytes((FIX / 'synthetic_v4_episode.json').read_bytes())
+        link = self.repo / 'elsewhere' / 'episode.json'
+        os.symlink(str(real), str(link))
+        self.assertIsNone(lc.copy_search_for(real, self.script)['own_problem'])
+        self.assertIn('symbolic link', lc.copy_search_for(link, self.script)['own_problem'])
+
+    def test_a_hard_link_to_another_projects_episode_is_still_compared(self):
+        import os
+        other = self.put('OTHER', FIX / 'synthetic_v4_episode.json')
+        mine = self.repo / 'projects' / 'MINE' / 'artifacts' / 'episode.json'
+        mine.parent.mkdir(parents=True)
+        os.link(str(other), str(mine))
+        proc, rep = self.lint(mine)
+        self.assertIn('episode-copied', [i['code'] for i in rep['issues']])
+
+    def test_copy_search_for_finds_skill_and_projects_roots(self):
+        (self.repo / 'projects' / 'V1' / 'artifacts').mkdir(parents=True)
+        search = lc.copy_search_for(self.repo / 'projects' / 'V1' / 'artifacts' / 'episode.json', self.script)
+        self.assertEqual(self.script.resolve().parents[1], search['skill_dir'])
+        self.assertEqual((self.repo / 'projects').resolve(), search['projects_dir'])
+        self.assertEqual('V1', search['own_project'])
+        outside = lc.copy_search_for(self.repo / 'elsewhere' / 'episode.json', self.script)
+        self.assertIsNone(outside['own_project'])
+        stray = self.repo / 'x' / 'scripts' / 'lint_content.py'
+        self.assertIsNone(lc.copy_search_for(self.repo / 'projects' / 'V1' / 'e.json', stray)['projects_dir'])
+
+
 class LatinSeverityTests(unittest.TestCase):
     def lint(self, **fields):
         inp = make_inputs([at_time(0, ['คำ', 'พูด'])])
@@ -1201,7 +1897,7 @@ class SchemaStepTests(unittest.TestCase):
     def run_cli(self, *extra, beats='episode_object.json', evidence=True, validator='schema_stub_valid.mjs', legacy=False, drop=()):
         with tempfile.TemporaryDirectory() as d:
             report = Path(d) / 'r.json'
-            args = {'--beats': FIX / beats, '--script': FIX / 'script.txt', '--words': FIX / 'words_by_line.txt',
+            args = {'--beats': FIX / beats if not Path(str(beats)).is_absolute() else beats, '--script': FIX / 'script.txt', '--words': FIX / 'words_by_line.txt',
                     '--line-starts': FIX / 'line_starts.json', '--cuts': FIX / 'cuts.json',
                     '--source-transcript': FIX / 'source_transcript.txt', '--source-meta': FIX / 'source_meta.json',
                     '--source-timed': FIX / 'source_timed.json'}
@@ -1277,12 +1973,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual({'editorial': 0, 'dataBearing': 0, 'warn': 0, 'error': 0}, rep['metrics']['latin'])
         self.assertEqual(0, rep['metrics']['evidence']['windowUnavailable'])
 
-    def test_cli_crop_warning_reads_asset_dir_from_episode_file(self):
+    def test_cli_crop_error_reads_asset_dir_from_episode_file(self):
         proc, rep = self.run_cli()
-        msgs = [i['detail'] for i in rep['issues'] if i['code'] == 'crop-trims-source']
-        self.assertTrue(msgs)
-        self.assertIn('-i remotion-composer/public/mini/broll/', msgs[0])
-        self.assertTrue(all(i['severity'] == 'warn' for i in rep['issues'] if i['code'] == 'crop-trims-source'))
+        self.assertNotIn('crop-trims-source', [i['code'] for i in rep['issues']])
+        with tempfile.TemporaryDirectory() as d:
+            ep = json.loads((FIX / 'episode_object.json').read_text(encoding='utf-8'))
+            ep['beats'][1]['srcCrop'] = {'x': 0, 'y': 0, 'w': 1280, 'h': 720}
+            (Path(d) / 'cropped.json').write_text(json.dumps(ep, ensure_ascii=False), encoding='utf-8')
+            proc, rep = self.run_cli(beats=Path(d) / 'cropped.json')
+        hits = [i for i in rep['issues'] if i['code'] == 'crop-trims-source']
+        self.assertEqual(1, len(hits))
+        self.assertIn('-i remotion-composer/public/mini/broll/', hits[0]['detail'])
+        self.assertEqual('error', hits[0]['severity'])
+        self.assertEqual(1, proc.returncode)
+        self.assertFalse(rep['pass'])
 
     def test_errors_exit_1_and_warn_alone_passes(self):
         proc, rep = self.run_cli('--set', 'maxCtaChars=3')

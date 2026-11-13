@@ -1,7 +1,8 @@
 """Our loader and our schema step against the engine team's REAL V4 fixtures (CF-A67).
 
 The fixtures under fixtures/episodes/ (valid/, invalid/, captions/) belong to the engine workstream and are read-only here.
-fixtures/a67/content/v261111_v4_episode.json is a snapshot of the hand-annotated V4 episode of the news video V261111.
+fixtures/a67/content/synthetic_v4_episode.json is a SYNTHETIC V4 episode (invented product, no real video content): a real episode
+must never live inside the skill, an unattended agent copies it (CF-A67 proof run).
 """
 import collections
 import json
@@ -16,7 +17,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1]
 FX = Path(__file__).resolve().parent / 'fixtures'
 EP_FX = FX / 'episodes'
-V261111 = FX / 'a67' / 'content' / 'v261111_v4_episode.json'
+SYNTHETIC = FX / 'a67' / 'content' / 'synthetic_v4_episode.json'
 SCHEMA_JSON = SCRIPTS.parent / 'assets' / 'episode.schema.json'
 sys.path.insert(0, str(SCRIPTS))
 import episode_data as ed  # noqa: E402
@@ -62,11 +63,23 @@ class ValidFixtures(unittest.TestCase):
         self.assertEqual([], [i for i in issues if i['severity'] == 'error'])
         self.assertTrue(any(i['severity'] == 'warn' and i['rule'] == 'S19' for i in issues))
 
-    def test_v261111_snapshot_loads(self):
-        ep = ed.load_episode(V261111)
-        self.assertEqual(78, len(ep['beats']))
-        self.assertAlmostEqual(647.32, ep['vo_end'])
-        self.assertAlmostEqual(637.7, ep['cta_t'])
+    def test_synthetic_episode_loads(self):
+        ep = ed.load_episode(SYNTHETIC)
+        self.assertEqual(13, len(ep['beats']))
+        self.assertAlmostEqual(96.0, ep['vo_end'])
+        self.assertAlmostEqual(90.0, ep['cta_t'])
+
+    def test_synthetic_episode_passes_the_real_schema_step(self):
+        issues, summary = schema_step(SYNTHETIC, None)
+        self.assertEqual([], [i for i in issues if i['severity'] == 'error'], issues)
+        self.assertTrue(summary['valid'])
+
+    def test_synthetic_episode_is_synthetic(self):
+        """No srcCrop (the default is the whole frame) and none of the media is a stock / ai clip."""
+        beats = read(SYNTHETIC)['beats']
+        self.assertFalse([b for b in beats if 'srcCrop' in b])
+        self.assertFalse([b for b in beats if b.get('origin') in ('stock', 'ai')])
+        self.assertEqual({'clip', 'typo', None}, {b.get('media') for b in beats})
 
 
 @unittest.skipUnless(HAVE_NODE, NO_NODE)
@@ -161,10 +174,8 @@ def schema_text_keys():
 
 class LoaderCoversEveryTextField(unittest.TestCase):
     def episodes(self):
-        out = [('sample-v1', EP_FX / 'valid' / 'sample-v1.json'), ('variants-and-carryover', EP_FX / 'valid' / 'variants-and-carryover.json')]
-        if V261111.exists():
-            out.append(('v261111', V261111))
-        return out
+        return [('sample-v1', EP_FX / 'valid' / 'sample-v1.json'), ('variants-and-carryover', EP_FX / 'valid' / 'variants-and-carryover.json'),
+                ('synthetic', SYNTHETIC)]
 
     def test_schema_text_keys_are_the_ones_this_test_knows(self):
         # a new `$defs/text` field in the schema must be added to the loader and to this list on purpose
@@ -262,13 +273,13 @@ class LoaderWindowsMatchSchemaSemantics(unittest.TestCase):
         c = self.check(EP_FX / 'valid' / 'variants-and-carryover.json')
         self.assertGreater(c['stats'], 0)
 
-    def test_v261111(self):
-        c = self.check(V261111)
+    def test_synthetic(self):
+        c = self.check(SYNTHETIC)
         for k in ('stats', 'cards', 'items', 'lower'):
             self.assertGreater(c[k], 0, k)
 
     def test_top_level_windows(self):
-        f = V261111
+        f = SYNTHETIC
         ep = ed.load_episode(f)
         raw = read(f)
         got = {fld: (s, e, k) for fld, _, s, e, k in ed.episode_text_fields(ep)}
@@ -409,14 +420,19 @@ class VisibleRegionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ed.visible_region(*args)
 
-    def test_every_v261111_crop_stays_inside_the_frame(self):
-        for b in read(V261111)['beats']:
-            if b.get('srcCrop'):
-                x, y, w, h = ed.visible_region(b['layout'], 1920, 1080, b['srcCrop'])
-                self.assertGreaterEqual(x, -1e-6)
-                self.assertGreaterEqual(y, -1e-6)
-                self.assertLessEqual(x + w, 1920 + 1e-6)
-                self.assertLessEqual(y + h, 1080 + 1e-6)
+    def test_every_valid_fixture_crop_stays_inside_the_frame(self):
+        """The engine's valid fixtures carry srcCrop (the synthetic episode has none on purpose); the visible region stays in the frame."""
+        n = 0
+        for f in sorted((EP_FX / 'valid').glob('*.json')):
+            for b in read(f)['beats']:
+                if b.get('srcCrop'):
+                    x, y, w, h = ed.visible_region(b['layout'], 1920, 1080, b['srcCrop'])
+                    self.assertGreaterEqual(x, -1e-6)
+                    self.assertGreaterEqual(y, -1e-6)
+                    self.assertLessEqual(x + w, 1920 + 1e-6)
+                    self.assertLessEqual(y + h, 1080 + 1e-6)
+                    n += 1
+        self.assertGreaterEqual(n, 1)
 
 
 if __name__ == '__main__':

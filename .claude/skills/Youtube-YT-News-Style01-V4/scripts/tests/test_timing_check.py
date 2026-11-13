@@ -260,8 +260,8 @@ class TimingCheckTests(unittest.TestCase):
             tc.parse_words_json([{'w': 'a'}])
 
     def test_words_with_spaces_and_srt_parse(self):
-        toks = tc.parse_words_txt('L1: Gemini 4 Carbon@11.0 ซึ่ง@12.5\nL2: ok@13.0\n')
-        self.assertEqual([('Gemini 4 Carbon', 11.0, 1), ('ซึ่ง', 12.5, 1), ('ok', 13.0, 2)],
+        toks = tc.parse_words_txt('L1: Marlin 3 Quartz@11.0 ซึ่ง@12.5\nL2: ok@13.0\n')
+        self.assertEqual([('Marlin 3 Quartz', 11.0, 1), ('ซึ่ง', 12.5, 1), ('ok', 13.0, 2)],
                          [(t['w'], t['s'], t['line']) for t in toks])
         self.assertEqual([0.0, 9.697], tc.parse_srt_starts('1\n00:00:00,000 --> 00:00:09,697\nx\n\n2\n00:00:09,697 --> 00:00:19,648\ny\n')[:1] + [9.697])
 
