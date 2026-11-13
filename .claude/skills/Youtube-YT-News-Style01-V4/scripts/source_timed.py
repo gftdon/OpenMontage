@@ -13,13 +13,20 @@ Output: [{"start": sec, "end": sec, "text": "..."}] with every segment <= ~8 s, 
 from-vtt / from-json3 read YouTube auto-subtitle files and drop the rolling-caption repeats.
 from-audio runs the locally cached mlx-whisper model (same family the karaoke pipeline uses) with an
 OFFLINE environment (HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1) and loads the model from its cache
-snapshot directory, so a missing model fails fast instead of downloading. --start/--duration transcribe
+snapshot directory, so a missing model fails fast instead of downloading. Interpreter and model cache are
+FIXED paths under the passwd-database home (not $HOME): the V4 ASR venv <home>/.cache/yt-news-v4/asr-venv (built by a human with
+setup_asr_venv.sh) and <home>/.cache/huggingface/hub. No environment variable (HOME, HF_HUB_CACHE, HF_HOME) redirects them, and
+--model must be an HF repo id (owner/name, no wildcards) already in that cache (a directory path is refused, exit 2).
+ffmpeg is the first executable of /opt/homebrew/bin, /usr/local/bin, /usr/bin (never $PATH) and runs under a minimal environment.
+The whisper worker is started through asr_run.sh, which verifies the interpreter, the stdlib and the venv against the manifest
+(outside python) and runs the Cellar python as `-I -S -B -X pycache_prefix=/var/empty` under `env -i` with a minimal environment
+(HOME, PATH, LANG, TMPDIR), so PYTHONPATH / PYTHON* variables of the caller never reach it. --start/--duration transcribe
 one window of the video (times stay in source-video seconds); `merge` joins the parts.
 A finished from-audio leaves <out>.done.json (key = sha256 of audio + model + lang + window); calling it
 again with the same arguments prints "already done" and returns at once.
 
 Every malformed input ends as one `ERROR: ...` line on stderr (no traceback).
-Exit codes: 0 ok, 2 bad input, 4 tool/model/venv missing (nothing was downloaded), 1 other failure.
+Exit codes: 0 ok, 2 bad input, 4 tool/model/venv missing or changed (nothing was downloaded), 1 other failure.
 """
 import argparse
 import glob
@@ -27,6 +34,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import subprocess
 import sys
@@ -211,18 +219,46 @@ def parse_json3(data):
 
 # ---------------------------------------------------------------- local speech-to-text
 
-def karaoke_python():
-    venv = os.environ.get('KARAOKE_VENV') or os.path.expanduser('~/.cache/karaoke-subtitle/venv')
-    return Path(venv) / 'bin' / 'python'
+# Fixed locations, same as word_timing.sh / asr_transcribe.py: no environment variable may redirect them. The home dir is
+# read from the passwd database (NOT $HOME / expanduser: an agent can set HOME). Tests patch these module constants
+# in-process, or run a temp COPY of the script with the two lines below rewritten; an agent cannot reach either seam.
+PW_HOME = pwd.getpwuid(os.getuid()).pw_dir
+VENV_DIR = os.path.join(PW_HOME, '.cache', 'yt-news-v4', 'asr-venv')               # = asr_transcribe.VENV_ROOT (a test asserts it)
+SITE_DIR = os.path.join(VENV_DIR, 'lib', 'python3.12', 'site-packages')              # = asr_transcribe.SITE_DIR
+HF_HUB_DIR = os.path.join(PW_HOME, '.cache', 'huggingface', 'hub')
+LAUNCHER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'asr_run.sh')
+FFMPEG_CANDIDATES = ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg')   # = asr_run.sh = asr_transcribe.py (a test asserts it)
+MODEL_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$')
+
+
+def resolve_ffmpeg():
+    """the first executable of the fixed list ($PATH is never searched) or None"""
+    for c in FFMPEG_CANDIDATES:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def minimal_env(ffmpeg):
+    """the environment of every subprocess here: nothing of the caller's os.environ"""
+    return {'HOME': PW_HOME, 'PATH': os.path.dirname(ffmpeg) + ':/usr/bin:/bin', 'LANG': 'en_US.UTF-8', 'TMPDIR': '/var/empty'}
+
+
+def check_model_id(model):
+    """--model must be an HF repo id (owner/name); anything else (a path, a glob, '*') is refused."""
+    if not isinstance(model, str) or not MODEL_ID_RE.match(model):
+        raise BadInput(f'--model {model!r} is not an HF repo id (owner/name, letters digits . _ - only). '
+                       f'Use a model already cached: ls {HF_HUB_DIR}; do not pass paths or wildcards.')
+    return model
 
 
 def resolve_model_dir(repo):
-    """Local snapshot dir of an already-cached HF model, or None. Never touches the network."""
-    if os.path.isdir(repo):
-        return repo
-    hub = os.environ.get('HF_HUB_CACHE') or os.path.join(
-        os.environ.get('HF_HOME') or os.path.expanduser('~/.cache/huggingface'), 'hub')
-    for snap in sorted(glob.glob(os.path.join(hub, 'models--' + repo.replace('/', '--'), 'snapshots', '*'))):
+    """Local snapshot dir of an HF repo id that is already in the fixed hub cache, or None. Never touches the network;
+    a filesystem directory is NOT accepted as a model."""
+    check_model_id(repo)
+    owner, name = repo.split('/', 1)
+    for snap in sorted(glob.glob(os.path.join(glob.escape(HF_HUB_DIR), 'models--' + glob.escape(owner) + '--' + glob.escape(name),
+                                              'snapshots', '*'))):
         if os.path.exists(os.path.join(snap, 'config.json')) and (
                 os.path.exists(os.path.join(snap, 'weights.safetensors')) or os.path.exists(os.path.join(snap, 'weights.npz'))):
             return snap
@@ -230,7 +266,10 @@ def resolve_model_dir(repo):
 
 
 def _whisper_worker(wav, model_dir, lang, out_json):
-    """Runs INSIDE the karaoke venv (mlx_whisper lives there)."""
+    """Runs under asr_run.sh (python -I -S: no site-packages were processed): the V4 venv's are appended here; offline."""
+    for k in OFFLINE_ENV:
+        os.environ[k] = OFFLINE_ENV[k]
+    sys.path.append(SITE_DIR)
     import mlx_whisper
     res = mlx_whisper.transcribe(wav, path_or_hf_repo=model_dir, language=lang, word_timestamps=True, verbose=False)
     segs = [{'start': s['start'], 'end': s['end'], 'text': s.get('text', ''),
@@ -239,18 +278,30 @@ def _whisper_worker(wav, model_dir, lang, out_json):
     Path(out_json).write_text(json.dumps(segs, ensure_ascii=False), encoding='utf-8')
 
 
+def worker_invocation(launcher, ffmpeg, wav, model_dir, lang, out_json):
+    """(argv, env) of the whisper worker: asr_run.sh verifies the interpreter / stdlib / venv and runs this file's `_whisper`
+    mode under `python -I -S -B -X pycache_prefix=/var/empty` + `env -i`; the environment given here is built from scratch
+    (nothing of the caller's os.environ)."""
+    argv = ['/bin/bash', str(launcher), 'source_timed.py', '_whisper', wav, model_dir, lang, out_json]
+    return argv, minimal_env(ffmpeg)
+
+
 def from_audio(src, lang='en', model=DEFAULT_MODEL, start=None, duration=None):
+    check_model_id(model)
     if not os.path.exists(src):
         raise BadInput(f'no such file: {src}')
-    py = karaoke_python()
-    if not py.exists():
-        raise ToolMissing(f'karaoke venv python not found: {py} (mlx-whisper lives there; set KARAOKE_VENV). Nothing was downloaded.')
+    if not os.path.isfile(LAUNCHER):
+        raise ToolMissing(f'{LAUNCHER} is missing. Nothing was downloaded or started: do not install anything, stop and report this error.')
+    if not os.path.isdir(SITE_DIR):
+        raise ToolMissing(f'the ASR venv {VENV_DIR} (mlx-whisper lives there) is not built. Nothing was downloaded or started: a human '
+                          f'runs `bash {os.path.dirname(LAUNCHER)}/setup_asr_venv.sh`; do not install anything, stop and report this error.')
     model_dir = resolve_model_dir(model)
     if not model_dir:
         raise ToolMissing(f'speech model {model!r} is not in the local HF cache; not downloading. '
                           f'Cached models: ls ~/.cache/huggingface/hub')
-    ffmpeg = 'ffmpeg'
-    env = dict(os.environ, **OFFLINE_ENV)
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        raise ToolMissing('ffmpeg not found in ' + ', '.join(FFMPEG_CANDIDATES))
     with tempfile.TemporaryDirectory(prefix='source_timed_') as td:
         wav, raw = os.path.join(td, 'a.wav'), os.path.join(td, 'raw.json')
         cmd = [ffmpeg, '-v', 'error', '-y']
@@ -261,13 +312,15 @@ def from_audio(src, lang='en', model=DEFAULT_MODEL, start=None, duration=None):
             cmd += ['-t', str(duration)]
         cmd += ['-vn', '-ac', '1', '-ar', '16000', wav]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, env=minimal_env(ffmpeg))
         except FileNotFoundError:
             raise ToolMissing('ffmpeg not found')
         except subprocess.CalledProcessError as e:
             raise BadInput(f'ffmpeg could not read audio from {src}: {e.stderr[-300:]}')
-        proc = subprocess.run([str(py), str(Path(__file__).resolve()), '_whisper', wav, model_dir, lang, raw],
-                              env=env, capture_output=True, text=True)
+        argv, env = worker_invocation(LAUNCHER, ffmpeg, wav, model_dir, lang, raw)
+        proc = subprocess.run(argv, env=env, capture_output=True, text=True)
+        if proc.returncode == 4:          # the launcher refused (interpreter / stdlib / venv differ from the manifest, or a prerequisite is missing)
+            raise ToolMissing('the ASR toolchain check failed; nothing was run: ' + (proc.stderr or proc.stdout)[-1500:])
         if proc.returncode != 0 or not os.path.exists(raw):
             raise RuntimeError('speech-to-text failed:\n' + (proc.stderr or proc.stdout)[-1500:])
         segs = json.loads(Path(raw).read_text(encoding='utf-8'))
@@ -323,7 +376,7 @@ def _write(out_path, segs):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] == '_whisper':        # internal: runs in the karaoke venv
+    if argv and argv[0] == '_whisper':        # internal: runs under asr_run.sh
         _whisper_worker(*argv[1:5])
         return 0
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -354,6 +407,7 @@ def main(argv=None):
                 raise BadInput('merge: no part files left (only *.done.json markers were given)')
             segs = merge_parts([load_part(f) for f in files])
         else:
+            check_model_id(a.model)
             if not os.path.exists(a.file):
                 raise BadInput(f'no such file: {a.file}')
             key = audio_job_key(a.file, a.model, a.lang, a.start, a.duration)

@@ -1,9 +1,9 @@
 """Extract a clean script.txt from an SRT file: one line per cue, text only.
 
 The SRT is trusted for TEXT (it is the exact spoken script) but never for
-TIMING (HeyGen SRT drifts up to -4.1s vs the actual audio). The output feeds
-karaoke_subtitle_v2's extract_timing.py --script, which char-aligns whisper
-output onto these exact lines.
+TIMING (HeyGen SRT drifts up to -4.1s vs the actual audio). The output is the
+script.txt that word_timing.sh aligns onto the whisper word times
+(asr_align.py), line for line.
 
   python3 srt_to_script.py --srt source.srt --out script.txt [--script original.txt [--strict]]
 
