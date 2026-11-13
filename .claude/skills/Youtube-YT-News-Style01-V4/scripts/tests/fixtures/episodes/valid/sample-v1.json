@@ -457,12 +457,6 @@
       "src": "yt_markup_experiment",
       "from": 3.3,
       "origin": "source",
-      "srcCrop": {
-        "x": 240,
-        "y": 135,
-        "w": 1440,
-        "h": 810
-      },
       "kicker": "SOURCE DEMO",
       "headline": "ทดลองปรับภาพด้วย markup"
     },
@@ -531,12 +525,6 @@
       "layout": "wide",
       "src": "yt_complexity_variants",
       "origin": "source",
-      "srcCrop": {
-        "x": 48,
-        "y": 27,
-        "w": 1824,
-        "h": 1026
-      },
       "kicker": "SOURCE DEMO",
       "headline": "ลองตัวเลือกภาพหลายแบบ"
     },

@@ -45,10 +45,10 @@
       "from": 1,
       "origin": "source",
       "srcCrop": {
-        "x": 160,
-        "y": 90,
-        "w": 1600,
-        "h": 900
+        "x": 16,
+        "y": 9,
+        "w": 1888,
+        "h": 1062
       },
       "kicker": "SOURCE DEMO",
       "headline": "หัวข้อตัวอย่าง",

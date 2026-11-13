@@ -147,12 +147,16 @@ test('sample-v1: both stat carry-overs survive (one into a T beat, one into a P 
   assert.deepEqual([...carried].sort(), ['P', 'T']);
 });
 
-test('sample-v1: the from offsets and both srcCrop beats are still there', () => {
+// CF-A67: the sample shows the whole source frame on every clip. A srcCrop that trims an edge by more than 2 % is a
+// lint_content error (`crop-trims-source`), and the unattended agent copies what the sample shows, so no beat of the
+// sample may carry one (the srcCrop formula itself stays covered by srccrop.test.mjs).
+test('sample-v1: the from offsets are still there and no beat carries a srcCrop', () => {
   const ep = readJson(path.join(FX, 'valid/sample-v1.json'));
   assert.ok(ep.beats.some((b) => b.src === 'yt_markup_experiment' && b.from === 0.1));
-  assert.ok(ep.beats.some((b) => b.src === 'yt_markup_experiment' && b.from === 3.3 && b.srcCrop));
+  assert.ok(ep.beats.some((b) => b.src === 'yt_markup_experiment' && b.from === 3.3));
   assert.ok(ep.beats.some((b) => b.src === 'content_editor_workflow' && b.from === 8));
-  assert.ok(ep.beats.some((b) => b.src === 'yt_complexity_variants' && b.srcCrop));
+  assert.ok(ep.beats.some((b) => b.src === 'yt_complexity_variants'));
+  assert.equal(ep.beats.filter((b) => 'srcCrop' in b).length, 0);
 });
 
 test('S19 tolerance: last caption page may end at voEndSec + 0.25, not at + 0.26', () => {
