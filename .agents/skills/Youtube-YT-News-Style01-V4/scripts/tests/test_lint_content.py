@@ -1728,6 +1728,17 @@ class EpisodeCopiedCliTests(unittest.TestCase):
         self.assertIsNone(lc.copy_search_for(self.repo / 'elsewhere' / 'V1' / 'e.json', stray)['projects_dir'])
 
 
+def _tmp_fs_is_case_insensitive():
+    """True when the temp filesystem treats `aA` and `Aa` as one directory (APFS default, NTFS): a case alias of a directory can only exist there."""
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, 'Aa').mkdir()
+        return Path(d, 'aA').is_dir()
+
+
+CASE_INSENSITIVE_TMP = _tmp_fs_is_case_insensitive()
+SKIP_CASE = 'the temp filesystem is case-sensitive: a case alias of a directory cannot exist here'
+
+
 class CopyRootTests(unittest.TestCase):
     """CF-A67 fix 1 (W2c): --copy-root / default root / --avatar / report.copy_search / exit 4. End to end in a temp tree:
     <tmp>/repo/.claude/skills/Some-Skill/scripts/lint_content.py is the lint of a CLEAN checkout (no other project below repo/projects);
@@ -2101,7 +2112,8 @@ class CopyRootTests(unittest.TestCase):
 
     def test_f1_the_candidate_is_compared_by_its_lexical_path_too(self):
         """--asset-dir may be an ancestor of the avatar (here <public>). P's slug folder <public>/P is a link to a folder OUTSIDE it that holds a copy
-        of the avatar: lexically the candidate lies under --asset-dir, really it does not, and it is still never "another video"."""
+        of the avatar: lexically the candidate lies under --asset-dir, really it does not. FIX3 G2 drops such a candidate (it leaves the copy root's
+        tree) before _is_ours sees it, so the end-to-end result is "compared" for either asset dir; the lexical comparison itself is tested on _is_ours."""
         import os
         public = self.tmp / 'main' / 'remotion-composer' / 'public'
         (public / 'Y').mkdir(parents=True)
@@ -2112,12 +2124,164 @@ class CopyRootTests(unittest.TestCase):
         os.symlink(str(outside), str(public / 'P'))                                        # public/P -> /outside/P
         self.non_v4_project('P')
         mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'a.mp4', public))
+        for asset in (public, public / 'Y'):
+            proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'a.mp4', asset))
+            self.assertEqual(1, len(self.copied(rep)))
+            self.assertEqual([], self.skipped(rep))
+        av = lc.copy_search_for(mine, self.script, avatar=public / 'Y' / 'a.mp4', asset_dir=public)['avatar']
+        self.assertTrue(lc._is_ours(public / 'P' / 'a.mp4', av))                           # lexically under <public>; its realpath (/outside/P) is not
+        av = lc.copy_search_for(mine, self.script, avatar=public / 'Y' / 'a.mp4', asset_dir=public / 'Y')['avatar']
+        self.assertFalse(lc._is_ours(public / 'P' / 'a.mp4', av))                          # not under the exact asset dir
+
+    # ---- FIX3: G2 (a corpus candidate must lie inside its copy root's own tree) and G3 (real files, not strings) ----
+
+    def g2_tree(self, link_what):
+        """The copy root's checkout is <tmp>/main (projects/ + remotion-composer/public); our avatar is <tmp>/repo/.../public/Y/a.mp4. Project P is V4
+        with assetDir X / avatarFile a.mp4 and its episode is a copy of ours. link_what: 'X' = main/public/X is a symlink to a folder OUTSIDE main,
+        'public' = main/public itself is. Either target holds a copy of our avatar. -> (our avatar, asset dir)."""
+        import os
+        ours_dir = self.repo / 'remotion-composer' / 'public' / 'Y'
+        ours_dir.mkdir(parents=True)
+        (ours_dir / 'a.mp4').write_bytes(b'A' * 4096)
+        self.put(self.main_projects, 'P', v4=('X', 'a.mp4'))
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        if link_what == 'X':
+            outside = self.tmp / 'task-folder' / 'whatever'
+            outside.mkdir(parents=True)
+            (outside / 'a.mp4').write_bytes(b'A' * 4096)
+            public.mkdir(parents=True)
+            os.symlink(str(outside), str(public / 'X'))
+        else:
+            outside = self.tmp / 'task-folder' / 'public'
+            (outside / 'X').mkdir(parents=True)
+            (outside / 'X' / 'a.mp4').write_bytes(b'A' * 4096)
+            public.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(outside), str(public))
+        return ours_dir / 'a.mp4', ours_dir
+
+    def test_g2_a_symlinked_asset_dir_in_the_copy_roots_public_does_not_identify_the_project(self):
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+        avatar, asset = self.g2_tree('X')
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar, asset))
+        self.assertEqual(1, len(self.copied(rep)), rep['issues'])
+        self.assertEqual([], self.skipped(rep))
+
+    def test_g2_a_symlinked_public_dir_does_not_identify_the_project(self):
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+        avatar, asset = self.g2_tree('public')
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar, asset))
+        self.assertEqual(1, len(self.copied(rep)), rep['issues'])
+        self.assertEqual([], self.skipped(rep))
+
+    def test_g2_rule_a_and_rule_b_candidates_are_contained_too(self):
+        import os
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+        ours_dir = self.repo / 'remotion-composer' / 'public' / 'Y'
+        ours_dir.mkdir(parents=True)
+        (ours_dir / 'a.mp4').write_bytes(b'A' * 4096)
+        self.non_v4_project('P')
+        outside = self.tmp / 'task-folder' / 'P'
+        outside.mkdir(parents=True)
+        (outside / 'a.mp4').write_bytes(b'A' * 4096)
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        public.mkdir(parents=True)
+        os.symlink(str(outside), str(public / 'P'))                                        # rule (a): public/P -> outside the checkout
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(ours_dir / 'a.mp4', ours_dir))
         self.assertEqual(1, len(self.copied(rep)))
         self.assertEqual([], self.skipped(rep))
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'a.mp4', public / 'Y'))   # the exact asset dir: P is another video
-        self.assertEqual([], self.copied(rep))
-        self.assertEqual(['P'], self.skipped(rep))
+        # the unit: the containment is by path components, and a candidate in the checkout tree is kept
+        root = self.main_projects.resolve()
+        inside = self.tmp / 'main' / 'remotion-composer' / 'public' / 'real.mp4'
+        inside.write_bytes(b'A' * 4096)
+        self.assertEqual([str(inside)], [str(c) for c in lc._contained([inside, outside / 'a.mp4'], root)])
+        sibling = self.tmp / 'main2' / 'a.mp4'                                              # 'main2' is not under 'main'
+        sibling.parent.mkdir()
+        sibling.write_bytes(b'A' * 4096)
+        self.assertEqual([], lc._contained([sibling], root))
+
+    def test_g3_a_hardlink_of_our_avatar_in_the_older_projects_asset_dir_does_not_identify_it(self):
+        import os
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+        ours_dir = self.repo / 'remotion-composer' / 'public' / 'Y'
+        ours_dir.mkdir(parents=True)
+        (ours_dir / 'a.mp4').write_bytes(b'A' * 4096)
+        self.put(self.main_projects, 'P', v4=('X', 'a.mp4'))
+        pdir = self.tmp / 'main' / 'remotion-composer' / 'public' / 'X'
+        pdir.mkdir(parents=True)
+        os.link(str(ours_dir / 'a.mp4'), str(pdir / 'a.mp4'))                              # the same file under another name
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(ours_dir / 'a.mp4', ours_dir))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+
+    @unittest.skipUnless(CASE_INSENSITIVE_TMP, SKIP_CASE)
+    def test_g3_a_case_alias_of_our_asset_dir_does_not_identify_the_project(self):
+        """APFS: <public>/x and <public>/X are one directory. P's slug is `x` (rule a), our asset dir is `X`: the strings differ, the directories do not."""
+        mine = self.put(self.repo / 'projects', 'S', v4=('X', 'sub/a.mp4'))
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        (public / 'X' / 'sub').mkdir(parents=True)
+        (public / 'X' / 'sub' / 'a.mp4').write_bytes(b'A' * 4096)                         # our avatar
+        (public / 'X' / 'a.mp4').write_bytes(b'A' * 4096)                                  # a second copy in the same directory
+        self.non_v4_project('x')                                                            # project `x`: rule (a) lists public/x == public/X
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'X' / 'sub' / 'a.mp4', public / 'X'))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+
+    def test_g3_is_ours_unit_inode_and_ancestor_samefile_and_fail_closed(self):
+        import os
+        from unittest import mock
+        d = self.tmp / 'pub'
+        (d / 'Y' / 'sub').mkdir(parents=True)
+        (d / 'Z').mkdir()
+        (d / 'W').mkdir()
+        ours = d / 'Y' / 'sub' / 'a.mp4'
+        ours.write_bytes(b'A' * 10)
+        av = lc.copy_search_for(ours, self.script, avatar=ours, asset_dir=d / 'Y')['avatar']
+        os.link(str(ours), str(d / 'Z' / 'h.mp4'))
+        (d / 'W' / 'other.mp4').write_bytes(b'A' * 10)
+        self.assertTrue(lc._is_ours(d / 'Z' / 'h.mp4', av))                                  # (1) the same inode, another place and name
+        self.assertFalse(lc._is_ours(d / 'W' / 'other.mp4', av))                            # another file in another directory
+        os.symlink(str(d / 'Y'), str(d / 'link-to-Y'))
+        self.assertTrue(lc._is_ours(d / 'link-to-Y' / 'sub' / 'zz.mp4', av))               # (2) an ancestor IS our asset dir (a link to it)
+        with mock.patch.object(lc.os, 'stat', side_effect=OSError('boom')):
+            self.assertTrue(lc._is_ours(d / 'W' / 'other.mp4', av))                         # a stat error: fail closed, never "another video"
+
+    @unittest.skipUnless(CASE_INSENSITIVE_TMP, SKIP_CASE)
+    def test_g3_the_ancestor_samefile_check_covers_both_the_lexical_and_the_real_path(self):
+        import os
+        d = self.tmp / 'pub'
+        (d / 'Y' / 'sub').mkdir(parents=True)
+        ours = d / 'Y' / 'av.mp4'
+        ours.write_bytes(b'A' * 10)
+        av = lc.copy_search_for(ours, self.script, avatar=ours, asset_dir=d / 'Y')['avatar']
+        # only the REAL path's ancestors name our asset dir (spelled `y`): a link into a deeper folder, reached through the alias
+        (d / 'Y' / 'sub' / 'b.mp4').write_bytes(b'A' * 10)
+        os.symlink(str(d / 'y' / 'sub'), str(d / 'Zlink'))
+        self.assertTrue(lc._is_ours(d / 'Zlink' / 'b.mp4', av))
+        # only the LEXICAL path's ancestors name it: <asset dir spelled y>/out is a link to a folder elsewhere
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (outside / 'a.mp4').write_bytes(b'A' * 10)
+        os.symlink(str(outside), str(d / 'Y' / 'out'))
+        self.assertTrue(lc._is_ours(d / 'y' / 'out' / 'a.mp4', av))
+        (self.tmp / 'elsewhere').mkdir()
+        (self.tmp / 'elsewhere' / 'a.mp4').write_bytes(b'A' * 10)
+        self.assertFalse(lc._is_ours(self.tmp / 'elsewhere' / 'a.mp4', av))
+
+    def test_g_legit_redo_in_the_production_topology_is_still_skipped(self):
+        """Our avatar in <repo>/public/Y (a new assetDir), the older project's real copy in <main>/public/X, real files everywhere."""
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+        ours_dir = self.repo / 'remotion-composer' / 'public' / 'Y'
+        ours_dir.mkdir(parents=True)
+        (ours_dir / 'a.mp4').write_bytes(b'A' * 4096)
+        self.put(self.main_projects, 'P', v4=('X', 'a.mp4'))
+        (self.tmp / 'main' / 'remotion-composer' / 'public' / 'X').mkdir(parents=True)
+        (self.tmp / 'main' / 'remotion-composer' / 'public' / 'X' / 'a.mp4').write_bytes(b'A' * 4096)
+        self.non_v4_project('Q')
+        (self.tmp / 'main' / 'remotion-composer' / 'public' / 'Q').mkdir()
+        (self.tmp / 'main' / 'remotion-composer' / 'public' / 'Q' / 'avatar_source.mp4').write_bytes(b'A' * 4096)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(ours_dir / 'a.mp4', ours_dir))
+        self.assertEqual([], self.copied(rep), rep['issues'])
+        self.assertEqual(['P', 'Q'], self.skipped(rep))
 
     def test_f1_avatar_needs_an_asset_dir_that_contains_it_else_exit_2(self):
         mine = self.put(self.repo / 'projects', 'S')
@@ -2161,6 +2325,9 @@ class CopyRootTests(unittest.TestCase):
         mine.write_bytes(b'A' * 10)
         (self.tmp / 'pub' / 'X').mkdir()
         (self.tmp / 'pub' / 'X' / 'a.mp4').write_bytes(b'A' * 10)
+        (self.tmp / 'pub' / 'Y2').mkdir()
+        (self.tmp / 'pub' / 'Y2' / 'a.mp4').write_bytes(b'A' * 10)                                  # must exist: a stat error is the fail-closed side (FIX3 G3)
+        (self.tmp / 'pub' / 'Y' / 'other.mp4').write_bytes(b'A' * 10)
         av = lc.copy_search_for(mine, self.script, avatar=mine, asset_dir=mine.parent)['avatar']
         self.assertTrue(lc._is_ours(mine, av))                                                       # the very file
         self.assertTrue(lc._is_ours(self.tmp / 'pub' / 'Y' / 'sub' / '..' / 'a.mp4', av))            # spelled differently

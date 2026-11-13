@@ -1160,9 +1160,11 @@ def copy_search_for(beats_path, script_file=None, copy_roots=None, avatar=None, 
             st = os.stat(str(avatar))
             if stat.S_ISREG(st.st_mode):
                 given = os.path.abspath(str(avatar))                       # lexical, as given: <public>/<our assetDir>/<avatarFile>
-                real = os.path.realpath(given)                             # OUR avatar may be a link (the task folder's); the hash opens the real file
+                real = os.path.realpath(given)                             # finalize refuses a non-regular avatar (both modes), so this is the file itself;
+                                                                           # realpath only normalises the path a library caller spelled differently
                 own_dir = os.path.abspath(str(asset_dir))
-                av = {'path': real, 'size': st.st_size, 'sha256': None, 'asset_dirs': sorted({own_dir, os.path.realpath(own_dir)})}
+                av = {'path': real, 'size': st.st_size, 'sha256': None, 'id': (st.st_dev, st.st_ino),
+                      'asset_dirs': sorted({own_dir, os.path.realpath(own_dir)})}
         except OSError:
             av = None
     return {'skill_dir': skill_dir, 'projects_dir': roots[0] if roots else None, 'projects_roots': roots, 'own_root': own_root,
@@ -1225,8 +1227,21 @@ def _v4_avatar_ref(project):
     return False                                       # a V4 episode without an avatar name: unknown identity (not the mp4 search)
 
 
+def _contained(candidates, proot):
+    """The candidates whose realpath lies inside the copy root's own tree = realpath(<root>/..), compared by path components (`main2` is not under
+    `main`). A directory symlink in the middle of a candidate's path (<tree>/remotion-composer/public, public/<assetDir>) that leaves the tree makes
+    the identity unknown: the candidate is dropped and its project is searched, not skipped. A snapshot must dereference links (cp -RL / rsync -L)."""
+    tree = Path(os.path.realpath(str(Path(proot).parent))).parts
+    return [c for c in candidates if Path(os.path.realpath(str(c))).parts[:len(tree)] == tree]
+
+
 def _avatar_candidates(project, proot, size, deadline):
-    """The files that may be `project`'s avatar and have our avatar's size (an unknown avatar -> []); the rules are in the module docstring."""
+    """The files that may be `project`'s avatar and have our avatar's size, all inside the copy root's tree (an unknown avatar -> []); the rules
+    are in the module docstring."""
+    return _contained(_avatar_candidates_raw(project, proot, size, deadline), proot)
+
+
+def _avatar_candidates_raw(project, proot, size, deadline):
     ref = _v4_avatar_ref(project)
     if ref is False:
         return []
@@ -1261,7 +1276,8 @@ def _avatar_candidates(project, proot, size, deadline):
 def _is_ours(cand, avatar):
     """A candidate that IS our avatar or lies in OUR asset dir proves nothing about a re-done video: an agent that copies project P's whole episode
     (assetDir and avatarFile included) makes `<public>/<P.assetDir>/<P.avatarFile>` its own avatar, and P's locator resolves to that very file.
-    True when (a) the candidate's realpath is our avatar's realpath, or (b) the candidate, as a lexical path or as a realpath, lies under our asset
+    True when (a) the candidate's realpath is our avatar's realpath, or (c) it has our avatar's (st_dev, st_ino), or (d) an ancestor of it (lexical or
+    real) is our asset dir (same inode, so a case alias counts), or a stat fails (fail closed), or (b) the candidate, as a lexical path or as a realpath, lies under our asset
     dir (--asset-dir, abspath-normalised; compared with the dir itself and its realpath; NOT the dirname of --avatar, which is only a sub-folder of
     it when avatarFile has a path). A legitimate re-do has a NEW assetDir and a COPY of the avatar, so the older project's own file is elsewhere."""
     lex = os.path.abspath(str(cand))
@@ -1272,6 +1288,32 @@ def _is_ours(cand, avatar):
         for c in (lex, real):
             if c == d or c.startswith(d.rstrip(os.sep) + os.sep):
                 return True
+    # the strings above miss a hardlink (same file, another name) and a case alias on a case-insensitive filesystem (public/x == public/X):
+    # compare the real files. A stat error on the candidate or one of its ancestors is the fail-closed side: treat it as ours (not skipped).
+    try:
+        st = os.stat(lex)
+        if avatar.get('id') is not None and (st.st_dev, st.st_ino) == tuple(avatar['id']):               # (1) the same inode as our avatar
+            return True
+        ours = set()
+        for d in avatar.get('asset_dirs') or ():
+            try:
+                ds = os.stat(d)
+                ours.add((ds.st_dev, ds.st_ino))
+            except OSError:
+                continue                                                                              # our asset dir is not there: nothing lies under it
+        if ours:
+            for path in (lex, real):                                                                  # (2) an ancestor IS our asset dir (os.path.samefile)
+                anc = os.path.dirname(path)
+                while True:
+                    a = os.stat(anc)
+                    if (a.st_dev, a.st_ino) in ours:
+                        return True
+                    parent = os.path.dirname(anc)
+                    if parent == anc:
+                        break
+                    anc = parent
+    except OSError:
+        return True
     return False
 
 
