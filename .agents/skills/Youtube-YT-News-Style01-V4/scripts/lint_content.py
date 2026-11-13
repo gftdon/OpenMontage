@@ -35,6 +35,9 @@ Where the copy search looks (CF-A67 fix round 1; `projects/` is git-ignored, so 
                     *.mp4 inside the project folder EXCEPT below a directory named `public`, `render-bundle` or `bundle` (render bundles copy the
                     whole remotion-composer/public, so they hold the avatars of OTHER videos). An avatar that cannot be found / read is an
                     unknown identity and the project is NOT skipped. Hashing counts against the walk budget.
+                    A candidate that IS our avatar (same realpath) or lies under OUR asset dir (--asset-dir, as given and as realpath) never
+                    counts: the project is compared (an episode copied with its assetDir / avatarFile would otherwise skip the project it copied).
+  --asset-dir DIR   our asset dir <public>/<our assetDir>; required with --avatar, whose lexical path must lie under it (else exit 2).
   The report carries copy_search = {roots: [{path, kind: skill|composer-src|projects, files, skipped_same_avatar: [project]}], incomplete}.
 Exit codes: 0 pass, 1 content errors, 2 an input is missing / unreadable (also --avatar), 4 a --copy-root is not a directory.
 
@@ -1112,7 +1115,7 @@ def _regular_size(path):
     return st.st_size if stat.S_ISREG(st.st_mode) else None
 
 
-def copy_search_for(beats_path, script_file=None, copy_roots=None, avatar=None):
+def copy_search_for(beats_path, script_file=None, copy_roots=None, avatar=None, asset_dir=None):
     """The roots the episode-copied check searches for the episode at `beats_path` (see the module docstring): this skill's directory
     (`skill_dir`, found from __file__), <checkout>/remotion-composer/src (`composer_src`, when the skill sits in
     <checkout>/.claude|.agents/skills/<skill>/scripts) and the projects-type roots `projects_roots` (explicit `copy_roots`, or the default
@@ -1121,7 +1124,8 @@ def copy_search_for(beats_path, script_file=None, copy_roots=None, avatar=None):
     project is skipped in that root only), `own_file` the episode file, `own_problem` a reason why the episode is not a regular file inside its
     own project (a symlink somewhere below the root, or not a regular file) or None. The project is taken from the path as given, NOT from
     where a symlink points: a symlinked episode must not make the project it points into "its own". `avatar` = {path, size, sha256} of our
-    avatar mp4 or None (unreadable avatar: no project is skipped)."""
+    avatar mp4 or None (unreadable avatar, or no `asset_dir` to go with it: no project is skipped) plus `asset_dirs`, OUR asset dir
+    (`asset_dir` = <public>/<our assetDir>) as given and as realpath: what no candidate may lie under (_is_ours)."""
     here = Path(script_file or __file__).resolve()
     parents = here.parents
     skill_dir = parents[1]
@@ -1151,11 +1155,14 @@ def copy_search_for(beats_path, script_file=None, copy_roots=None, avatar=None):
         own_root, own_project = None, None
         own_file, problem = results[0][1][1:] if results else _lexical_project(beats_path, None)[1:]
     av = None
-    if avatar:
+    if avatar and asset_dir:
         try:
             st = os.stat(str(avatar))
             if stat.S_ISREG(st.st_mode):
-                av = {'path': os.path.realpath(str(avatar)), 'size': st.st_size, 'sha256': None}     # OUR avatar may be a link (the task folder's); the hash opens the real file
+                given = os.path.abspath(str(avatar))                       # lexical, as given: <public>/<our assetDir>/<avatarFile>
+                real = os.path.realpath(given)                             # OUR avatar may be a link (the task folder's); the hash opens the real file
+                own_dir = os.path.abspath(str(asset_dir))
+                av = {'path': real, 'size': st.st_size, 'sha256': None, 'asset_dirs': sorted({own_dir, os.path.realpath(own_dir)})}
         except OSError:
             av = None
     return {'skill_dir': skill_dir, 'projects_dir': roots[0] if roots else None, 'projects_roots': roots, 'own_root': own_root,
@@ -1251,9 +1258,29 @@ def _avatar_candidates(project, proot, size, deadline):
     return found
 
 
+def _is_ours(cand, avatar):
+    """A candidate that IS our avatar or lies in OUR asset dir proves nothing about a re-done video: an agent that copies project P's whole episode
+    (assetDir and avatarFile included) makes `<public>/<P.assetDir>/<P.avatarFile>` its own avatar, and P's locator resolves to that very file.
+    True when (a) the candidate's realpath is our avatar's realpath, or (b) the candidate, as a lexical path or as a realpath, lies under our asset
+    dir (--asset-dir, abspath-normalised; compared with the dir itself and its realpath; NOT the dirname of --avatar, which is only a sub-folder of
+    it when avatarFile has a path). A legitimate re-do has a NEW assetDir and a COPY of the avatar, so the older project's own file is elsewhere."""
+    lex = os.path.abspath(str(cand))
+    real = os.path.realpath(lex)
+    if real == avatar['path']:
+        return True
+    for d in avatar.get('asset_dirs') or ():
+        for c in (lex, real):
+            if c == d or c.startswith(d.rstrip(os.sep) + os.sep):
+                return True
+    return False
+
+
 def _same_avatar_project(project, proot, avatar, deadline):
-    """True when one of the project's avatar candidates has the same sha256 as ours. Unknown / unreadable -> False (the project is searched)."""
+    """True when one of the project's avatar candidates has the same sha256 as ours (and is not ours, see _is_ours). Unknown / unreadable -> False
+    (the project is searched)."""
     for cand in _avatar_candidates(project, proot, avatar['size'], deadline):
+        if _is_ours(cand, avatar):
+            continue
         if avatar.get('sha256') is None:
             avatar['sha256'] = _file_digest(avatar['path'], deadline) or False
         if avatar['sha256'] is False:
@@ -1556,6 +1583,8 @@ def main(argv=None):
                     'default: the parent of the episode\'s own project. Not a directory -> exit 4')
     ap.add_argument('--avatar', metavar='FILE', help='our avatar mp4: in --copy-root projects a project with the same avatar (sha256) is not compared '
                     '(re-doing the same video is allowed)')
+    ap.add_argument('--asset-dir', metavar='DIR', help='our asset dir <public>/<our assetDir>: required with --avatar (the lexical --avatar path must lie '
+                    'under it); nothing under it, and not our avatar itself, ever identifies another video')
     ap.add_argument('--report', required=True)
     a = ap.parse_args(argv)
     missing = [r for r in a.copy_root if not Path(r).is_dir()]
@@ -1604,8 +1633,14 @@ def main(argv=None):
                 schema_issues = [_issue('schema-validator-missing', 'error', None, None, str(validator), 'episode_schema.mjs not found; structural validation did not run')]
         elif not a.legacy:
             schema_issues = [_issue('schema', 'error', None, None, None, 'episode is not a V4 object JSON (%s); legacy formats need --legacy' % ep['format'])]
-        if a.avatar and not Path(a.avatar).is_file():
-            raise ed.EpisodeFormatError('--avatar %s is not a readable file' % a.avatar)
+        if a.avatar:
+            if not Path(a.avatar).is_file():
+                raise ed.EpisodeFormatError('--avatar %s is not a readable file' % a.avatar)
+            if not a.asset_dir or not Path(a.asset_dir).is_dir():
+                raise ed.EpisodeFormatError('--avatar needs --asset-dir <public>/<assetDir> (an existing directory): %s' % (a.asset_dir or 'not given'))
+            own_dir = os.path.abspath(a.asset_dir)
+            if not os.path.abspath(a.avatar).startswith(own_dir.rstrip(os.sep) + os.sep):
+                raise ed.EpisodeFormatError('--avatar %s does not lie under --asset-dir %s' % (a.avatar, a.asset_dir))
         hashes = {p: _sha(p) for p in paths.values()}
     except (ed.EpisodeFormatError, OSError, ValueError) as e:
         report = {'schema': SCHEMA, 'version': VERSION, 'pass': False,
@@ -1616,7 +1651,7 @@ def main(argv=None):
     inp = Inputs(script_lines, tokens, line_starts, cuts, source, relevance, relevance_given=bool(a.relevance),
                  evidence=evidence, frames=frames, timed=timed, chapters=chapters, legacy=a.legacy,
                  frames_given=bool(a.frames_report), frame_counts=frame_counts,
-                 copy_search=copy_search_for(a.beats, copy_roots=a.copy_root, avatar=a.avatar))
+                 copy_search=copy_search_for(a.beats, copy_roots=a.copy_root, avatar=a.avatar, asset_dir=a.asset_dir))
     issues, metrics = lint_content(ep, inp, thresholds)
     issues = schema_issues + issues
     metrics['schema'] = schema_summary

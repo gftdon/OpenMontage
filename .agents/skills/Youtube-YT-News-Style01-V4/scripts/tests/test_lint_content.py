@@ -1921,7 +1921,7 @@ class CopyRootTests(unittest.TestCase):
                 mine, avatar, other = self.avatar_case(kind)
                 proc, rep = self.lint(mine, '--copy-root', self.main_projects)                      # without --avatar the same video is a copy
                 self.assertEqual(1, len(self.copied(rep)))
-                proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+                proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
                 self.assertEqual([], self.copied(rep), rep['issues'])
                 projects = [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]
                 self.assertEqual(['V1'], projects['skipped_same_avatar'])
@@ -1936,9 +1936,14 @@ class CopyRootTests(unittest.TestCase):
                 shutil.rmtree(self.main_projects.parent, ignore_errors=True)
                 self.main_projects.mkdir(parents=True)
                 mine, avatar, other = self.avatar_case(kind, content=b'B' * 4096)                   # same size, other bytes: another video
-                proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+                proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
                 self.assertEqual(1, len(self.copied(rep)))
                 self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
+
+    @staticmethod
+    def av(avatar, asset_dir=None):
+        """['--avatar', FILE, '--asset-dir', DIR]: DIR = the folder of FILE as given unless the test names another."""
+        return ['--avatar', avatar, '--asset-dir', asset_dir or Path(avatar).parent]
 
     def non_v4_project(self, name='V1'):
         """A project of ANOTHER video in the main checkout whose episode is a copy of the synthetic one but not a V4 episode, and no mp4 at all."""
@@ -1958,7 +1963,7 @@ class CopyRootTests(unittest.TestCase):
         for rel in ('renders/render-bundle/public/x', 'qc/layout/runs/r/bundle/public/x'):
             (project / rel).mkdir(parents=True)
             (project / rel / 'avatar_source.mp4').write_bytes(b'A' * 4096)
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual(1, len(self.copied(rep)))                                                  # still compared, so the copy is found
         self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
         # each of the three directory names alone is enough to exclude a path (anywhere below the project)
@@ -1967,14 +1972,14 @@ class CopyRootTests(unittest.TestCase):
                 lone = self.non_v4_project('V3-' + name)
                 (lone / 'deep' / name / 'x').mkdir(parents=True)
                 (lone / 'deep' / name / 'x' / 'a.mp4').write_bytes(b'A' * 4096)
-                search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar)
+                search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar, asset_dir=Path(avatar).parent)
                 self.assertFalse(lc._same_avatar_project(lone, self.main_projects, search['avatar'], None))
                 import shutil
                 shutil.rmtree(lone)
         # ...while an mp4 in an ordinary folder of the project still identifies it (rule b)
         (project / 'assets').mkdir()
         (project / 'assets' / 'avatar.mp4').write_bytes(b'A' * 4096)
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual([], self.copied(rep))
         self.assertEqual(['V1'], [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar'])
 
@@ -1987,16 +1992,16 @@ class CopyRootTests(unittest.TestCase):
         public = self.tmp / 'main' / 'remotion-composer' / 'public'
         (public / 'v1-slug').mkdir(parents=True)
         (public / 'v1-slug' / 'avatar_source.mp4').write_bytes(b'A' * 4096)
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual([], self.copied(rep), rep['issues'])
         self.assertEqual(['v1-slug'], [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar'])
         (public / 'v1-slug' / 'avatar_source.mp4').write_bytes(b'B' * 4096)                        # the same size, another video
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual(1, len(self.copied(rep)))
         (public / 'v1-slug' / 'avatar_source.mp4').unlink()                                         # our avatar under ANOTHER slug does not count
         (public / 'other-slug').mkdir()
         (public / 'other-slug' / 'avatar_source.mp4').write_bytes(b'A' * 4096)
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual(1, len(self.copied(rep)))
         self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
 
@@ -2007,17 +2012,166 @@ class CopyRootTests(unittest.TestCase):
         link = self.tmp / 'in' / 'avatar.mp4'
         link.parent.mkdir()
         os.symlink(str(avatar), str(link))
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', link)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(link))
         self.assertEqual([], self.copied(rep), rep['issues'])
         self.assertEqual(['V1'], [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar'])
         (self.main_projects / 'V1' / 'assets' / 'avatar.mp4').write_bytes(b'B' * 4096)               # another video: the link changes nothing
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', link)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(link))
         self.assertEqual(1, len(self.copied(rep)))
+
+    # ---- F1: the same-avatar skip cannot be forged by copying the older project's assetDir / avatarFile ----
+
+    def forge_tree(self, p_kind='v4'):
+        """P = an older project in the main checkout (<main>/projects/P) with its avatar at <main>/remotion-composer/public/X/a.mp4.
+        -> (public dir, P's avatar file). p_kind 'v4': P's episode names assetDir X / avatarFile a.mp4; 'slug': P is not V4 and X is its slug."""
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        (public / 'X').mkdir(parents=True)
+        (public / 'X' / 'a.mp4').write_bytes(b'A' * 4096)
+        if p_kind == 'v4':
+            self.put(self.main_projects, 'P', v4=('X', 'a.mp4'))
+        else:
+            self.non_v4_project('X')
+        return public, public / 'X' / 'a.mp4'
+
+    def skipped(self, rep):
+        return [r for r in rep['copy_search']['roots'] if r['kind'] == 'projects'][0]['skipped_same_avatar']
+
+    def test_f1_i_a_copied_episode_with_the_older_projects_asset_dir_does_not_skip_that_project(self):
+        public, p_avatar = self.forge_tree('v4')
+        mine = self.put(self.repo / 'projects', 'S', v4=('X', 'a.mp4'))                 # S = P's episode, assetDir / avatarFile included
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(p_avatar))          # finalize: <public>/<assetDir>/<avatarFile>
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertIn('/P/', self.copied(rep)[0]['detail'])
+        self.assertEqual([], self.skipped(rep))
+        # (b) alone: our avatar is a byte copy beside P's file, in OUR asset dir (the same directory): still not another video
+        (public / 'X' / 'b.mp4').write_bytes(b'A' * 4096)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'X' / 'b.mp4'))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+        # (a) alone: our avatar is a LINK from another directory to P's file: the realpaths are equal
+        import os
+        link = self.tmp / 'task' / 'in' / 'avatar.mp4'
+        link.parent.mkdir(parents=True)
+        os.symlink(str(p_avatar), str(link))
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(link))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+
+    def test_f1_ii_a_copied_slug_as_asset_dir_does_not_skip_the_project_with_that_slug(self):
+        public, p_avatar = self.forge_tree('slug')                                         # P = X, a non-V4 project; rule (a) finds public/X/a.mp4
+        mine = self.put(self.repo / 'projects', 'S', v4=('X', 'a.mp4'))                 # S's assetDir = P's slug
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(p_avatar))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+        (public / 'X' / 'b.mp4').write_bytes(b'A' * 4096)                                  # our file beside it, same asset dir
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'X' / 'b.mp4'))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+
+    def test_f1_iv_an_avatar_file_with_a_sub_folder_does_not_hide_the_older_project_in_the_asset_dir_top(self):
+        """avatarFile 'x/a.mp4' makes dirname(--avatar) = <public>/X/x, a sub-folder of OUR asset dir <public>/X; P's own file at <public>/X/a.mp4 is
+        found by rule (a) and must still be refused, because it lies under --asset-dir."""
+        public, p_avatar = self.forge_tree('slug')                                         # P = X, public/X/a.mp4
+        (public / 'X' / 'x').mkdir()
+        ours = public / 'X' / 'x' / 'a.mp4'
+        ours.write_bytes(b'A' * 4096)                                                      # our avatar: a copy in a sub-folder of the asset dir
+        mine = self.put(self.repo / 'projects', 'S', v4=('X', 'x/a.mp4'))
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(ours, public / 'X'))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+        # the old derivation (dirname of --avatar) would have skipped P: show that the explicit --asset-dir is what decides
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(ours, public / 'X' / 'x'))
+        self.assertEqual([], self.copied(rep))
+        self.assertEqual(['X'], self.skipped(rep))
+
+    def test_f1_the_candidate_is_compared_by_its_realpath_too(self):
+        """P's slug folder is a link to OUR asset dir <public>/Y: lexically P's file <public>/P/a.mp4 is outside it, really it is <public>/Y/a.mp4,
+        a second copy in our asset dir. (Our avatar is another file, so the same-realpath rule cannot be what refuses it.)"""
+        import os
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        (public / 'Y' / 'sub').mkdir(parents=True)
+        (public / 'Y' / 'sub' / 'a.mp4').write_bytes(b'A' * 4096)                         # our avatar: avatarFile 'sub/a.mp4'
+        (public / 'Y' / 'a.mp4').write_bytes(b'A' * 4096)                                  # another copy in the asset dir
+        os.symlink(str(public / 'Y'), str(public / 'P'))                                   # public/P -> public/Y
+        self.non_v4_project('P')
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'sub/a.mp4'))
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'sub' / 'a.mp4', public / 'Y'))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+
+    def test_f1_the_candidate_is_compared_by_its_lexical_path_too(self):
+        """--asset-dir may be an ancestor of the avatar (here <public>). P's slug folder <public>/P is a link to a folder OUTSIDE it that holds a copy
+        of the avatar: lexically the candidate lies under --asset-dir, really it does not, and it is still never "another video"."""
+        import os
+        public = self.tmp / 'main' / 'remotion-composer' / 'public'
+        (public / 'Y').mkdir(parents=True)
+        (public / 'Y' / 'a.mp4').write_bytes(b'A' * 4096)                                  # our avatar
+        outside = self.tmp / 'outside' / 'P'
+        outside.mkdir(parents=True)
+        (outside / 'a.mp4').write_bytes(b'A' * 4096)
+        os.symlink(str(outside), str(public / 'P'))                                        # public/P -> /outside/P
+        self.non_v4_project('P')
+        mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'a.mp4', public))
+        self.assertEqual(1, len(self.copied(rep)))
+        self.assertEqual([], self.skipped(rep))
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'a.mp4', public / 'Y'))   # the exact asset dir: P is another video
+        self.assertEqual([], self.copied(rep))
+        self.assertEqual(['P'], self.skipped(rep))
+
+    def test_f1_avatar_needs_an_asset_dir_that_contains_it_else_exit_2(self):
+        mine = self.put(self.repo / 'projects', 'S')
+        avatar = self.tmp / 'pub' / 'Y' / 'a.mp4'
+        avatar.parent.mkdir(parents=True)
+        avatar.write_bytes(b'A' * 10)
+        other = self.tmp / 'pub' / 'Z'
+        other.mkdir()
+        for extra in (['--avatar', avatar],                                                 # no --asset-dir
+                      ['--avatar', avatar, '--asset-dir', other],                          # the avatar is not under it
+                      ['--avatar', avatar, '--asset-dir', self.tmp / 'pub' / 'Y' / 'a.mp4'],   # not a directory
+                      ['--avatar', avatar, '--asset-dir', self.tmp / 'pub' / 'Y2']):
+            proc, rep = self.lint(mine, *extra)
+            self.assertEqual(2, proc.returncode, extra)
+            self.assertEqual('input', rep['issues'][0]['code'])
+            self.assertIn('--asset-dir', rep['issues'][0]['detail'])
+        proc, rep = self.lint(mine, '--asset-dir', other)                                  # --asset-dir alone is harmless
+        self.assertNotEqual(2, proc.returncode)
+        proc, rep = self.lint(mine, *self.av(avatar, self.tmp / 'pub'))                    # any directory above the avatar is fine
+        self.assertNotEqual(2, proc.returncode)
+        self.assertIsNone(lc.copy_search_for(mine, self.script, avatar=avatar)['avatar'])  # the library call without asset_dir: nothing can be skipped
+
+    def test_f1_iii_a_legitimate_redo_with_a_new_asset_dir_and_a_copied_avatar_still_skips_the_older_project(self):
+        for kind in ('v4', 'slug'):
+            with self.subTest(kind):
+                import shutil
+                shutil.rmtree(self.tmp / 'main', ignore_errors=True)
+                shutil.rmtree(self.repo / 'projects', ignore_errors=True)
+                self.main_projects.mkdir(parents=True)
+                public, p_avatar = self.forge_tree(kind)
+                (public / 'Y').mkdir()
+                (public / 'Y' / 'a.mp4').write_bytes(p_avatar.read_bytes())                  # a COPY under a NEW assetDir
+                mine = self.put(self.repo / 'projects', 'S', v4=('Y', 'a.mp4'))
+                proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(public / 'Y' / 'a.mp4'))
+                self.assertEqual([], self.copied(rep), rep['issues'])
+                self.assertEqual(['P' if kind == 'v4' else 'X'], self.skipped(rep))
+
+    def test_f1_is_ours_unit(self):
+        mine = self.tmp / 'pub' / 'Y' / 'a.mp4'
+        mine.parent.mkdir(parents=True)
+        mine.write_bytes(b'A' * 10)
+        (self.tmp / 'pub' / 'X').mkdir()
+        (self.tmp / 'pub' / 'X' / 'a.mp4').write_bytes(b'A' * 10)
+        av = lc.copy_search_for(mine, self.script, avatar=mine, asset_dir=mine.parent)['avatar']
+        self.assertTrue(lc._is_ours(mine, av))                                                       # the very file
+        self.assertTrue(lc._is_ours(self.tmp / 'pub' / 'Y' / 'sub' / '..' / 'a.mp4', av))            # spelled differently
+        self.assertTrue(lc._is_ours(self.tmp / 'pub' / 'Y' / 'other.mp4', av))                       # under our asset dir
+        self.assertFalse(lc._is_ours(self.tmp / 'pub' / 'X' / 'a.mp4', av))                         # another asset dir
+        self.assertFalse(lc._is_ours(self.tmp / 'pub' / 'Y2' / 'a.mp4', av))                         # a prefix of the name is not "under"
 
     def test_only_a_file_of_the_same_size_is_hashed(self):
         from unittest import mock
         mine, avatar, other = self.avatar_case('mp4', content=b'B' * 100)                           # another size; broll.mp4 has yet another
-        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar)
+        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar, asset_dir=Path(avatar).parent)
         with mock.patch.object(lc, '_file_digest', wraps=lc._file_digest) as digest:
             self.assertFalse(lc._same_avatar_project(self.main_projects / 'V1', self.main_projects, search['avatar'], None))
         digest.assert_not_called()
@@ -2030,7 +2184,7 @@ class CopyRootTests(unittest.TestCase):
         mine, avatar, other = self.avatar_case('v4')
         import shutil
         shutil.rmtree(self.tmp / 'main' / 'remotion-composer')                                      # the other project's avatar file is not there
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual(1, len(self.copied(rep)))
         # a V4 episode that does not name an avatar file, and a project without any mp4
         data = json.loads(other.read_text())
@@ -2038,10 +2192,10 @@ class CopyRootTests(unittest.TestCase):
         other.write_text(json.dumps(data))
         (self.main_projects / 'V1' / 'assets').mkdir()
         (self.main_projects / 'V1' / 'assets' / 'avatar.mp4').write_bytes(b'A' * 4096)             # an mp4 exists, but a V4 episode is "otherwise"-free
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         self.assertEqual(1, len(self.copied(rep)))
         self.assertEqual([], [r for r in rep['copy_search']['roots'] if r['skipped_same_avatar']])
-        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=self.tmp / 'no-such-avatar.mp4')
+        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=self.tmp / 'no-such-avatar.mp4', asset_dir=self.tmp)
         self.assertIsNone(search['avatar'])                                                         # our own avatar unreadable: nothing can be skipped
         issues, metrics = [], {}
         lc.check_copy(ed.load_episode(self.SYN, vo_end=96.0), search, issues, metrics)
@@ -2055,7 +2209,7 @@ class CopyRootTests(unittest.TestCase):
         (skill / 'fixtures' / 'avatar.mp4').write_bytes(avatar.read_bytes())                        # the very same avatar inside the skill dir
         (self.repo / 'remotion-composer' / 'src').mkdir(parents=True, exist_ok=True)
         (self.repo / 'remotion-composer' / 'src' / 'sample.json').write_bytes(self.SYN.read_bytes())
-        proc, rep = self.lint(mine, '--copy-root', self.main_projects, '--avatar', avatar)
+        proc, rep = self.lint(mine, '--copy-root', self.main_projects, *self.av(avatar))
         hits = self.copied(rep)
         self.assertEqual(1, len(hits))
         self.assertTrue(hits[0]['detail'].startswith('this episode is a copy of '))
@@ -2067,7 +2221,7 @@ class CopyRootTests(unittest.TestCase):
 
     def test_hashing_counts_against_the_walk_budget(self):
         mine, avatar, other = self.avatar_case('mp4')
-        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar)
+        search = lc.copy_search_for(mine, self.script, copy_roots=[self.main_projects], avatar=avatar, asset_dir=Path(avatar).parent)
         past = __import__('time').monotonic() - 1.0
         with self.assertRaises(lc._OutOfTime):
             lc._same_avatar_project(self.main_projects / 'V1', self.main_projects, search['avatar'], past)
