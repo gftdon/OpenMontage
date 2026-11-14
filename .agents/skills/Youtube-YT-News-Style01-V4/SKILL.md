@@ -37,7 +37,7 @@ description: Use when producing or repairing a Thai 16:9 YouTube AI/technology n
 
 **2. Script + word timing + captions** (ข้อความมาจาก script ต้นฉบับ; SRT ใช้แบ่งบรรทัดเท่านั้น ไม่ใช้เวลา)
 ```
-$PY "$SKILL/scripts/srt_to_script.py" --srt $P/assets/avatar.srt --script $P/artifacts/source_script.txt --strict --out $P/artifacts/script.txt   # exit 1 = เสียงพากย์ต่างจาก script → ขั้นล้ม
+$PY "$SKILL/scripts/srt_to_script.py" --srt $P/assets/avatar.srt --script $P/artifacts/source_script.txt --strict --out $P/artifacts/script.txt   # exit 1 = เสียงพากย์ต่างจาก script → ขั้นล้ม; exit 4 = เครื่องมือขาด (node/pythainlp/thai_junction.py) → ขั้นล้ม ห้ามติดตั้ง; ขอบ cue ที่ตัดกลางคำ (หรือทำให้ ๆ ขึ้นต้นบรรทัด) ถูกรวมจาก source ให้เองอัตโนมัติ
 bash "$SKILL/scripts/word_timing.sh" remotion-composer/public/<assetDir>/avatar_source.mp4 $P/artifacts/script.txt $P/artifacts/word_timing   # exit 0 = ได้ raw_asr.json + caption_pages.json (+ .log/.job.json/.done.json); exit 75 = ยังรันอยู่ → เรียกซ้ำด้วยอาร์กิวเมนต์เดิมจน exit ≠ 75 (คลิป 11 นาทีเครื่องว่างวัดจริง ≈ 2.5–3 นาที จบรอบเดียว; แย่งกับงาน GPU อื่นได้ถึง ≈ 8.5 นาที = หลายรอบ 75); exit 5 = timing ยังบกพร่องหลัง repair ladder ตายตัว (R0 → R1) ได้ผลเดิมทุกครั้ง → ขั้นล้ม: รายงานบรรทัด DEFECT + `word_timing.failed.json` ห้ามรันซ้ำ/ปรับค่า/แก้ไฟล์; exit 4 = venv/model/pin/ffmpeg ผิด (ไม่ติดตั้ง ไม่ดาวน์โหลด) → ขั้นล้ม; exit 2 = อินพุตผิด; exit อื่น = ขั้นล้ม
 $PY "$SKILL/scripts/words_by_line.py" $P/artifacts/word_timing/caption_pages.json $P/artifacts/script.txt > $P/artifacts/words_by_line.txt
 $PY "$SKILL/scripts/line_starts.py" --pages $P/artifacts/word_timing/caption_pages.json --script $P/artifacts/script.txt --out $P/artifacts/line_starts.json
@@ -47,7 +47,7 @@ $PY -c "import json,sys;json.dump({'endTime':round(float(sys.argv[1]),3)},open(s
 node "$SKILL/scripts/caption_join.mjs" --tokens $P/artifacts/word_timing/caption_pages.json --script $P/artifacts/script.txt --options $P/artifacts/caption-options.json --out $P/artifacts/caption-joined.json
 $PY "$SKILL/scripts/lint_captions.py" --script $P/artifacts/script.txt --pages $P/artifacts/caption-joined.json --source-script $P/artifacts/source_script.txt --report $P/qc/captions-lint.json
 ```
-ตรวจ: ทุกคำสั่งออก 0 (`timing_check` = 0 พิสูจน์ว่า timing วัดจากเสียงนี้ ไม่ใช่พิมพ์มือ; `lint_captions` = 0 คือไม่มีคำไทยถูกตัดกลางคำ — `คร่าว ๆ` / `มาก ๆ บน` และช่องว่างคั่นวลีที่ผู้เขียนใส่ถูกต้อง แต่ ๆ ที่ขึ้นต้นบรรทัด/หน้าคือล้ม; ล้ม = ขั้นล้ม ไม่แก้ script/captions) ล้มข้อใด → รันขั้นต้นน้ำใหม่หรือให้ขั้นล้ม ห้ามแก้ตัวเลขเวลา (`word_timing.sh` exit 5 ไม่ใช่ต้นน้ำที่รันซ้ำแก้ได้ → ให้ขั้นล้ม)
+ตรวจ: ทุกคำสั่งออก 0 (`timing_check` = 0 พิสูจน์ว่า timing วัดจากเสียงนี้ ไม่ใช่พิมพ์มือ; `lint_captions` = 0 คือไม่มีคำไทยถูกตัดกลางคำ (ตรวจรอยต่อบรรทัดด้วย ทั้งระหว่างบรรทัด script และระหว่างหน้า) — `คร่าว ๆ` / `มาก ๆ บน` และช่องว่างคั่นวลีที่ผู้เขียนใส่ถูกต้อง แต่ ๆ ที่ขึ้นต้นบรรทัด/หน้าคือล้ม; ล้ม = ขั้นล้ม ไม่แก้ script/captions) ล้มข้อใด → รันขั้นต้นน้ำใหม่หรือให้ขั้นล้ม ห้ามแก้ตัวเลขเวลา (`word_timing.sh` exit 5 ไม่ใช่ต้นน้ำที่รันซ้ำแก้ได้ → ให้ขั้นล้ม)
 
 **3. วางแผนภาพทีละบรรทัด script** — source ก่อน: จาก `survey_notes.md` + transcript หาว่า "ต้นฉบับแสดงสิ่งที่บรรทัดนี้พูดถึงตรงไหนของจอ" แล้วตัดให้สิ่งนั้นอยู่บนจอทั้ง beat
 `bash "$SKILL/scripts/cut_clips.sh" $P/assets/ytsource/source.mp4 $P/assets/ytsource/clips yt_<topic>:<start>:<end> ...` → `cp $P/assets/ytsource/clips/_cuts.json $P/artifacts/_cuts.json` → copy `yt_*.mp4` ไป `remotion-composer/public/<assetDir>/broll/`
