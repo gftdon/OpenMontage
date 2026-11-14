@@ -161,7 +161,7 @@ def passwd_home():
 # Homebrew / /usr/local.  ffmpeg: the word-timing chain's own list (the same binary everywhere).  The resolved realpath + version
 # of each is recorded in check.json / the receipt (`tools`).
 TOOL_CANDIDATES = {
-    'node': (passwd_home() + '/.local/bin/node', '/opt/homebrew/bin/node', '/usr/local/bin/node'),
+    'node': (passwd_home() + '/.local/bin/node', '/opt/homebrew/bin/node', '/usr/local/bin/node'),   # == thai_junction.NODE_CANDIDATES (test_finalize asserts it)
     'ffmpeg': ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'),
     'ffprobe': ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe', '/usr/bin/ffprobe'),
     'git': ('/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'),
@@ -526,11 +526,11 @@ GATES = [
          inputs=['episode', 'script', 'words', 'line_starts', 'cuts', 'captions'], needs=[],
          report='{reports}/content.json', limit=60, required=True,
          after=['frames'], dep_args=[['--frames-report', 'frames']], copy_args=True, validate='copy_search'),
-    dict(name='captions', interp='python', script='lint_captions.py',
+    dict(name='captions', interp='python', script='lint_captions.py', tools=('node',),   # node: the ICU oracle of the Thai junction rule
          args=['--script', '{script}', '--pages', '{captions}', '--source-script', '{source_script}', '--report', '{report}'],
          optional_args=[], inputs=['script', 'captions', 'source_script'],
          needs=[], report='{reports}/captions.json', limit=60, required=True),
-    dict(name='script', runner='script', scripts=['srt_to_script.py'], optional_args=[],
+    dict(name='script', runner='script', scripts=['srt_to_script.py'], optional_args=[], tools=('node',),
          inputs=['srt', 'source_script', 'script'], needs=[], report='{reports}/script.json', limit=30, required=True),
     dict(name='derived', runner='derived', scripts=['words_by_line.py', 'line_starts.py', 'caption_join.mjs'], optional_args=[],
          inputs=['word_pages', 'caption_options', 'script', 'words', 'line_starts', 'captions'],
@@ -1261,7 +1261,7 @@ def interps_needed(gate):
     """The tool each gate file runs under (.py: this python, .swift: swift, anything else: node) + the tools a runner calls."""
     scripts = gate_scripts(gate)
     out = {'python' if s.endswith('.py') else 'swift' if s.endswith('.swift') else 'node' for s in scripts}
-    return out | set(RUNNER_TOOLS.get(gate.get('runner'), ()))
+    return out | set(RUNNER_TOOLS.get(gate.get('runner'), ())) | set(gate.get('tools', ()))
 
 
 def exe_for(ctx, script_name):
@@ -1300,6 +1300,31 @@ def finish_runner(gate, ctx, base, report, data, fail_reason, issues=None, cls=1
     return record(gate, STATUS_BY_CLASS[cls], cls, fail_reason, issues=issues, **b)
 
 
+def node_mismatch_hint(ctx):
+    """A MESSAGE for a byte-mismatch reason of the `script` / `derived` gates (never a verdict, never a pass path): the node the
+    gates ran under and, when `node` on the caller's $PATH is a different binary, that one too. srt_to_script.py / lint_captions.py
+    take node from the fixed list (thai_junction.NODE_CANDIDATES) themselves; a bare `node` (SKILL step 2: caption_join.mjs) follows
+    the caller's $PATH, and a different ICU can segment Thai differently."""
+    pinned = ctx.tools.get('node')
+    if not pinned:
+        return ''
+
+    def ident(path):
+        try:
+            r = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+                               env={'HOME': passwd_home(), 'PATH': '/usr/bin:/bin', 'LANG': GATE_LANG})
+            v = (r.stdout or r.stderr).strip().splitlines()[0][:60]
+        except (OSError, subprocess.TimeoutExpired, IndexError):
+            v = 'version unknown'
+        return '%s (%s)' % (path, v)
+
+    msg = ' [node of the gates: %s' % ident(pinned)
+    other = shutil.which('node')
+    if other and os.path.realpath(other) != pinned:
+        msg += '; the node on your $PATH is a different binary: %s' % ident(os.path.realpath(other))
+    return msg + '; run SKILL step 2 (caption_join.mjs) with the gate node %s, not a bare `node`]' % pinned
+
+
 def runner_script(gate, ctx, base, report, limit, env):
     """srt_to_script.py --strict re-run; the result must be byte-identical to artifacts/script.txt."""
     P = ctx.paths
@@ -1322,6 +1347,8 @@ def runner_script(gate, ctx, base, report, limit, env):
             'scriptSha256': ctx.hash(P['script'])}
     msg = ('%s is not what srt_to_script.py --strict rebuilds from %s + %s (see %s): regenerate it with that command, never '
            'edit it by hand' % (ctx.rel(P['script']), ctx.rel(P['srt']), ctx.rel(P['source_script']), ctx.rel(out)))
+    if not equal:
+        msg += node_mismatch_hint(ctx)
     return finish_runner(gate, ctx, dict(base, seconds=res['seconds'], code=0), report, data, msg)
 
 
@@ -1394,7 +1421,8 @@ def runner_derived(gate, ctx, base, report, limit, env):
     data['pass'] = not mism
     if mism:
         data['problems'] = mism
-    return finish_runner(gate, ctx, dict(base, seconds=total, code=0), report, data, '; '.join(mism), issues=mism)
+    return finish_runner(gate, ctx, dict(base, seconds=total, code=0), report, data,
+                         '; '.join(mism) + (node_mismatch_hint(ctx) if mism else ''), issues=mism)
 
 
 _MEAN_VOLUME = re.compile(r'mean_volume:\s*(-?inf|-?\d+(?:\.\d+)?)\s*dB')

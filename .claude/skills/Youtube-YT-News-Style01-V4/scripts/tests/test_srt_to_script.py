@@ -190,6 +190,38 @@ class CueMergeTests(unittest.TestCase):
         self.assertEqual(''.join(lines).replace(' ', ''), 'เริ่มจากไอเดียคร่าวๆแล้วระบบจะช่วย')
 
 
+class CueMergeCfTests(unittest.TestCase):
+    """CF-A67 fix6 Fix 1: the merge judges a cue boundary with the SAME range helper as the lint."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    CF = '\u200b'
+
+    def test_cf_at_a_cue_start_with_the_source_space_after_it_is_not_merged_and_lints_clean(self):
+        cf = self.CF
+        src = 'ซึ่งบอกว่า' + cf + ' การขับรถ\n'
+        lines, warning = self.m.align_to_script(self.m.parse(_srt('ซึ่งบอกว่า', cf + 'การขับรถ')), src)
+        self.assertIsNone(warning)
+        self.assertEqual(lines, ['ซึ่งบอกว่า', cf + ' การขับรถ'])     # source whitespace sits INSIDE the run: rule 4, no merge
+        spec = importlib.util.spec_from_file_location('lint_captions_t', SCRIPTS / 'lint_captions.py')
+        lint = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lint)
+        self.assertEqual(lint.lint_script(lines, src), [])          # merge and lint judge the same thing
+
+    def test_cf_at_a_cue_end_with_the_source_space_after_it_is_not_merged(self):
+        cf = self.CF
+        src = 'ซึ่งบอกว่า' + cf + ' การขับรถ\n'
+        lines, _ = self.m.align_to_script(self.m.parse(_srt('ซึ่งบอกว่า' + cf, 'การขับรถ')), src)
+        self.assertEqual(lines, ['ซึ่งบอกว่า' + cf, 'การขับรถ'])
+
+    def test_cf_at_a_cue_boundary_without_any_source_whitespace_is_merged(self):
+        cf = self.CF
+        src = 'ซึ่งบอกว่า' + cf + 'การขับรถ\n'
+        lines, _ = self.m.align_to_script(self.m.parse(_srt('ซึ่งบอกว่า', cf + 'การขับรถ')), src)
+        self.assertEqual(lines, ['ซึ่งบอกว่า' + cf + 'การขับรถ'])
+
+
 class CueMergeCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -219,8 +251,7 @@ class CueMergeCliTests(unittest.TestCase):
 
     def test_judged_junction_without_tools_is_exit_4(self):
         for name, env in (('simulated node', {'LINT_CAPTIONS_SIMULATE_MISSING': 'node'}),
-                          ('simulated pythainlp', {'LINT_CAPTIONS_SIMULATE_MISSING': 'pythainlp'}),
-                          ('no node on PATH', {'PATH': '/usr/bin:/bin'})):
+                          ('simulated pythainlp', {'LINT_CAPTIONS_SIMULATE_MISSING': 'pythainlp'})):
             with self.subTest(name):
                 (self.d / 'o.txt').unlink(missing_ok=True)
                 r = self.run_cli(*self.base(), env=env)
@@ -228,6 +259,48 @@ class CueMergeCliTests(unittest.TestCase):
                 self.assertIn('ERROR: required tool missing', r.stderr)
                 self.assertNotIn('Traceback', r.stderr)
                 self.assertFalse((self.d / 'o.txt').exists())
+
+    @staticmethod
+    def fixed_node():
+        sys.path.insert(0, str(SCRIPTS))
+        import thai_junction
+        return thai_junction.resolve_node()
+
+    def test_no_node_on_path_still_works_and_is_byte_identical(self):
+        # CF-A67 fix6 Fix 2 (lead-ordered change of the old "no node on PATH = exit 4" expectation): node comes from the
+        # fixed candidate list, never from $PATH
+        r0 = self.run_cli(*self.base())
+        self.assertEqual(r0.returncode, 0, r0.stderr)
+        normal = (self.d / 'o.txt').read_bytes()
+        (self.d / 'o.txt').unlink()
+        r = self.run_cli(*self.base(), env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.d / 'o.txt').read_bytes(), normal)
+
+    def test_a_fake_node_first_on_path_is_ignored(self):
+        r0 = self.run_cli(*self.base())
+        normal = (self.d / 'o.txt').read_bytes()
+        stubs = self.d / 'stubs'
+        stubs.mkdir()
+        for body in ('#!/bin/sh\nexit 1\n', '#!/bin/sh\necho junk\nexit 0\n'):
+            (stubs / 'node').write_text(body)
+            (stubs / 'node').chmod(0o755)
+            (self.d / 'o.txt').unlink()
+            r = self.run_cli(*self.base(), env={'PATH': str(stubs) + os.pathsep + os.environ.get('PATH', '')})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((self.d / 'o.txt').read_bytes(), normal)
+            self.assertEqual([l for l in r.stderr.splitlines() if l.startswith('TOOLS')],
+                             [l for l in r0.stderr.splitlines() if l.startswith('TOOLS')])
+            self.assertIn('TOOLS node=' + self.fixed_node(), r.stderr)
+
+    def test_tools_identity_line_is_on_stderr_not_stdout(self):
+        r = self.run_cli(*self.base())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [l for l in r.stderr.splitlines() if l.startswith('TOOLS')]
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertRegex(lines[0], r'^TOOLS node=\S+ v\d+\.\d+\.\d+ icu=\S+ pythainlp=\S+$')
+        self.assertNotIn('TOOLS', r.stdout)
+        self.assertNotIn('TOOLS', (self.d / 'o.txt').read_text(encoding='utf-8'))
 
     def test_fallback_path_needs_no_tools(self):
         env = {'LINT_CAPTIONS_SIMULATE_MISSING': 'node,pythainlp'}

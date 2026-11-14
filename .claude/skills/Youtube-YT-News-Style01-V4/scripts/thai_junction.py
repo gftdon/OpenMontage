@@ -27,8 +27,8 @@ for every caller.
 """
 import json
 import os
+import pwd
 import re
-import shutil
 import subprocess
 
 MAI_YAMOK = "ๆ"   # U+0E46, Thai repetition mark; deliberately the ONLY character with rules 1 and 2
@@ -54,6 +54,25 @@ process.stdout.write(JSON.stringify({node: process.version, icu: process.version
 
 class ToolMissing(Exception):
     pass
+
+
+# node comes from a FIXED candidate list, first executable wins, never from $PATH (finalize resolves node the same way:
+# finalize.TOOL_CANDIDATES['node'] is a second copy of this tuple, test_finalize.py asserts they are equal). The ICU
+# segmentation is part of the verdict, so the agent's srt_to_script.py and finalize's rebuild must use the same node.
+def passwd_home() -> str:
+    """Home of the account running this process, from the passwd entry (never $HOME), like finalize.passwd_home()."""
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+NODE_CANDIDATES = (passwd_home() + "/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node")
+
+
+def resolve_node():
+    """realpath of the first executable in NODE_CANDIDATES, or None. $PATH is never searched."""
+    for c in NODE_CANDIDATES:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return os.path.realpath(c)
+    return None
 
 
 def is_thai(ch: str) -> bool:
@@ -99,19 +118,33 @@ def check_tools() -> dict:
         tools["pythainlp"] = getattr(pythainlp, "__version__", "unknown")
     except Exception as e:  # ImportError or a broken install
         raise ToolMissing(f"pythainlp import failed: {e}")
-    node = None if "node" in missing else shutil.which("node")
+    node = None if "node" in missing else resolve_node()
     if not node:
-        raise ToolMissing("node not found on PATH (needed for Intl.Segmenter ICU oracle)")
+        raise ToolMissing("node not found at " + ", ".join(NODE_CANDIDATES) + " ($PATH is never searched; needed for the "
+                          "Intl.Segmenter ICU oracle)")
     try:
         info = _run_icu(["ทดสอบ"], node)
     except Exception as e:
         raise ToolMissing(f"node Intl.Segmenter('th') failed: {e}")
     tools["icu"] = f"node {info['node']} icu {info['icu']}"
+    global _IDENTITY
+    _IDENTITY = f"TOOLS node={node} {info['node']} icu={info['icu']} pythainlp={tools['pythainlp']}"
     return tools
 
 
+_IDENTITY = None
+
+
+def identity_line() -> str:
+    """One line naming the tools of the last successful check_tools(): node realpath + version, ICU, pythainlp.
+    The callers print it to STDERR (stdout and the output files stay byte-identical)."""
+    return _IDENTITY or "TOOLS unchecked"
+
+
 def _run_icu(strings, node=None) -> dict:
-    node = node or shutil.which("node")
+    node = node or resolve_node()
+    if not node:
+        raise ToolMissing("node not found at " + ", ".join(NODE_CANDIDATES))
     r = subprocess.run([node, "-e", _NODE_JS], input=json.dumps(strings), capture_output=True,
                        text=True, encoding="utf-8", timeout=300)
     if r.returncode != 0:
@@ -263,6 +296,40 @@ def source_whitespace(source_text):
         if any(ch.isspace() for ch in src[sk[k - 1][1] + 1:sk[k][1]]):
             src_ws.add(k)
     return "".join(c for c, _ in sk), src_ws
+
+
+def facing_run(left_text: str, right_text: str):
+    """The whitespace/Cf run that faces a junction between two texts (a script line break, a page break):
+    (trailing run of left + leading run of right, number of KEPT characters (Cf) in the leading run of right)."""
+    lt = rstrip_ws(left_text)
+    rt = lstrip_ws(right_text)
+    lead = right_text[:len(right_text) - len(rt)]
+    return left_text[len(lt):] + lead, sum(1 for ch in lead if not ch.isspace() and ch not in SKIP)
+
+
+def judge_run(run: str, k_after, src_ws, kind: str):
+    """THE ONE judgement of a whitespace run against the source, used by the srt_to_script merge, lint_script
+    (in-line and between lines), lint_pages and space-not-in-source, so merge and lint always judge the same thing.
+
+    run: the whitespace/Cf run (it may hold Cf characters, which are KEPT characters of the stream: they sit in the
+    run but not in `isspace()`). k_after: the kept offset of the character right after the run. The run covers the kept
+    offsets from the first kept character inside it (the first Cf; or k_after when it holds none) through k_after,
+    and the source has whitespace "here" when ANY offset of that range is in src_ws (offset k = whitespace between
+    kept chars k-1 and k). So `ก ​ข` and `ก​ ข` (space+Cf / Cf+space) give the same answer.
+
+    Returns (src_ok, space_not_in_source):
+      src_ok: rule 4 is available. kind "space": the run holds a real isspace() char AND the source has whitespace
+              here (a Cf-only run never gets rule 4). kind "break": the source has whitespace here (the break is the
+              separator).
+      space_not_in_source: the run holds a real isspace() char AND the source has none here (a Cf-only run never
+              fires it: stream equality already proves the Cf is in the source).
+    Without a source (src_ws None) or without a known offset (k_after None) neither flag is set."""
+    if src_ws is None or k_after is None:
+        return False, False
+    has_real_space = any(ch.isspace() for ch in run)
+    n_kept = sum(1 for ch in run if not ch.isspace() and ch not in SKIP)
+    src_has_ws = any(k in src_ws for k in range(k_after - n_kept, k_after + 1))
+    return src_has_ws and (has_real_space or kind == "break"), has_real_space and not src_has_ws
 
 
 def script_stream(lines):

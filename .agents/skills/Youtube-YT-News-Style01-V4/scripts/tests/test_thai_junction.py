@@ -69,6 +69,72 @@ class BreakProbeTests(unittest.TestCase):
         self.assertEqual(''.join(c for c, _ in self.tj.kept('ก​ข ค')), 'ก​ขค')
 
 
+class JudgeRunTests(unittest.TestCase):
+    """CF-A67 fix6 Fix 1: judge_run, the ONE judgement of a whitespace run against the source."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tj = load_tj()
+
+    CF = '\u200b'
+
+    def test_cf_only_run_never_gets_rule_4_and_never_fires_space_not_in_source(self):
+        # source has whitespace right after the Cf (offset 10), the line has only the Cf
+        self.assertEqual(self.tj.judge_run(self.CF, 10, {10}, 'space'), (False, False))
+        self.assertEqual(self.tj.judge_run(self.CF, 10, set(), 'space'), (False, False))
+
+    def test_mixed_runs_in_both_orders_give_the_same_answer(self):
+        # ' <Cf>' and '<Cf> ': both cover kept offsets 9..10; a source space anywhere in that range counts
+        for ws_at in (9, 10):
+            for run in (' ' + self.CF, self.CF + ' '):
+                with self.subTest(run=repr(run), ws_at=ws_at):
+                    self.assertEqual(self.tj.judge_run(run, 10, {ws_at}, 'space'), (True, False))
+        for run in (' ' + self.CF, self.CF + ' '):
+            self.assertEqual(self.tj.judge_run(run, 10, {8}, 'space'), (False, True))   # outside the range: no source space
+
+    def test_real_space_without_source_whitespace_fires_space_not_in_source(self):
+        self.assertEqual(self.tj.judge_run(' ', 5, {4, 6}, 'space'), (False, True))
+        self.assertEqual(self.tj.judge_run(' ', 5, {5}, 'space'), (True, False))
+
+    def test_break_kind_needs_only_source_whitespace_in_the_range(self):
+        self.assertEqual(self.tj.judge_run('', 5, {5}, 'break'), (True, False))
+        self.assertEqual(self.tj.judge_run(self.CF, 5, {4}, 'break'), (True, False))
+        self.assertEqual(self.tj.judge_run(self.CF, 5, {2}, 'break'), (False, False))
+
+    def test_no_source_or_unknown_offset_sets_neither_flag(self):
+        self.assertEqual(self.tj.judge_run(' ', 5, None, 'space'), (False, False))
+        self.assertEqual(self.tj.judge_run(' ', None, {5}, 'space'), (False, False))
+
+    def test_facing_run_counts_the_cf_of_the_right_text_only(self):
+        self.assertEqual(self.tj.facing_run('ก ' + self.CF, self.CF + ' ข'), (' ' + self.CF + self.CF + ' ', 1))
+        self.assertEqual(self.tj.facing_run('ก', 'ข'), ('', 0))
+
+
+class NodeCandidateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tj = load_tj()
+
+    def test_fixed_list_and_resolver(self):
+        c = self.tj.NODE_CANDIDATES
+        self.assertEqual(c[1:], ('/opt/homebrew/bin/node', '/usr/local/bin/node'))
+        self.assertTrue(c[0].endswith('/.local/bin/node'))
+        node = self.tj.resolve_node()
+        self.assertTrue(node is None or os.path.realpath(node) == node)
+
+    def test_resolver_ignores_path(self):
+        old = os.environ.get('PATH')
+        with tempfile.TemporaryDirectory() as d:
+            stub = Path(d) / 'node'
+            stub.write_text('#!/bin/sh\nexit 1\n')
+            stub.chmod(0o755)
+            os.environ['PATH'] = d + os.pathsep + (old or '')
+            try:
+                self.assertNotEqual(self.tj.resolve_node(), str(stub))
+                self.assertNotEqual(self.tj.resolve_node(), os.path.realpath(stub))
+            finally:
+                os.environ['PATH'] = old if old is not None else ''
+
+
 class ChainTests(unittest.TestCase):
     """The real chain on text only: SRT cues -> script.txt -> caption pages -> lint."""
     @classmethod
@@ -154,6 +220,53 @@ class ChainTests(unittest.TestCase):
         lines, pages, r3, report = self.chain(source, ['ระบบนี้ช่วยให้การแส', 'ด', 'งผลบนหน้าจอลื่นไหลขึ้นมาก'])
         self.assertEqual(lines, ['ระบบนี้ช่วยให้การแสดงผลบนหน้าจอลื่นไหลขึ้นมาก'])
         self.assert_clean(lines, pages, r3, report)
+
+    # CF-A67 fix6 Fix 1: a Cf that is already in the source and the SRT must not fail the job for good
+    def test_e2e_cf_already_in_the_source_passes(self):
+        source = 'เริ่มจากไอเดียคร่าวๆ\u200bแล้วระบบจะช่วยสร้างโครงงานให้ทันที\n'
+        lines, pages, r3, report = self.chain(source, [source.strip()])
+        self.assertEqual(lines, [source.strip()])
+        self.assertEqual(r3.returncode, 0, json.dumps(report.get('issues'), ensure_ascii=False, indent=1))
+        self.assertEqual(report['counts']['space-not-in-source'], 0)
+
+    # CF-A67 fix6 Fix 3: the agreed policy, pinned. A source space at a cue boundary that fails rules 3-4 stays in the
+    # merged line, so the job fails at `captions` (the source script must change; a source typo is the script step's problem)
+    def test_e2e_source_space_inside_a_word_fails_at_captions(self):
+        source = 'ทีมงานตรวจสอบระ บบอัตโนมัติทำงานได้ดีมาก\n'
+        d = self.d
+        (d / 'source_script.txt').write_text(source, encoding='utf-8')
+        (d / 'avatar.srt').write_text(srt('ทีมงานตรวจสอบระ', 'บบอัตโนมัติทำงานได้ดีมาก'), encoding='utf-8')
+        r1 = self.run_py('srt_to_script.py', '--srt', str(d / 'avatar.srt'), '--script', str(d / 'source_script.txt'),
+                         '--strict', '--out', str(d / 'script.txt'))
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertEqual((d / 'script.txt').read_text(encoding='utf-8'), source)   # merged, the source space kept
+        from pythainlp.tokenize import word_tokenize
+        words = [w for w in word_tokenize(source, engine='newmm', keep_whitespace=False) if w.strip()]
+        toks = [{'w': w, 's': round(i * 0.4, 2), 'e': round(i * 0.4 + 0.3, 2)} for i, w in enumerate(words)]
+        (d / 'tokens.json').write_text(json.dumps([{'words': toks}], ensure_ascii=False), encoding='utf-8')
+        (d / 'options.json').write_text(json.dumps({'endTime': round(len(words) * 0.4 + 0.2, 2)}), encoding='utf-8')
+        r2 = subprocess.run([self.node, str(SCRIPTS / 'caption_join.mjs'), '--tokens', str(d / 'tokens.json'), '--script',
+                             str(d / 'script.txt'), '--options', str(d / 'options.json'), '--out', str(d / 'captions.json')],
+                            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        r3 = self.run_py('lint_captions.py', '--script', str(d / 'script.txt'), '--pages', str(d / 'captions.json'),
+                         '--source-script', str(d / 'source_script.txt'), '--report', str(d / 'lint.json'))
+        self.assertEqual(r3.returncode, 1, r3.stdout)
+        report = json.loads((d / 'lint.json').read_text(encoding='utf-8'))
+        self.assertGreaterEqual(report['counts']['midword-space'], 1)
+        self.assertEqual(report['counts']['space-not-in-source'], 0)
+
+    # CF-A67 fix6 Fix 2: the identity line goes to stderr, never stdout
+    def test_lint_prints_the_tools_identity_on_stderr_only(self):
+        d = self.d
+        (d / 'good.txt').write_text('ผู้ใช้ทดสอบระบบ\n', encoding='utf-8')
+        r = self.run_py('lint_captions.py', '--script', str(d / 'good.txt'), '--pages',
+                        str(SCRIPTS / 'tests' / 'fixtures' / 'a67' / 'captions' / 'pages_clean.json'), '--report', str(d / 'r.json'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tj = load_tj()
+        self.assertIn('TOOLS node=' + tj.resolve_node(), r.stderr)
+        self.assertNotIn('TOOLS', r.stdout)
+        self.assertNotIn('TOOLS', (d / 'r.json').read_text(encoding='utf-8'))
 
     # lint on hand-made (unmerged) lines: proves the page break inside the word is reported, not skipped
     def test_unmerged_lines_are_reported_by_the_lint_chain(self):

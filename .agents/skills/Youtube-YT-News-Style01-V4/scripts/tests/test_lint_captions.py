@@ -503,6 +503,67 @@ class CfCharacterTests(unittest.TestCase):
         self.assertEqual(self.m.lint_script(['ผู้ใช้\u200bทดสอบ']), [])
 
 
+class CfRunSourceTests(unittest.TestCase):
+    """CF-A67 fix6 Fix 1: a whitespace run is judged against the source by the whole kept-offset range it covers."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    CF = '\u200b'
+
+    def test_existing_positive_cf_case_also_with_the_source(self):
+        text = 'ผู้ใช้' + self.CF + 'ทดสอบ'
+        self.assertEqual(self.m.lint_script([text]), [])
+        self.assertEqual(self.m.lint_script([text], text + '\n'), [])          # the Cf is in the source: no space-not-in-source
+        self.assertEqual(self.m.lint_pages([_page(text)], text + '\n'), [])
+
+    def test_cf_after_mai_yamok_already_in_the_source_passes(self):
+        text = 'เริ่มจากไอเดียคร่าวๆ' + self.CF + 'แล้วระบบ'
+        self.assertEqual(self.m.lint_script([text], text + '\n'), [])
+        self.assertEqual(self.m.lint_pages([_page(text)], text + '\n'), [])
+
+    def test_mixed_runs_in_both_orders_give_the_same_verdict(self):
+        cf = self.CF
+        for run in (' ' + cf, cf + ' '):
+            text = 'ซึ่งบอกว่า' + run + 'การขับรถ'
+            with self.subTest(run=repr(run)):
+                self.assertEqual(self.m.lint_script([text], text + '\n'), [])
+                self.assertEqual(self.m.lint_pages([_page(text)], text + '\n'), [])
+        # source with the space on the other side of the Cf: the same verdict for the other order
+        text = 'ซึ่งบอกว่า ' + cf + 'การขับรถ'
+        src = 'ซึ่งบอกว่า' + cf + ' การขับรถ\n'
+        self.assertEqual(self.m.lint_script([text], src), [])
+        self.assertEqual(self.m.lint_pages([_page(text)], src), [])
+
+    def test_cf_only_gap_never_gets_rule_4_even_when_the_source_has_a_space_there(self):
+        text = 'ซึ่งบอกว่า' + self.CF + 'การขับรถ'
+        src = 'ซึ่งบอกว่า' + self.CF + ' การขับรถ\n'
+        issues = self.m.lint_script([text], src)
+        self.assertEqual(codes(issues), ['midword-space'])
+        self.assertEqual(codes(self.m.lint_pages([_page(text)], src)), ['midword-page-break'])
+        # a real space at the same place IS accepted by rule 4
+        self.assertEqual(self.m.lint_script(['ซึ่งบอกว่า การขับรถ'], 'ซึ่งบอกว่า การขับรถ\n'), [])
+
+    def test_real_space_not_in_the_source_still_fires(self):
+        issues = self.m.lint_script(['ผู้ใช้ ทดสอบ'], 'ผู้ใช้ทดสอบ\n')
+        self.assertEqual(codes(issues), ['space-not-in-source'])
+        issues = self.m.lint_script(['ผู้ใช้ ' + self.CF + 'ทดสอบ'], 'ผู้ใช้' + self.CF + 'ทดสอบ\n')
+        self.assertEqual(codes(issues), ['space-not-in-source'])
+
+    def test_line_break_with_cf_judged_by_the_range(self):
+        cf = self.CF
+        # Cf at the end of line 1 / start of line 2, source has the line break: the break is the separator -> rule 4
+        lines = ['ซึ่งบอกว่า' + cf, 'การขับรถ']
+        self.assertEqual(self.m.lint_script(lines, 'ซึ่งบอกว่า' + cf + '\nการขับรถ\n'), [])
+        lines = ['ซึ่งบอกว่า', cf + 'การขับรถ']
+        self.assertEqual(self.m.lint_script(lines, 'ซึ่งบอกว่า\n' + cf + 'การขับรถ\n'), [])
+
+    def test_line_break_without_a_source_break_is_not_rule_4(self):
+        cf = self.CF
+        lines = ['ซึ่งบอกว่า', cf + 'การขับรถ']
+        self.assertEqual(codes(self.m.lint_script(lines, 'ซึ่งบอกว่า' + cf + 'การขับรถ\n')), ['midword-space'])
+
+
 class PageTwoRule4Tests(unittest.TestCase):
     """CF-A67 fix5: rule 4 maps a junction inside a LATER page onto the source with the page's base offset."""
     @classmethod
@@ -534,6 +595,44 @@ class PageTwoRule4Tests(unittest.TestCase):
         issues = self.m.lint_pages(self.pages(), src)
         self.assertEqual(codes(issues), ['midword-page-break'])
         self.assertEqual(issues[0]['page'], 2)
+
+
+class PageLeadCfOffsetTests(unittest.TestCase):
+    """CF-A67 fix6 (lead review): base[i] counts the page `text` INCLUDING its lead, body (displayText) does not.
+    caption_join.mjs uses /\\s/u, which matches U+FEFF, so a leadingWhitespace can hold a Cf that is a KEPT character."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    FEFF = '\ufeff'
+    PAGE1 = 'ทีมงานตรวจสอบ'          # 13 kept characters
+    BODY2 = 'พร้อมแล้ว ไปเริ่ม'      # junction after 9 kept characters of the body; no ICU/newmm boundary there
+
+    def pages(self, display=None):
+        return [_page(self.PAGE1),
+                _page(self.FEFF + self.BODY2, 2.0, display=self.BODY2 if display is None else display, lead=self.FEFF)]
+
+    def test_source_space_at_the_junction_passes_with_a_cf_lead(self):
+        # the kept stream is 13 + FEFF + 9 characters: the source space sits at kept offset 23, k_after must be 13 + 1 + 9
+        src = self.PAGE1 + self.FEFF + self.BODY2 + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages(), src), [])
+
+    def test_source_space_at_the_offset_without_the_lead_count_fails(self):
+        # the only source space is at kept offset 22 (= 13 + 9, the offset the old code computed): not the junction
+        src = self.PAGE1 + self.FEFF + 'พร้อมแล้' + ' ว' + 'ไปเริ่ม' + '\n'
+        issues = self.m.lint_pages(self.pages(), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+    def test_display_text_that_disagrees_with_text_fails_closed(self):
+        # displayText and text differ in kept characters: no kept offset of the body is known, rule 4 stays off
+        src = self.PAGE1 + self.FEFF + self.BODY2 + '\n'
+        issues = self.m.lint_pages(self.pages(display='พร้อมแล้ว ไปเริ่มx'), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+
+    def test_a_page_without_a_cf_lead_is_unchanged(self):
+        src = self.PAGE1 + self.BODY2 + '\n'
+        self.assertEqual(self.m.lint_pages([_page(self.PAGE1), _page(self.BODY2, 2.0)], src), [])
 
 
 if __name__ == '__main__':

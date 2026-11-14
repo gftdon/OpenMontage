@@ -133,13 +133,16 @@ def align_to_script(cue_texts: list[str], script_text: str):
     src_ws = set()
     if judged:
         tj.check_tools()   # raises ToolMissing: never a silent "no merge"
+        print(tj.identity_line(), file=sys.stderr)   # which node / ICU / pythainlp judged this (stdout and the output stay unchanged)
         bsets = tj.boundary_sets([l + r for l, r in judged])
         src_ws = tj.source_whitespace(script_text)[1]
     lines = []
     cur_first, cur_last, cur_pos = cues[0] if cues else (0, -1, 0)
     for nxt_first, nxt_last, nxt_pos in cues[1:]:
         pr = tj.break_probe(text_of(cur_first, cur_last), text_of(nxt_first, nxt_last))
-        if pr is None or tj.thai_junction_ok(pr[0], pr[1], "break", bsets, nxt_pos in src_ws):
+        run, n_lead = tj.facing_run(text_of(cur_first, cur_last), text_of(nxt_first, nxt_last))
+        src_ok = tj.judge_run(run, nxt_pos + n_lead, src_ws, "break")[0]
+        if pr is None or tj.thai_junction_ok(pr[0], pr[1], "break", bsets, src_ok):
             lines.append(text_of(cur_first, cur_last))
             cur_first, cur_last, cur_pos = nxt_first, nxt_last, nxt_pos
         else:

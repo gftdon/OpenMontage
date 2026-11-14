@@ -51,8 +51,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from thai_junction import (CF_CHARS, LINE_BREAKS, MAI_YAMOK, ToolMissing, WINDOW, boundary_sets,  # noqa: F401
-                               break_probe, check_tools, is_thai, is_ws, junction_gaps, kept, lstrip_ws,
+    from thai_junction import (CF_CHARS, LINE_BREAKS, MAI_YAMOK, SKIP, ToolMissing, WINDOW, boundary_sets,  # noqa: F401
+                               break_probe, check_tools, facing_run, identity_line, is_thai, is_ws, judge_run,
+                               junction_gaps, kept, lstrip_ws,
                                rstrip_ws, script_stream, source_whitespace, strip_ws, thai_gaps,
                                thai_junction_ok)
 except Exception as _e:   # a missing / broken shared module is a missing tool (exit 4), not a quality failure
@@ -81,10 +82,10 @@ def _junction_detail(left, right, kind, where):
 def lint_script(lines, source_text=None):
     """Lint project script lines (list of str). Returns issue dicts. Rule 4 of thai_junction_ok needs source_text.
     Judges every Thai|Thai whitespace inside a line AND every junction between two consecutive lines."""
-    issues, probes = [], []   # probes: (line_no, kind, left, right, context, line_start_offset or None, e_in_line)
+    issues, probes = [], []   # probes: (line_no, kind, left, right, context, index of the right line (between lines) or None, (s, e) or None)
     for idx, line in enumerate(lines, 1):
         for s, e, kind in junction_gaps(line):
-            probes.append((idx, kind, line[:s], line[e:], _show(line[max(0, s - 15):e + 15]), None, e))
+            probes.append((idx, kind, line[:s], line[e:], _show(line[max(0, s - 15):e + 15]), None, (s, e)))
     for idx in range(1, len(lines)):
         if lstrip_ws(lines[idx])[:1] == MAI_YAMOK:
             continue   # a line that starts with ๆ is already judged by its own junction_gaps
@@ -96,15 +97,16 @@ def lint_script(lines, source_text=None):
     if source_text is not None:
         src_stream, src_ws = source_whitespace(source_text)
         stream, per_line = script_stream(lines)
-    for idx, kind, left, right, ctx, between, e in probes:
+    for idx, kind, left, right, ctx, between, se in probes:
         src_ok = False
         if src_ws is not None and stream == src_stream:
             if between is not None:
-                src_ok = per_line[between][0] in src_ws
+                run, n_lead = facing_run(lines[between - 1], lines[between])
+                src_ok = judge_run(run, per_line[between][0] + n_lead, src_ws, "break")[0]
             else:
                 base, pos_to_k = per_line[idx - 1]
-                k = pos_to_k.get(e)
-                src_ok = k is not None and (base + k) in src_ws
+                k = pos_to_k.get(se[1])
+                src_ok = judge_run(lines[idx - 1][se[0]:se[1]], None if k is None else base + k, src_ws, kind)[0]
         if not thai_junction_ok(left, right, kind, bsets, src_ok):
             what = ("line break" if between is not None else "whitespace")
             issues.append({"code": "midword-space", "line": idx, "t": None,
@@ -120,7 +122,7 @@ def lint_script(lines, source_text=None):
 def _space_not_in_source(lines, source_text):
     src_stream, src_ws = source_whitespace(source_text)
     stream, per_line = script_stream(lines)
-    gaps = []   # (line_no, offset, s, e)
+    gaps = []   # (line_no, kept offset after the run, s, e)
     for idx, line in enumerate(lines, 1):
         base, pos_to_k = per_line[idx - 1]
         for s, e in thai_gaps(line):
@@ -137,7 +139,7 @@ def _space_not_in_source(lines, source_text):
                  "context": f"script=...{stream[lo:i + 20]} | source=...{src_stream[lo:i + 20]}"}]
     out = []
     for idx, off, s, e in gaps:
-        if off not in src_ws:
+        if judge_run(lines[idx - 1][s:e], off, src_ws, "space")[1]:
             out.append({"code": "space-not-in-source", "line": idx, "t": None,
                         "detail": "Thai|Thai whitespace in script where the source script has none",
                         "context": _show(lines[idx - 1][max(0, s - 15):e + 15])})
@@ -202,27 +204,31 @@ def lint_pages(pages, source_text=None):
             src_ws = ws_set
     for i, p in enumerate(pages):
         body = _body(p)
-        for s, e, kind in junction_gaps(body):
-            where = "caption page" if strip_ws(body[:s]) == "" else "display line"
-            k = base[i] + len(kept(body[:s]))
-            probes.append((i + 1, p.get("start"), kind, body[:s], body[e:], _show(body[max(0, s - 15):e + 15]),
-                           where, "displayText whitespace/line break inside page",
-                           src_ws is not None and k in src_ws))
-        if i == 0:
-            continue
-        ptext = texts[i - 1]
-        pbody = rstrip_ws(ptext)
         lead = p.get("leadingWhitespace")
         if not isinstance(lead, str):
             t = p.get("text", "")
             lead = t[:len(t) - len(lstrip_ws(t))]
+        n_lead = sum(1 for ch in lead if not ch.isspace() and ch not in SKIP)   # Cf kept characters in this page's lead
+        # base[i] is the kept offset of texts[i], which starts with the lead; body does not. Fail closed when the
+        # page text does not read lead + body in kept characters (then no kept offset of body is known).
+        offs_ok = [c for c, _ in kept(lead)] + [c for c, _ in kept(body)] == [c for c, _ in kept(texts[i])][:n_lead + len(kept(body))]
+        for s, e, kind in junction_gaps(body):
+            where = "caption page" if strip_ws(body[:s]) == "" else "display line"
+            k_after = base[i] + n_lead + len(kept(body[:e])) if offs_ok else None
+            probes.append((i + 1, p.get("start"), kind, body[:s], body[e:], _show(body[max(0, s - 15):e + 15]),
+                           where, "displayText whitespace/line break inside page",
+                           judge_run(body[s:e], k_after, src_ws, kind)[0]))
+        if i == 0:
+            continue
+        ptext = texts[i - 1]
+        pbody = rstrip_ws(ptext)
         ws = ptext[len(pbody):] + lead
         nbody = lstrip_ws(body)
         if not (pbody and nbody and is_thai(pbody[-1]) and is_thai(nbody[0])):
             continue
         if nbody[0] == MAI_YAMOK:
             continue   # a page that starts with ๆ is already judged (and reported) by its own junction_gaps above
-        src_ok = bool(ws) and src_ws is not None and base[i] in src_ws
+        src_ok = bool(ws) and judge_run(ws, base[i] + n_lead, src_ws, "break")[0]
         if any(c in LINE_BREAKS for c in ws):
             # a script line break: judge the full lines on both sides, the same strings lint_script / the cue merge use
             pr = break_probe(*_line_around(full, offs[i]))
@@ -279,6 +285,7 @@ def main(argv=None) -> int:
         return 2
     try:
         tools = check_tools()
+        print(identity_line(), file=sys.stderr)   # which node / ICU / pythainlp judged this (stdout and the report stay unchanged)
         lines = [l for l in script.replace("\r\n", "\n").split("\n") if l.strip()]
         issues = lint_script(lines, source) + lint_pages(pages, source)
     except ToolMissing as e:

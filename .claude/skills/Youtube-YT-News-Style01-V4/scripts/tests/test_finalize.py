@@ -2321,6 +2321,73 @@ class ScriptSharedModuleMissingTests(FinalizeBase):
         self.assertNotDelivered()
 
 
+class ScriptNodeTests(FinalizeBase):
+    """CF-A67 fix6 Fix 2: node comes from the fixed candidate list for srt_to_script.py / lint_captions.py and for finalize."""
+
+    def test_finalize_node_candidates_equal_the_shared_module_list(self):
+        # finalize does not import thai_junction (a tampered module would run before the integrity check): two copies, equal
+        spec = importlib.util.spec_from_file_location('thai_junction_t', self.skill / 'scripts' / 'thai_junction.py')
+        tj = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tj)
+        self.assertEqual(tuple(self.module().TOOL_CANDIDATES['node']), tuple(tj.NODE_CANDIDATES))
+
+    def without_node(self, skip_environment_check):
+        def patch(m):
+            real = m.resolve_tools
+            m.resolve_tools = lambda: dict(real(), node=None)
+            if skip_environment_check:     # the global environment check refuses to start at all; reach the gates themselves
+                m.environment_checks = lambda *a, **k: []
+        return patch
+
+    def test_a_run_without_node_stops_at_the_environment_check_with_the_candidate_list(self):
+        self.assertEqual(4, self.run_fin(patch=self.without_node(False)), self.out)
+        self.assertIn('tool-node: not found at ', self.out)
+        self.assertIn('/opt/homebrew/bin/node', self.out)
+
+    def test_no_node_at_all_is_missing_class_4_for_the_script_and_captions_gates(self):
+        # defence in depth: the gates themselves also list node as a required tool (used to be `crashed` / a traceback)
+        self.assertEqual(4, self.run_fin(patch=self.without_node(True)), self.out)
+        for name in ('script', 'captions'):
+            g = self.gate(self.failed(), name)
+            self.assertEqual('missing', g['status'], name)
+            self.assertIn('node not found at', g['reason'], name)
+            self.assertIn('/opt/homebrew/bin/node', g['reason'], name)
+
+    def hand_edit_the_script(self):
+        sp = self.proj / 'artifacts' / 'script.txt'
+        sp.write_text(sp.read_text().replace('hello', 'hullo'))
+        self.assertEqual(2, self.run_fin(), self.out)
+        self.set_raw(raw_doc(script_sha=sha(self.proj / 'artifacts' / 'script.txt')))
+
+    def test_a_script_mismatch_names_the_gate_node(self):
+        self.hand_edit_the_script()
+        self.assertEqual(1, self.run_fin(), self.out)
+        reason = self.gate(self.failed(), 'script')['reason']
+        node = os.path.realpath(next(c for c in self.module().TOOL_CANDIDATES['node'] if os.path.isfile(c) and os.access(c, os.X_OK)))
+        self.assertIn('node of the gates: ' + node, reason)
+        self.assertIn('edit it by hand', reason)                                               # the old message is still there
+        self.assertNotIn('different binary', reason)                                           # the PATH node is the same one
+
+    def test_a_script_mismatch_also_names_a_different_node_on_the_callers_path(self):
+        self.hand_edit_the_script()
+        stubs = Path(self.tmp) / 'path_stub'
+        stubs.mkdir()
+        (stubs / 'node').write_text('#!/bin/sh\necho v0.0.0-stub\n')
+        (stubs / 'node').chmod(0o755)
+        with mock.patch.dict(os.environ, {'PATH': str(stubs) + os.pathsep + os.environ.get('PATH', '')}):
+            self.assertEqual(1, self.run_fin(), self.out)
+        reason = self.gate(self.failed(), 'script')['reason']
+        self.assertIn('the node on your $PATH is a different binary: ' + os.path.realpath(stubs / 'node'), reason)
+        self.assertIn('v0.0.0-stub', reason)
+        self.assertIn('not a bare `node`', reason)
+
+    def test_the_hint_is_a_message_only_and_empty_without_a_gate_node(self):
+        m = self.module()
+        self.assertEqual('', m.node_mismatch_hint(types.SimpleNamespace(tools={'node': None})))
+        hint = m.node_mismatch_hint(types.SimpleNamespace(tools={'node': sys.executable}))
+        self.assertIn('node of the gates: ' + sys.executable, hint)
+
+
 class DerivedGateTests(FinalizeBase):
     """`derived`: the commands of SKILL step 2 are re-run from the raw word timing; outputs must be byte-identical."""
 
