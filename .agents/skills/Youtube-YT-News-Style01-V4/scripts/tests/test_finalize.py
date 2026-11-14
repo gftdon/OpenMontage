@@ -166,7 +166,8 @@ sys.exit(b.get('exit', 0 if ok else 1))
 # qc_manifest.mjs + media_digest.mjs (canonical JSON, manifestHash, computeSourceHashes, digestDir), srt_to_script / words_by_line /
 # line_starts / caption_join are NOT stubbed: the real files of this skill are copied into every fake skill (REAL_ALWAYS), so
 # manifestHash, the fresh layout hashes and the derived gate are the real thing.
-REAL_ALWAYS = ('qc_manifest.mjs', 'media_digest.mjs', 'srt_to_script.py', 'words_by_line.py', 'line_starts.py', 'caption_join.mjs',
+# srt_to_script imports the shared rule module thai_junction.py, so that is copied too (lint_captions is a stub here).
+REAL_ALWAYS = ('qc_manifest.mjs', 'media_digest.mjs', 'thai_junction.py', 'srt_to_script.py', 'words_by_line.py', 'line_starts.py', 'caption_join.mjs',
                'asr_transcribe.py', 'asr_align.py', 'timing_defects.py', 'asr_run.sh')
 # ^ the chain code (raw `code` names all four): asr_* are reached only through the fake launcher, timing_defects.py runs for real
 
@@ -2306,6 +2307,18 @@ class ScriptSrtToolMissingTests(FinalizeBase):
     def test_missing_tool_is_exit_4(self):
         self.assertEqual(4, self.run_fin())
         self.assertEqual('missing', self.gate(self.failed(), 'script')['status'])
+
+
+class ScriptSharedModuleMissingTests(FinalizeBase):
+    """srt_to_script.py imports thai_junction.py; without it the script gate fails closed (exit 4), never a pass."""
+    omit = ('thai_junction.py',)
+
+    def test_missing_shared_module_fails_the_script_gate_with_exit_4(self):
+        self.assertEqual(4, self.run_fin(), self.out)
+        g = self.gate(self.failed(), 'script')
+        self.assertEqual('crashed', g['status'])
+        self.assertIn('exited with unexpected code 4', g['reason'])
+        self.assertNotDelivered()
 
 
 class DerivedGateTests(FinalizeBase):

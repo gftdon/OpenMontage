@@ -247,7 +247,16 @@ class PageLintTests(unittest.TestCase):
         self.assertEqual(self.m.lint_pages(self.pages('pages_clean.json')), [])
 
     def test_script_line_break_between_pages_not_flagged(self):
-        self.assertEqual(self.m.lint_pages(self.pages('pages_newline.json')), [])
+        # fix5: a page junction across a script line break is judged like any other, and rule 4 needs the source
+        # (finalize always passes --source-script). The source is the exact script the fixture's pages came from.
+        pages = self.pages('pages_newline.json')
+        self.assertEqual(self.m.lint_pages(pages, ''.join(p['text'] for p in pages)), [])
+
+    def test_script_line_break_between_pages_without_a_source_is_judged(self):
+        # same pages, no source: rule 4 is off, ICU/newmm see no boundary at ได้|การ -> one midword-page-break at page 2
+        issues = self.m.lint_pages(self.pages('pages_newline.json'))
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
 
     def test_whitespace_between_pages_still_tested(self):
         issues = self.m.lint_pages(self.pages('pages_midword_spaced.json'))
@@ -407,6 +416,124 @@ class CliTests(unittest.TestCase):
                 m.check_tools()
         finally:
             del os.environ['LINT_CAPTIONS_SIMULATE_MISSING']
+
+
+def _page(text, start=0.0, display=None, lead=None):
+    p = {'start': start, 'text': text, 'displayText': text.strip() if display is None else display}
+    if lead is not None:
+        p['leadingWhitespace'] = lead
+    return p
+
+
+class LineBreakJunctionTests(unittest.TestCase):
+    """CF-A67 fix5: a junction across a script line break is judged like any other (no more `\\n` skip)."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_script_lines_split_inside_a_word_flagged(self):
+        src = 'ระบบนี้ช่วยให้การแสดงผลบนหน้าจอ\n'
+        issues = self.m.lint_script(['ระบบนี้ช่วยให้การแส', 'ดงผลบนหน้าจอ'], src)
+        self.assertEqual(codes(issues), ['midword-space'])
+        self.assertEqual(issues[0]['line'], 2)
+        self.assertIn('⏎', issues[0]['context'])
+
+    def test_pages_split_across_a_line_break_inside_a_word_flagged(self):
+        src = 'ระบบนี้ช่วยให้การแสดงผลบนหน้าจอ\n'
+        pages = [_page('ระบบนี้ช่วยให้การแส'), _page('\nดงผลบนหน้าจอ', 2.0, display='ดงผลบนหน้าจอ', lead='\n')]
+        issues = self.m.lint_pages(pages, src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+    def test_legal_line_breaks_not_flagged(self):
+        # a real word boundary: no source needed
+        self.assertEqual(self.m.lint_script(['ผู้ใช้ทดสอบระบบ', 'โปรแกรมที่มันสร้างขึ้น']), [])
+        # two dictionary words with the line break in the source: rule 4
+        src = 'ซึ่งบอกว่า\nการขับรถ\n'
+        self.assertEqual(self.m.lint_script(['ซึ่งบอกว่า', 'การขับรถ'], src), [])
+        pages = [_page('ซึ่งบอกว่า'), _page('\nการขับรถ', 2.0, display='การขับรถ', lead='\n')]
+        self.assertEqual(self.m.lint_pages(pages, src), [])
+        # ... but not when the source has no whitespace there
+        src2 = 'ซึ่งบอกว่าการขับรถ\n'
+        self.assertEqual(codes(self.m.lint_script(['ซึ่งบอกว่า', 'การขับรถ'], src2))[:1], ['midword-space'])
+        self.assertEqual(codes(self.m.lint_pages(pages, src2)), ['midword-page-break'])
+
+    def test_line_break_judged_on_the_full_lines_like_lint_script(self):
+        # Short pages on both sides of the line break: judged alone, "แส|ดงผ" has a boundary for ICU/newmm
+        # (the short context fools the oracle), judged on the FULL lines ("ระบบนี้ช่วยให้การแส|ดงผลบน...", what
+        # lint_script and the cue merge in srt_to_script use) it is a word cut in two.
+        line1, line2 = 'ระบบนี้ช่วยให้การแส', 'ดงผลบนหน้าจอลื่นไหลขึ้นมาก'
+        src = line1 + line2 + '\n'
+        short = self.m.break_probe('แส', 'ดงผ')
+        joined = short[0] + short[1]
+        self.assertIn(len(short[0]), self.m.boundary_sets([joined])[joined])   # precondition: short context passes
+        pages = [_page('ระบบนี้ช่วยให้การ'), _page('แส'), _page('\nดงผ', 2.0, display='ดงผ', lead='\n'),
+                 _page('ลบนหน้าจอลื่นไหลขึ้นมาก', 3.0)]
+        by_pages = [i for i in self.m.lint_pages(pages, src) if i['page'] == 3]
+        by_lines = self.m.lint_script([line1, line2], src)
+        self.assertEqual(codes(by_pages), ['midword-page-break'])
+        self.assertEqual(codes(by_lines), ['midword-space'])
+
+
+class CfCharacterTests(unittest.TestCase):
+    """CF-A67 fix5: zero-width Cf characters are whitespace where a junction is FOUND."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_cf_before_mai_yamok_at_a_page_start_flagged(self):
+        for cf in ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'):
+            with self.subTest(cf=hex(ord(cf))):
+                issues = self.m.lint_pages([_page(cf + 'ๆ แล้ว')])
+                self.assertEqual(codes(issues), ['midword-page-break'])
+                self.assertIn('ๆ', issues[0]['detail'])
+
+    def test_cf_before_mai_yamok_at_a_script_line_start_flagged(self):
+        for cf in ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'):
+            with self.subTest(cf=hex(ord(cf))):
+                self.assertEqual(codes(self.m.lint_script([cf + 'ๆ แล้ว'])), ['midword-space'])
+
+    def test_cf_between_two_halves_of_a_split_word_is_judged(self):
+        for cf in ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'):
+            with self.subTest(cf=hex(ord(cf))):
+                self.assertEqual(codes(self.m.lint_script(['ตรวจสอบระ' + cf + 'บบ'])), ['midword-space'])
+                self.assertEqual(codes(self.m.lint_pages([_page('ตรวจสอบระ' + cf + 'บบ')])), ['midword-page-break'])
+
+    def test_cf_inside_a_word_that_is_a_boundary_is_not_flagged(self):
+        self.assertEqual(self.m.lint_script(['ผู้ใช้\u200bทดสอบ']), [])
+
+
+class PageTwoRule4Tests(unittest.TestCase):
+    """CF-A67 fix5: rule 4 maps a junction inside a LATER page onto the source with the page's base offset."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    PAGE1 = 'ทีมงานตรวจสอบ'          # 13 kept characters
+    PAGE2 = 'พร้อมแล้ว ไปเริ่ม'      # junction after 9 kept characters of page 2
+
+    def pages(self):
+        return [_page(self.PAGE1), _page(self.PAGE2, 2.0)]
+
+    def test_oracles_have_no_boundary_at_the_junction(self):
+        # precondition of this class: only rule 4 can accept this junction
+        probe = self.m.break_probe('พร้อมแล้ว', 'ไปเริ่ม')
+        joined = probe[0] + probe[1]
+        self.assertNotIn(len(probe[0]), self.m.boundary_sets([joined])[joined])
+
+    def test_source_space_at_the_junction_passes(self):
+        n = len('ทีมงานตรวจสอบ')
+        self.assertEqual(n, 13)
+        src = self.PAGE1 + 'พร้อมแล้ว ไปเริ่ม' + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages(), src), [])
+
+    def test_source_space_at_the_offset_inside_page_2_only_fails(self):
+        # the only source space sits at global offset 9 (after 'ทีมงานตรว') = the junction's offset INSIDE page 2 ('พร้อมแล้ว' = 9 kept characters), but the junction
+        # really is at offset 13 + 9 = 22: it must NOT be mistaken for it
+        src = 'ทีมงานตรว จสอบพร้อมแล้วไปเริ่ม\n'
+        issues = self.m.lint_pages(self.pages(), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
 
 
 if __name__ == '__main__':

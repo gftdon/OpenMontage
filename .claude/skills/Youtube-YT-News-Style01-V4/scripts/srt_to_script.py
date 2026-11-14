@@ -16,20 +16,32 @@ character stream of the cues equals that of the original script (headings such
 as "Part 1:" and blank lines dropped), every output line is the matching slice
 of the ORIGINAL script, keeping its own whitespace. Otherwise a WARNING goes to
 stderr and the Thai-aware join is used (exit 1 with --strict).
+
+A cue boundary is a script line break, and a line break must not split a word. With --script, every cue
+boundary that is Thai|Thai (or that puts a mai yamok at the start of a line) is judged by the ONE rule of
+thai_junction.py, the same one lint_captions.py applies to the finished script. Where it fails, the two cues
+are merged into one line, a slice of the ORIGINAL script that spans both (nothing is added or removed), and the
+new junction is judged again. A judged junction needs node (ICU) and pythainlp: without them the command exits 4
+("ERROR: required tool missing"); the fallback path (no --script, or the streams differ) needs neither.
+Exit: 0 ok, 1 --strict and the streams differ, 4 required tool / shared module missing.
 """
 import argparse
 import re
+import subprocess
 import sys
+from pathlib import Path
 
-_HEADING = re.compile(r"^\s*Part\s*\d+\s*:?\s*$", re.IGNORECASE)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import thai_junction as tj
+except Exception as _e:   # exit 1 means "the SRT differs from the source" to finalize; a missing module is exit 4
+    print(f"ERROR: required tool missing: cannot import thai_junction.py next to {Path(__file__).name}: {_e}",
+          file=sys.stderr)
+    sys.exit(4)
+
 _QUOTES = "“”\"„«»"
 _ARROWS = "→←➜⇒"
-# Characters that never count towards the text stream.
-_SKIP = set(_QUOTES) | set(_ARROWS)
-
-
-def is_thai(ch: str) -> bool:
-    return bool(ch) and "฀" <= ch <= "๿"
+is_thai = tj.is_thai
 
 
 def join_rows(rows: list[str]) -> str:
@@ -75,17 +87,8 @@ def parse(srt_text: str) -> list[str]:
     return lines_out
 
 
-def _kept(text: str) -> list[tuple[str, int]]:
-    """(char, original index) for every char that counts towards the stream."""
-    return [(ch, i) for i, ch in enumerate(text) if not ch.isspace() and ch not in _SKIP]
-
-
-def script_text_clean(script_text: str) -> str:
-    """Original script without heading lines / blank lines / tags (lines kept as lines)."""
-    script_text = re.sub(r"<[^>]+>", "", script_text.replace("\r\n", "\n").replace("\r", "\n"))
-    script_text = script_text.replace(" ", " ")
-    keep = [l for l in script_text.split("\n") if l.strip() and not _HEADING.match(l)]
-    return "\n".join(keep)
+_kept = tj.kept                      # the character stream compared with the source: shared, byte-identical to before
+script_text_clean = tj.source_clean  # original script without heading lines / blank lines / tags
 
 
 def _context(a: str, b: str) -> str:
@@ -98,7 +101,13 @@ def _context(a: str, b: str) -> str:
 
 
 def align_to_script(cue_texts: list[str], script_text: str):
-    """Return (lines, None) when the streams are identical, else (None, warning)."""
+    """Return (lines, None) when the streams are identical, else (None, warning).
+
+    Every cue becomes the matching slice of the original script. A cue boundary that fails
+    thai_junction.thai_junction_ok (a word cut in two, or a line starting with the mai yamok) is merged: the two
+    cues become ONE slice that spans both, then the next boundary is judged against the merged line. Raises
+    thai_junction.ToolMissing (or RuntimeError / SubprocessError) when a judged boundary exists and node or
+    pythainlp is unusable."""
     script = script_text_clean(script_text)
     sk = _kept(script)
     script_stream = "".join(c for c, _ in sk)
@@ -106,16 +115,38 @@ def align_to_script(cue_texts: list[str], script_text: str):
     srt_stream = "".join(cue_streams)
     if srt_stream != script_stream:
         return None, _context(srt_stream, script_stream)
-    lines, pos = [], 0
+    cues, pos = [], 0   # (first, last, kept offset of the first kept char): slices of the cleaned script
     for cs in cue_streams:
         if not cs:
             continue
         first, last = sk[pos][1], sk[pos + len(cs) - 1][1]
+        cues.append((first, last, pos))
         pos += len(cs)
-        text = clean(script[first:last + 1])
-        if text:
-            lines.append(text)
-    return lines, None
+
+    def text_of(first, last):
+        return clean(script[first:last + 1])
+
+    texts = [text_of(f, l) for f, l, _ in cues]
+    first_pass = [tj.break_probe(texts[i], texts[i + 1]) for i in range(len(texts) - 1)]
+    judged = [pr for pr in first_pass if pr is not None]
+    bsets = {}
+    src_ws = set()
+    if judged:
+        tj.check_tools()   # raises ToolMissing: never a silent "no merge"
+        bsets = tj.boundary_sets([l + r for l, r in judged])
+        src_ws = tj.source_whitespace(script_text)[1]
+    lines = []
+    cur_first, cur_last, cur_pos = cues[0] if cues else (0, -1, 0)
+    for nxt_first, nxt_last, nxt_pos in cues[1:]:
+        pr = tj.break_probe(text_of(cur_first, cur_last), text_of(nxt_first, nxt_last))
+        if pr is None or tj.thai_junction_ok(pr[0], pr[1], "break", bsets, nxt_pos in src_ws):
+            lines.append(text_of(cur_first, cur_last))
+            cur_first, cur_last, cur_pos = nxt_first, nxt_last, nxt_pos
+        else:
+            cur_last = nxt_last   # merge: one slice of the source that spans both cues
+    if cues:
+        lines.append(text_of(cur_first, cur_last))
+    return [l for l in lines if l], None
 
 
 def main(argv=None) -> int:
@@ -129,7 +160,11 @@ def main(argv=None) -> int:
     lines = parse(open(a.srt, encoding="utf-8-sig").read())
     mode, rc = "Thai-aware join", 0
     if a.script:
-        sliced, warning = align_to_script(lines, open(a.script, encoding="utf-8-sig").read())
+        try:
+            sliced, warning = align_to_script(lines, open(a.script, encoding="utf-8-sig").read())
+        except (tj.ToolMissing, RuntimeError, subprocess.SubprocessError) as e:
+            print(f"ERROR: required tool missing: {e}", file=sys.stderr)
+            return 4
         if sliced is not None:
             lines, mode = sliced, "original-script slices"
         else:
