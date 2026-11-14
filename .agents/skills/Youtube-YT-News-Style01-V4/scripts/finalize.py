@@ -1311,10 +1311,10 @@ def node_mismatch_hint(ctx):
 
     def ident(path):
         try:
-            r = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+            r = subprocess.run([path, '--version'], capture_output=True, text=True, errors='replace', timeout=10, stdin=subprocess.DEVNULL,
                                env={'HOME': passwd_home(), 'PATH': '/usr/bin:/bin', 'LANG': GATE_LANG})
             v = (r.stdout or r.stderr).strip().splitlines()[0][:60]
-        except (OSError, subprocess.TimeoutExpired, IndexError):
+        except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):   # a hint never changes the verdict
             v = 'version unknown'
         return '%s (%s)' % (path, v)
 
@@ -3112,7 +3112,7 @@ def tool_versions(tools):
 
     def run(cmd):
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, env=env)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', timeout=10, stdin=subprocess.DEVNULL, env=env)
             return (r.stdout or r.stderr).strip().splitlines()[0][:200]
         except (OSError, subprocess.TimeoutExpired, IndexError):
             return None

@@ -229,6 +229,35 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(r3.returncode, 0, json.dumps(report.get('issues'), ensure_ascii=False, indent=1))
         self.assertEqual(report['counts']['space-not-in-source'], 0)
 
+    # CF-A67 fix7 Fix 1: a U+200B at the start of the next page's body stays in displayText (caption_join's /\\s/u does not
+    # match it). The merge keeps the line break (rule 4 at the source space), so the page junction must agree with it.
+    CF_TAIL = 'ด้วยตัวเองต้องใช้เวลาฝึกฝนอย่างต่อเนื่องเพื่อความปลอดภัย'
+
+    def test_e2e_cf_at_the_start_of_the_next_page_with_a_source_space_passes(self):
+        self.node = load_tj().resolve_node()                  # the pinned node, never $PATH
+        cf = '\u200b'
+        source = 'ซึ่งบอกว่า' + cf + ' การขับรถ' + self.CF_TAIL + '\n'
+        lines, pages, r3, report = self.chain(source, ['ซึ่งบอกว่า', cf + 'การขับรถ' + self.CF_TAIL])
+        self.assertEqual(lines, ['ซึ่งบอกว่า', cf + ' การขับรถ' + self.CF_TAIL])        # the line break stays
+        # the scenario is real: some page's displayText really starts with U+200B
+        self.assertTrue(any(p.get('displayText', '').startswith(cf) for p in pages), [p.get('displayText') for p in pages])
+        self.assertEqual(r3.returncode, 0, json.dumps(report.get('issues'), ensure_ascii=False, indent=1))
+        self.assertEqual(report['counts'].get('midword-page-break', 0), 0)
+
+    def test_e2e_cf_at_the_start_of_the_next_page_without_a_source_space_fails_for_the_source(self):
+        # No whitespace in the source here, only a Cf: srt_to_script merges the cue boundary (rules 3-4 fail, no source
+        # whitespace), but the Cf-only gap itself is still a junction that is not a Thai word boundary and a Cf-only run never
+        # gets rule 4. So the captions gate fails with midword-space / midword-page-break and NOT with space-not-in-source:
+        # the same agreed policy as a source typo (the source script must change; CF-A68).
+        self.node = load_tj().resolve_node()
+        cf = '\u200b'
+        source = 'ซึ่งบอกว่า' + cf + 'การขับรถ' + self.CF_TAIL + '\n'
+        lines, pages, r3, report = self.chain(source, ['ซึ่งบอกว่า', cf + 'การขับรถ' + self.CF_TAIL])
+        self.assertEqual(lines, [source.strip()])                                           # merged into one line
+        self.assertEqual(r3.returncode, 1, r3.stdout)
+        self.assertGreaterEqual(report['counts']['midword-space'], 1)
+        self.assertEqual(report['counts']['space-not-in-source'], 0)
+
     # CF-A67 fix6 Fix 3: the agreed policy, pinned. A source space at a cue boundary that fails rules 3-4 stays in the
     # merged line, so the job fails at `captions` (the source script must change; a source typo is the script step's problem)
     def test_e2e_source_space_inside_a_word_fails_at_captions(self):

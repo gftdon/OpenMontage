@@ -2361,9 +2361,12 @@ class ScriptNodeTests(FinalizeBase):
 
     def test_a_script_mismatch_names_the_gate_node(self):
         self.hand_edit_the_script()
-        self.assertEqual(1, self.run_fin(), self.out)
+        first = next(c for c in self.module().TOOL_CANDIDATES['node'] if os.path.isfile(c) and os.access(c, os.X_OK))
+        # pin PATH: the "no different binary" claim must not depend on which node the runner's own PATH finds first
+        with mock.patch.dict(os.environ, {'PATH': os.path.dirname(first) + os.pathsep + '/usr/bin:/bin'}):
+            self.assertEqual(1, self.run_fin(), self.out)
         reason = self.gate(self.failed(), 'script')['reason']
-        node = os.path.realpath(next(c for c in self.module().TOOL_CANDIDATES['node'] if os.path.isfile(c) and os.access(c, os.X_OK)))
+        node = os.path.realpath(first)
         self.assertIn('node of the gates: ' + node, reason)
         self.assertIn('edit it by hand', reason)                                               # the old message is still there
         self.assertNotIn('different binary', reason)                                           # the PATH node is the same one
@@ -2380,6 +2383,20 @@ class ScriptNodeTests(FinalizeBase):
         self.assertIn('the node on your $PATH is a different binary: ' + os.path.realpath(stubs / 'node'), reason)
         self.assertIn('v0.0.0-stub', reason)
         self.assertIn('not a bare `node`', reason)
+
+    def test_a_path_node_that_prints_invalid_utf8_does_not_crash_the_gate(self):
+        # the hint is a message: a PATH node whose --version is not UTF-8 must leave the class-1 byte-mismatch verdict alone
+        self.hand_edit_the_script()
+        stubs = Path(self.tmp) / 'path_stub_bad'
+        stubs.mkdir()
+        (stubs / 'node').write_text("#!/bin/sh\nprintf '\\377\\376'\n")
+        (stubs / 'node').chmod(0o755)
+        with mock.patch.dict(os.environ, {'PATH': str(stubs) + os.pathsep + os.environ.get('PATH', '')}):
+            self.assertEqual(1, self.run_fin(), self.out)
+        g = self.gate(self.failed(), 'script')
+        self.assertEqual('fail', g['status'], g)      # a byte mismatch (the run exit 1 above is its class), not `crashed`
+        self.assertIn('the node on your $PATH is a different binary: ' + os.path.realpath(stubs / 'node'), g['reason'])
+        self.assertIn('edit it by hand', g['reason'])
 
     def test_the_hint_is_a_message_only_and_empty_without_a_gate_node(self):
         m = self.module()

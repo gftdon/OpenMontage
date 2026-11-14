@@ -228,7 +228,12 @@ def lint_pages(pages, source_text=None):
             continue
         if nbody[0] == MAI_YAMOK:
             continue   # a page that starts with ๆ is already judged (and reported) by its own junction_gaps above
-        src_ok = bool(ws) and judge_run(ws, base[i] + n_lead, src_ws, "break")[0]
+        # The run that faces the junction also holds what lstrip_ws removed from the START of the body (a U+200B stays in
+        # displayText: caption_join's /\s/u does not match it). k_after is the kept offset of nbody[0], past those Cf.
+        body_lead = body[:len(body) - len(nbody)]
+        run = ws + body_lead
+        k_after = base[i] + n_lead + len(kept(body_lead)) if offs_ok else None
+        src_ok = bool(run) and judge_run(run, k_after, src_ws, "break")[0]
         if any(c in LINE_BREAKS for c in ws):
             # a script line break: judge the full lines on both sides, the same strings lint_script / the cue merge use
             pr = break_probe(*_line_around(full, offs[i]))

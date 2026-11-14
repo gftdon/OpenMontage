@@ -635,5 +635,52 @@ class PageLeadCfOffsetTests(unittest.TestCase):
         self.assertEqual(self.m.lint_pages([_page(self.PAGE1), _page(self.BODY2, 2.0)], src), [])
 
 
+class PageJunctionBodyLeadTests(unittest.TestCase):
+    """CF-A67 fix7: the run that faces a page junction = trailing ws/Cf of the previous text + the page lead + the leading
+    ws/Cf of the body (a U+200B stays in displayText), and k_after is the kept offset of the first real character."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    CF = '\u200b'
+    FEFF = '\ufeff'
+    TAIL = 'ซึ่งบอกว่า'
+    HEAD = 'การขับรถด้วยตัวเอง'
+
+    def pages_body_cf(self, display=None):
+        # caption_join: page 2 starts at the line break; the U+200B stays in displayText
+        body = self.CF + ' ' + self.HEAD
+        return [_page(self.TAIL), _page('\n' + body, 2.0, display=body if display is None else display, lead='\n')]
+
+    def test_body_starting_with_a_cf_and_a_source_space_passes_by_rule_4(self):
+        src = self.TAIL + self.CF + ' ' + self.HEAD + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages_body_cf(), src), [])
+
+    def test_source_space_before_the_cf_at_the_body_start_passes_by_rule_4(self):
+        # the source space sits BEFORE the Cf: the judged range must start at the Cf (the body-lead Cf is part of the run)
+        src = self.TAIL + ' ' + self.CF + self.HEAD + '\n'
+        pages = [_page(self.TAIL), _page('\n' + self.CF + self.HEAD, 2.0, display=self.CF + self.HEAD, lead='\n')]
+        self.assertEqual(self.m.lint_pages(pages, src), [])
+
+    def test_body_starting_with_a_cf_and_no_source_space_fails(self):
+        src = self.TAIL + self.CF + self.HEAD + '\n'
+        pages = [_page(self.TAIL), _page('\n' + self.CF + self.HEAD, 2.0, display=self.CF + self.HEAD, lead='\n')]
+        self.assertEqual(codes(self.m.lint_pages(pages, src)), ['midword-page-break'])
+
+    def test_a_cf_in_the_lead_and_the_source_space_passes_and_without_the_space_fails(self):
+        pages = [_page(self.TAIL), _page(self.FEFF + ' ' + self.HEAD, 2.0, display=self.HEAD, lead=self.FEFF + ' ')]
+        self.assertEqual(self.m.lint_pages(pages, self.TAIL + self.FEFF + ' ' + self.HEAD + '\n'), [])
+        src_no_space = self.TAIL + self.FEFF + self.HEAD + '\n'
+        pages2 = [_page(self.TAIL), _page(self.FEFF + self.HEAD, 2.0, display=self.HEAD, lead=self.FEFF)]
+        self.assertEqual(codes(self.m.lint_pages(pages2, src_no_space)), ['midword-page-break'])
+
+    def test_display_text_that_disagrees_with_text_gets_rule_4_off_at_the_page_junction(self):
+        src = self.TAIL + self.CF + ' ' + self.HEAD + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages_body_cf(), src), [])        # the same pages, agreeing: rule 4
+        issues = self.m.lint_pages(self.pages_body_cf(display=self.CF + ' ' + self.HEAD + 'ย'), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+
 if __name__ == '__main__':
     unittest.main()
