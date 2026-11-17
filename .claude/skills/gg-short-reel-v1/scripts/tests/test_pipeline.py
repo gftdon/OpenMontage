@@ -288,6 +288,23 @@ class InputValidationTests(Base):
         task.write_all()
         self._fail(task, "placement")
 
+    def test_g_non_english_on_screen_text_fails_at_script_stage(self):
+        task = self.task()
+        task.script["on_screen_text"][1]["text"] = "ยายกับตาหัวเราะ"
+        task.write_all()
+        music = FakeMusic()
+        with mock.patch.object(self.gg.compose, "estimate_duration", side_effect=AssertionError("probe must not run")), \
+                mock.patch.object(self.gg.compose, "build_base", side_effect=AssertionError("compose must not run")), \
+                mock.patch.object(self.gg.audio, "validate_music", side_effect=AssertionError("music must not be decoded")):
+            rc = self.run_task(task, music)
+        res = self.assertFailed(task, rc, contains="ต้องเป็นภาษาอังกฤษเท่านั้น", retry_safe=True)
+        self.assertIn("[script]", res["error"])
+        self.assertIn("on_screen_text[1]", res["error"])
+        self.assertEqual([], music.calls, "music must never be asked for")
+        diag = json.loads((task.run_dir / (task.final.name + ".FAILED.json")).read_text())
+        self.assertEqual("script", diag["stage"])
+        self.assertEqual(sorted(["request.json", "result.json", task.final.name + ".FAILED.json"]), task.run_dir_names())
+
     def test_g_request_contract_violations(self):
         for key, bad in (("kind", "edit_long"), ("aspect", "16:9"), ("schema", 2),
                          ("outputs", ["/x/not_final.mp4"]), ("outputs", [])):

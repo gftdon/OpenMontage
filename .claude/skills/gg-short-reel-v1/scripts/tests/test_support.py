@@ -124,9 +124,9 @@ DEFAULT_SHOTS = [
 ]  # 150 + 149 + 60 = 359 frames = 11.967 s
 
 DEFAULT_TEXTS = [
-    {"text": "จังหวะนี้ใครก็ไม่คาด", "start_s": 0.5, "end_s": 3.0, "placement": "top"},
+    {"text": "Nobody saw this coming", "start_s": 0.5, "end_s": 3.0, "placement": "top"},
     {"text": "Look closely at the second shot", "start_s": 3.0, "end_s": 6.0, "placement": "center"},
-    {"text": "ติดตามตอนต่อไป", "start_s": 8.0, "end_s": 99.0, "placement": "bottom"},
+    {"text": "Follow for the next part", "start_s": 8.0, "end_s": 99.0, "placement": "bottom"},
 ]
 
 

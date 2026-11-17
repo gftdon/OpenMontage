@@ -151,7 +151,8 @@ class UnrenderableStripTests(unittest.TestCase):
         self.assertEqual("บน\nล่าง", self.strip("บน ❤\n\n❤\nล่าง")[0])
 
     def _items(self, *texts):
-        return self.overlay.parse_items([{"text": t, "start_s": 0, "end_s": 2, "placement": "top"} for t in texts])
+        # built directly (not via parse_items, which now rejects non-Latin text): these tests are about glyph stripping
+        return [self.overlay.TextItem(t.strip(), 0.0, 2.0, "top", i) for i, t in enumerate(texts)]
 
     def test_sanitize_items_drops_emoji_only_item_and_logs_to_stderr(self):
         import contextlib
@@ -217,6 +218,53 @@ class UnrenderableStripTests(unittest.TestCase):
                 ov.burn(base, self._items("❤️"), self.font, out, d, common.Deadline(60))
             self.assertTrue(out.is_file() and out.stat().st_size > 0)
             self.assertIn("on_screen_text[0]", buf.getvalue())
+
+
+class EnglishOnlyTests(unittest.TestCase):
+    """CF-A85 R3-7: on-screen text must be Latin-script (G&G on-video text is English)."""
+
+    def setUp(self):
+        import overlay
+        self.overlay = overlay
+
+    def _parse(self, *texts):
+        return self.overlay.parse_items([{"text": t, "start_s": 0, "end_s": 2, "placement": "top"} for t in texts])
+
+    def test_thai_in_item_1_names_the_index_and_shows_sample(self):
+        with self.assertRaises(self.overlay.OverlayError) as cm:
+            self._parse("Hello", "ยายกับตา")
+        msg = str(cm.exception)
+        self.assertIn("on_screen_text[1]", msg)
+        self.assertNotIn("on_screen_text[0]", msg)
+        self.assertIn("ต้องเป็นภาษาอังกฤษเท่านั้น", msg)
+        self.assertIn('"ยากบต"', msg)   # distinct letters, in order of appearance
+
+    def test_japanese_and_cyrillic_rejected(self):
+        for text in ("こんにちは", "Привет", "mixed ok สวัสดี", "한국어", "مرحبا"):
+            with self.subTest(text=text), self.assertRaises(self.overlay.OverlayError):
+                self._parse(text)
+
+    def test_sample_is_capped_at_five_distinct_characters(self):
+        with self.assertRaises(self.overlay.OverlayError) as cm:
+            self._parse("กขคงจฉชซญ กขค")
+        msg = str(cm.exception)
+        self.assertIn("กขคงจ", msg)
+        self.assertNotIn("ฉ", msg)
+
+    def test_decomposed_input_is_normalised_before_judging(self):
+        import unicodedata
+        self.assertEqual(1, len(self._parse(unicodedata.normalize("NFD", "Café déjà vu"))))
+
+    def test_english_and_latin_variants_pass(self):
+        for text in ("Look closely at the second shot", "I love you ❤", "I love you ❤️ 👍🏽", "Café déjà vu", "Señor Müller",
+                     "ＡＩ", "2026", "100% !?.,—…", "1ª y 2º", "Line one\nLine two"):
+            with self.subTest(text=text):
+                self.assertEqual(1, len(self._parse(text)))
+
+    def test_check_runs_on_raw_text_before_stripping(self):
+        # a Thai word next to an emoji is still rejected (the emoji would be stripped later, the Thai is not)
+        with self.assertRaises(self.overlay.OverlayError):
+            self._parse("❤️ ใจ")
 
 
 if __name__ == "__main__":

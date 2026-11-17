@@ -56,6 +56,22 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+_LATIN_ORDINALS = "ªº"   # Script=Latin, but their Unicode names lack "LATIN"
+_SAMPLE_MAX = 5
+
+
+def non_latin_letters(text):
+    """Distinct letters (in order of appearance) that are not Latin script, after NFC. Digits, punctuation, symbols,
+    emoji and whitespace are not letters; Latin with diacritics and fullwidth Latin are Latin."""
+    seen = []
+    for ch in unicodedata.normalize("NFC", text):
+        if ch in seen or ch in _LATIN_ORDINALS or not unicodedata.category(ch).startswith("L"):
+            continue
+        if "LATIN" not in unicodedata.name(ch, ""):
+            seen.append(ch)
+    return seen
+
+
 def parse_items(raw):
     if not isinstance(raw, list):
         raise OverlayError("on_screen_text ต้องเป็น list")
@@ -67,6 +83,9 @@ def parse_items(raw):
         text = it.get("text")
         if not isinstance(text, str) or not text.strip():
             raise OverlayError(f"{p}.text ต้องเป็นข้อความที่ไม่ว่าง")
+        bad = non_latin_letters(text)    # judged on the raw text, before strip_unrenderable
+        if bad:
+            raise OverlayError(f'{p}.text ต้องเป็นภาษาอังกฤษเท่านั้น (พบอักษรที่ไม่ใช่ละติน "{"".join(bad[:_SAMPLE_MAX])}")')
         if not _num(it.get("start_s")) or not _num(it.get("end_s")) or it["start_s"] < 0:
             raise OverlayError(f"{p}.start_s/end_s ต้องเป็นตัวเลขจำกัด (start_s >= 0)")
         if it.get("placement") not in PLACEMENTS:
