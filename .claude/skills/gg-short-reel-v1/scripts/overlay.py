@@ -1,4 +1,5 @@
 """On-screen text: Pillow-rendered PNG per item, burned with ffmpeg overlay inside the Instagram safe zone."""
+import bisect
 import math
 import os
 import re
@@ -9,6 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import common
+import latin_script_ranges
 
 # Instagram Reels safe zone on 1080x1920 (top dead 210 px, bottom dead 310 px, side margins 90 px)
 SAFE_X0, SAFE_Y0, SAFE_X1, SAFE_Y1 = 90, 210, 990, 1600
@@ -56,18 +58,24 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-_LATIN_ORDINALS = "ªº"   # Script=Latin, but their Unicode names lack "LATIN"
 _SAMPLE_MAX = 5
+_LATIN_STARTS = tuple(a for a, _ in latin_script_ranges.LATIN_RANGES)
+
+
+def _is_latin(cp):
+    """Script=Latin by table (generated from node's /\\p{Script=Latin}/u, the same standard AIOS uses)."""
+    i = bisect.bisect_right(_LATIN_STARTS, cp) - 1
+    return i >= 0 and cp <= latin_script_ranges.LATIN_RANGES[i][1]
 
 
 def non_latin_letters(text):
-    """Distinct letters (in order of appearance) that are not Latin script, after NFC. Digits, punctuation, symbols,
-    emoji and whitespace are not letters; Latin with diacritics and fullwidth Latin are Latin."""
+    """Distinct letters (in order of appearance) that are not Script=Latin, after NFC. Digits, punctuation, symbols,
+    emoji and whitespace are not letters (category L*); Latin with diacritics, modifier letters and fullwidth Latin are Latin."""
     seen = []
     for ch in unicodedata.normalize("NFC", text):
-        if ch in seen or ch in _LATIN_ORDINALS or not unicodedata.category(ch).startswith("L"):
+        if ch in seen or not unicodedata.category(ch).startswith("L"):
             continue
-        if "LATIN" not in unicodedata.name(ch, ""):
+        if not _is_latin(ord(ch)):
             seen.append(ch)
     return seen
 

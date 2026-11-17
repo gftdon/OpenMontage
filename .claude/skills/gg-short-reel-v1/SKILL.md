@@ -50,7 +50,7 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 3. เขียน JSON นี้ไปที่ `result_path` (ต้องอยู่โฟลเดอร์เดียวกับ `request.json`; ถ้าไม่ใช่ ให้รายงานแล้วหยุด):
    `{ <correlation 6 ฟิลด์>, "status": "failed", "error": "<เหตุผลเฉพาะเจาะจง: exit code + บรรทัด stderr ของสคริปต์>", "retry_safe": true, "outputs": [] }`
    — `retry_safe` เป็น `true` เสมอเพราะสกิลนี้ไม่ทำงานที่เสียเงิน
-4. เขียนด้วย temp file ในโฟลเดอร์เดียวกันแล้ว rename เข้าที่แบบไม่ทับ (`mv -n <tmp> <result_path>` แล้วลบ tmp ที่เหลือถ้ามี) — ห้ามเขียนตรงลง `result.json`
+4. เขียนด้วย temp file ในโฟลเดอร์เดียวกันแล้ว link เข้าที่แบบไม่ทับ: `ln <tmp> <result_path> && rm <tmp>` — ถ้า `ln` ล้มเพราะ `result_path` มีอยู่แล้ว **ห้ามเขียนทับเด็ดขาด** ให้ลบ tmp (`rm <tmp>`) แล้วรายงานตามที่มี (ห้ามใช้ `mv`/`cp`/`>` ลงบน `result.json`) — ห้ามเขียนตรงลง `result.json`
 5. ห้ามทำอย่างอื่นเพิ่ม (ไม่รันสคริปต์ซ้ำ ไม่สร้างไฟล์ final)
 
 ## ข้อห้าม

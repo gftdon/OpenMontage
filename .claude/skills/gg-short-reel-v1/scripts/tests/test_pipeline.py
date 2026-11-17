@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -694,6 +695,93 @@ class ReceiptUnitTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr)
             self.assertEqual("garbage", p.read_text())
+            self.assertEqual(["result.json"], self._names(d))
+
+    def test_publish_receipt_lock_covers_classify_to_replace_gap(self):
+        """R4-3: writer A classified a non-terminal file and is about to os.replace; writer B (a thread) tries to publish a
+        terminal receipt for the same correlation in that window. B must wait for A (lock), then see A's terminal receipt
+        and leave it alone. Without the lock B's replace lands first and A silently clobbers it."""
+        import receipt
+        corr = self.CORR_FIXTURE
+        a_receipt = receipt.failure_receipt(corr, "A", True)
+        b_receipt = receipt.success_receipt(corr, ["/b"])
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+            p.write_text('{"status": "running"}')               # exists, but not terminal: A will replace it
+            b_started, b_done, b_result, seen = threading.Event(), threading.Event(), [], {}
+            real_replace = receipt._before_replace
+
+            def writer_b():
+                b_started.set()
+                try:
+                    b_result.append(receipt.publish_receipt(p, b_receipt, corr))
+                except BaseException as e:   # noqa: BLE001
+                    b_result.append(e)
+                finally:
+                    b_done.set()
+
+            thread = threading.Thread(target=writer_b, daemon=True)
+
+            def a_window(tmp, path):
+                real_replace(tmp, path)
+                if seen:                                         # only the first (A's) pass starts B
+                    return
+                seen["in_window"] = True
+                thread.start()
+                self.assertTrue(b_started.wait(10), "B never started")
+                # B had its chance to run to completion while A sits between classify and replace
+                seen["b_finished_inside_window"] = b_done.wait(0.5)
+
+            with mock.patch.object(receipt, "_before_replace", side_effect=a_window):
+                self.assertIsNone(receipt.publish_receipt(p, a_receipt, corr), "A wins: its receipt is now there")
+            self.assertTrue(b_done.wait(10), "B must be released once A is done (no deadlock)")
+            thread.join(10)
+            self.assertTrue(seen["in_window"])
+            self.assertFalse(seen["b_finished_inside_window"], "B must block while A holds the lock")
+            self.assertEqual([a_receipt["status"]], [b_result[0]], "B sees A's terminal receipt and returns its status")
+            self.assertEqual(a_receipt, json.loads(p.read_text()), "A's terminal receipt is the final file; nothing clobbered")
+            self.assertEqual(["result.json"], self._names(d), "tmp and lock file are gone")
+
+    def test_publish_receipt_many_writers_exactly_one_wins_and_lock_file_is_removed(self):
+        """The lock file is removed on exit; waiters that locked the unlinked inode must re-lock (no two holders)."""
+        import receipt
+        corr = self.CORR_FIXTURE
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+            gate, results = threading.Barrier(12), []
+
+            def writer(i):
+                gate.wait(10)
+                results.append(receipt.publish_receipt(p, receipt.success_receipt(corr, [f"/w{i}"]), corr))
+
+            threads = [threading.Thread(target=writer, args=(i,), daemon=True) for i in range(12)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+            self.assertEqual(12, len(results))
+            self.assertEqual(1, results.count(None), "exactly one writer published")
+            self.assertEqual(11, results.count("succeeded"))
+            winner = json.loads(p.read_text())["outputs"][0]
+            self.assertTrue(winner.startswith("/w"))
+            self.assertEqual(["result.json"], self._names(d))
+
+    def test_publish_receipt_lock_is_released_after_an_error(self):
+        import receipt
+        corr = self.CORR_FIXTURE
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+            p.write_text("garbage")
+            with mock.patch.object(os, "replace", side_effect=OSError("nope")):
+                with self.assertRaises(OSError):
+                    receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr)
+            done = []
+            t = threading.Thread(target=lambda: done.append(receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr)),
+                                 daemon=True)
+            t.start()
+            t.join(10)
+            self.assertEqual([None], done, "a second publish is not blocked by a leaked lock")
+            self.assertEqual("succeeded", json.loads(p.read_text())["status"])
             self.assertEqual(["result.json"], self._names(d))
 
     def test_existing_terminal_status_needs_terminal_status_and_full_correlation(self):
