@@ -24,6 +24,23 @@ def mean_volume_db(path, start, length):
     return float("-inf") if m.group(1) == "-inf" else float(m.group(1))
 
 
+class NextTpTrimUnitTests(unittest.TestCase):
+    def test_retry_only_for_on_target_loudness_with_true_peak_close_to_the_gate(self):
+        import audio
+        self.assertIsNone(audio.next_tp_trim(-14.2, -1.8, 0.0), "clear of the gate by more than the safety margin")
+        self.assertIsNone(audio.next_tp_trim(-14.2, -1.2, 0.0), "exactly at the safety margin: ok")
+        t = audio.next_tp_trim(-14.2, -0.7, 0.0)
+        self.assertAlmostEqual(0.8, t, places=6)                       # aims at MAX_TP - TP_LAND_DB = -1.5
+        self.assertAlmostEqual(0.31, audio.next_tp_trim(-14.2, -1.19, 0.0), places=6)
+        self.assertGreater(audio.next_tp_trim(-14.2, -0.7, 0.8), 0.8, "trim accumulates")
+        self.assertIsNone(audio.next_tp_trim(-20.0, -0.5, 0.0), "loudness off target: a lower peak target does not fix that")
+        self.assertIsNone(audio.next_tp_trim(-14.2, -0.5, audio.MAX_TP_TRIM_DB), "trim exhausted")
+        self.assertEqual(audio.MAX_TP_TRIM_DB, audio.next_tp_trim(-14.2, 5.0, 3.0), "capped")
+        for bad in (float("nan"), float("inf"), None, "x"):
+            self.assertIsNone(audio.next_tp_trim(bad, -0.5, 0.0))
+            self.assertIsNone(audio.next_tp_trim(-14.2, bad, 0.0))
+
+
 class FileMusicProviderUnitTests(unittest.TestCase):
     def test_is_not_paid_and_has_no_not_configured_default(self):
         import audio
@@ -204,6 +221,53 @@ class MusicMixTests(Base):
         i, tp = ts.measure_loudness(task.final)
         self.assertAlmostEqual(-14.0, i, delta=1.0)
         self.assertLessEqual(tp, -1.0)
+
+    def _spy_bed(self, calls):
+        import audio
+        real = audio.build_music_bed
+
+        def spy(music, duration_s, out_wav, deadline, tp_trim_db=0.0):
+            calls.append(tp_trim_db)
+            return real(music, duration_s, out_wav, deadline, tp_trim_db=tp_trim_db)
+
+        return mock.patch.object(audio, "build_music_bed", side_effect=spy)
+
+    def test_r3_5_noise_seeds_that_used_to_miss_the_true_peak_gate_now_pass(self):
+        # seeds 10 and 13 measured -0.7 / -0.9 dBTP on the delivered AAC before the closed loop (gate -1.0); 22 sat at -1.00, 26 at -1.14.
+        # The full 30-seed sweep is the manual tool tests/sweep_loudness.py (~3 min: too slow for the suite).
+        import audio
+        for seed in (10, 13, 22, 26):
+            with self.subTest(seed=seed), tempfile.TemporaryDirectory() as d:
+                task = Task(Path(d), music_kind="bursts", music_amp=0.9, music_seed=seed)
+                trims = []
+                with self._spy_bed(trims):
+                    self.assertEqual(0, self.run_task(task, None), task.result_path.read_text())
+                i, tp = ts.measure_loudness(task.final)
+                self.assertAlmostEqual(-14.0, i, delta=1.0)
+                self.assertLessEqual(tp, audio.MAX_TP - audio.TP_SAFETY_DB, f"seed {seed}: {i} LUFS / {tp} dBTP")
+                self.assertGreater(len(trims), 1, "the bed was rebuilt with more headroom")
+                self.assertEqual(0.0, trims[0])
+                self.assertEqual(sorted(trims), trims)
+
+    def test_r3_5_retry_is_bounded_and_the_final_gate_still_decides(self):
+        import audio
+        task = self.task()
+        calls = []
+        with self._spy_bed(calls), mock.patch.object(audio, "measure_loudness", return_value=(-14.0, -0.5)):
+            rc = self.run_task(task, None)
+        self.assertFailed(task, rc, contains="loudness")
+        self.assertEqual(audio.MUX_ATTEMPTS, len(calls))
+        self.assertEqual(0.0, calls[0])
+        self.assertTrue(all(b > a for a, b in zip(calls, calls[1:])))
+
+    def test_r3_5_off_target_loudness_is_not_retried(self):
+        import audio
+        task = self.task()
+        calls = []
+        with self._spy_bed(calls), mock.patch.object(audio, "measure_loudness", return_value=(-20.0, -0.2)):
+            rc = self.run_task(task, None)
+        self.assertFailed(task, rc, contains="loudness")
+        self.assertEqual(1, len(calls))
 
     def test_peaky_music_bed_uses_limiter_and_lands_on_target(self):
         import audio

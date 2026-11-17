@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -337,16 +338,16 @@ class RobustnessTests(Base):
     def test_i_receipt_write_failure_after_final_removes_final(self):
         import receipt
         task = self.task()
-        real = receipt.write_receipt
+        real = receipt.publish_receipt
         calls = []
 
-        def flaky(path, data):
+        def flaky(path, data, correlation):
             calls.append(data.get("status"))
             if len(calls) == 1:
                 raise OSError("disk full")
-            return real(path, data)
+            return real(path, data, correlation)
 
-        with mock.patch.object(receipt, "write_receipt", side_effect=flaky):
+        with mock.patch.object(receipt, "publish_receipt", side_effect=flaky):
             rc = self.run_task(task, FakeMusic())
         self.assertEqual(["succeeded", "failed"], calls)
         self.assertFailed(task, rc, contains="disk full")
@@ -451,6 +452,132 @@ class TerminalReceiptNotOverwrittenTests(Base):
         self._run_refused(task, Plant())
         self.assertEqual(planted, task.result())
 
+    # ---- R3-1: a success receipt that appears mid-run points at the final path: that file must survive untouched
+
+    def _fingerprint(self, path):
+        data = Path(path).read_bytes()
+        shape = [(s["codec_type"], s.get("codec_name"), s.get("width"), s.get("height")) for s in ts.probe(path)["streams"]]
+        return hashlib.sha256(data).hexdigest(), len(data), shape
+
+    def test_r3_1_success_receipt_mid_run_keeps_the_final_it_points_to(self):
+        import receipt
+        task = self.task()
+        planted = receipt.success_receipt(receipt.correlation_of(task.request), task.request["outputs"])
+        seen = {}
+
+        class Plant(FakeMusic):
+            def get_music(inner, duration_s, mood, out_path):
+                receipt.write_receipt(task.result_path, planted)
+                return FakeMusic.get_music(inner, duration_s, mood, out_path)
+
+        # the planted receipt is only noticed AFTER our link published the final: observe the final the instant before
+        # the receipt decision, then compare after the refusal
+        real = receipt.publish_receipt
+
+        def spy(*a, **k):
+            seen["before"] = self._fingerprint(task.final)
+            return real(*a, **k)
+
+        with mock.patch.object(receipt, "publish_receipt", side_effect=spy):
+            self._run_refused(task, Plant())
+        self.assertEqual(planted, task.result())
+        self.assertTrue(task.final.is_file(), "the final the success receipt points at must still exist")
+        self.assertEqual(seen["before"], self._fingerprint(task.final), "sha256 + size + stream shape unchanged")
+        self.assertEqual(sorted(["request.json", "result.json", task.final.name]), task.run_dir_names())
+
+    def test_r3_1_failed_receipt_mid_run_still_removes_our_own_final(self):
+        import receipt
+        task = self.task()
+        planted = receipt.failure_receipt(receipt.correlation_of(task.request), "planted", True)
+
+        class Plant(FakeMusic):
+            def get_music(inner, duration_s, mood, out_path):
+                receipt.write_receipt(task.result_path, planted)
+                return FakeMusic.get_music(inner, duration_s, mood, out_path)
+
+        self._run_refused(task, Plant())
+        self.assertEqual(planted, task.result())
+        self.assertFalse(task.final.exists(), "a failed receipt has no outputs: our own final does not stay")
+        self.assertEqual(["request.json", "result.json"], task.run_dir_names())
+
+    # ---- R3-2: no-clobber atomic publication: the competitor lands between our check and our link
+
+    def _race(self, task, competing, provider=None):
+        """Drop `competing` into result.json at the point immediately before our link; returns (rc, stderr, fingerprint then)."""
+        import receipt
+        seen = {}
+
+        def plant(tmp, result_path):
+            seen["final"] = self._fingerprint(task.final) if task.final.exists() else None
+            Path(result_path).write_text(json.dumps(competing))
+
+        err = io.StringIO()
+        with mock.patch.object(receipt, "_before_link", side_effect=plant), contextlib.redirect_stderr(err):
+            rc = self.run_task(task, provider if provider is not None else FakeMusic())
+        return rc, err.getvalue(), seen
+
+    def test_r3_2_success_race_terminal_same_correlation_is_not_overwritten(self):
+        import receipt
+        task = self.task()
+        corr = receipt.correlation_of(task.request)
+        competing = {**receipt.success_receipt(corr, task.request["outputs"]), "marker": "theirs"}
+        rc, err, seen = self._race(task, competing)
+        self.assertEqual(self.gg.EXIT_RECEIPT_EXISTS, rc)
+        self.assertEqual(competing, task.result(), "their terminal receipt must not be overwritten")
+        self.assertTrue(task.final.is_file(), "R3-1: the final their success receipt points at stays")
+        self.assertEqual(seen["final"], self._fingerprint(task.final))
+        self.assertEqual(sorted(["request.json", "result.json", task.final.name]), task.run_dir_names(), "no tmp file left")
+        self.assertIn("ไม่เขียนทับ", err)
+
+    def test_r3_2_success_race_failed_same_correlation_is_not_overwritten_and_our_final_goes(self):
+        import receipt
+        task = self.task()
+        competing = {**receipt.failure_receipt(receipt.correlation_of(task.request), "theirs", True), "marker": "theirs"}
+        rc, _, _ = self._race(task, competing)
+        self.assertEqual(self.gg.EXIT_RECEIPT_EXISTS, rc)
+        self.assertEqual(competing, task.result())
+        self.assertFalse(task.final.exists())
+        self.assertEqual(["request.json", "result.json"], task.run_dir_names())
+
+    def test_r3_2_success_race_different_correlation_is_replaced(self):
+        import receipt
+        task = self.task()
+        competing = receipt.success_receipt({**receipt.correlation_of(task.request), "dispatch_id": "older"}, ["/old/x.mp4"])
+        rc, _, _ = self._race(task, competing)
+        self.assertEqual(0, rc)
+        self.assertEqual("succeeded", task.result()["status"])
+        self.assertEqual("dispatch-1", task.result()["dispatch_id"])
+        self.assertEqual(sorted(["request.json", "result.json", task.final.name]), task.run_dir_names())
+
+    def test_r3_2_success_race_non_terminal_or_garbage_is_replaced(self):
+        for content in ({"status": "running"}, [], "garbage"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as d:
+                task = Task(Path(d))
+                rc, _, _ = self._race(task, content)
+                self.assertEqual(0, rc)
+                self.assertEqual("succeeded", task.result()["status"])
+                self.assertEqual(sorted(["request.json", "result.json", task.final.name]), task.run_dir_names())
+
+    def test_r3_2_failure_race_terminal_same_correlation_is_not_overwritten_and_leaves_no_diagnostic(self):
+        import receipt
+        task = self.task()
+        corr = receipt.correlation_of(task.request)
+        competing = {**receipt.success_receipt(corr, task.request["outputs"]), "marker": "theirs"}
+        rc, _, _ = self._race(task, competing, FakeMusic(mode="empty"))
+        self.assertEqual(self.gg.EXIT_RECEIPT_EXISTS, rc)
+        self.assertEqual(competing, task.result())
+        self.assertEqual(["request.json", "result.json"], task.run_dir_names(), "no tmp, no .FAILED.json, no partial")
+
+    def test_r3_2_failure_race_different_correlation_is_replaced_by_our_failure(self):
+        import receipt
+        task = self.task()
+        competing = receipt.failure_receipt({**receipt.correlation_of(task.request), "run_id": "older"}, "old", True)
+        rc, _, _ = self._race(task, competing, FakeMusic(mode="empty"))
+        self.assertNotEqual(self.gg.EXIT_RECEIPT_EXISTS, rc)
+        self.assertEqual("failed", task.result()["status"])
+        self.assertEqual("run-edit-1", task.result()["run_id"])
+        self.assertEqual([n for n in task.run_dir_names() if n.startswith(".") or n.endswith(".tmp")], [])
+
     def test_receipt_with_different_correlation_is_replaced_as_before(self):
         import receipt
         task = self.task()
@@ -488,6 +615,69 @@ class ReceiptUnitTests(unittest.TestCase):
             receipt.write_receipt(p, {"a": 1})
             self.assertEqual({"a": 1}, json.loads(p.read_text()))
             self.assertEqual(["result.json"], sorted(x.name for x in Path(d).iterdir()))
+
+    CORR_FIXTURE = {"schema": 1, "task_id": "t", "step_id": "s", "run_id": "r", "dispatch_id": "d",
+                    "target": {"project_id": "p", "config_ref": "c"}}
+
+    def _names(self, d):
+        return sorted(x.name for x in Path(d).iterdir())
+
+    def test_publish_receipt_is_no_clobber_atomic_and_leaves_no_temp(self):
+        import receipt
+        corr = self.CORR_FIXTURE
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+            self.assertIsNone(receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr), "absent: written")
+            self.assertEqual("succeeded", json.loads(p.read_text())["status"])
+            self.assertEqual(["result.json"], self._names(d))
+            # same-correlation terminal already there (either status): untouched, status reported
+            before = p.read_bytes()
+            self.assertEqual("succeeded", receipt.publish_receipt(p, receipt.failure_receipt(corr, "e", True), corr))
+            self.assertEqual(before, p.read_bytes())
+            p.write_text(json.dumps(receipt.failure_receipt(corr, "theirs", True)))
+            before = p.read_bytes()
+            self.assertEqual("failed", receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr))
+            self.assertEqual(before, p.read_bytes())
+            self.assertEqual(["result.json"], self._names(d))
+
+    def test_publish_receipt_replaces_foreign_or_unreadable_existing_file(self):
+        import receipt
+        corr = self.CORR_FIXTURE
+        other = receipt.failure_receipt({**corr, "dispatch_id": "d2"}, "e", True)
+        for content in (json.dumps(other), '{"status": "running"}', "garbage", "", "[]"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "result.json"
+                p.write_text(content)
+                self.assertIsNone(receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr))
+                self.assertEqual("succeeded", json.loads(p.read_text())["status"])
+                self.assertEqual(["result.json"], self._names(d))
+
+    def test_publish_receipt_competitor_at_the_link_point_is_not_overwritten(self):
+        import receipt
+        corr = self.CORR_FIXTURE
+        theirs = {**receipt.success_receipt(corr, ["/x"]), "marker": "theirs"}
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+
+            def plant(tmp, path):
+                Path(path).write_text(json.dumps(theirs))
+
+            with mock.patch.object(receipt, "_before_link", side_effect=plant):
+                self.assertEqual("succeeded", receipt.publish_receipt(p, receipt.success_receipt(corr, ["/y"]), corr))
+            self.assertEqual(theirs, json.loads(p.read_text()))
+            self.assertEqual(["result.json"], self._names(d))
+
+    def test_publish_receipt_removes_temp_when_the_replace_fails(self):
+        import receipt
+        corr = self.CORR_FIXTURE
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+            p.write_text("garbage")
+            with mock.patch.object(os, "replace", side_effect=OSError("nope")):
+                with self.assertRaises(OSError):
+                    receipt.publish_receipt(p, receipt.success_receipt(corr, ["/x"]), corr)
+            self.assertEqual("garbage", p.read_text())
+            self.assertEqual(["result.json"], self._names(d))
 
     def test_existing_terminal_status_needs_terminal_status_and_full_correlation(self):
         import receipt

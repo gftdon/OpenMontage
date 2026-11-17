@@ -63,9 +63,11 @@ def make_clip(path, *, w=416, h=752, frames=150, base=20, step=3, two_video=True
 MUSIC_NOISE_SEED = 8501  # fixed anoisesrc seed: the fixture must be byte-identical on every generation
 
 
-def make_music(path, *, seconds=14.0, kind="tone", amp=0.3, freq=440, video_only=False):
-    """AIOS-style music fixture (mp3). kind: 'tone' (steady sine), 'bursts' (loud transient-rich pink-noise bursts)."""
-    key = hashlib.sha1(json.dumps(["music", seconds, kind, amp, freq, video_only, MUSIC_NOISE_SEED]).encode()).hexdigest()[:16]
+def make_music(path, *, seconds=14.0, kind="tone", amp=0.3, freq=440, video_only=False, seed=None):
+    """AIOS-style music fixture (mp3). kind: 'tone' (steady sine), 'bursts' (loud transient-rich pink-noise bursts).
+    `seed` (bursts only) is the anoisesrc seed; default MUSIC_NOISE_SEED."""
+    seed = MUSIC_NOISE_SEED if seed is None else seed
+    key = hashlib.sha1(json.dumps(["music", seconds, kind, amp, freq, video_only, seed]).encode()).hexdigest()[:16]
     cached = cache_dir() / f"music-{key}.bin"
     if not cached.exists():
         tmp = cache_dir() / f"tmp-{key}.bin"
@@ -73,7 +75,7 @@ def make_music(path, *, seconds=14.0, kind="tone", amp=0.3, freq=440, video_only
             cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=blue:s=64x64:r=10:d={seconds}",
                    "-pix_fmt", "yuv420p", "-f", "mp4", str(tmp)]
         elif kind == "bursts":
-            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"anoisesrc=d={seconds}:c=pink:a={amp}:r=44100:seed={MUSIC_NOISE_SEED}",
+            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"anoisesrc=d={seconds}:c=pink:a={amp}:r=44100:seed={seed}",
                    "-af", "volume='if(lt(mod(t,0.8),0.06),1,0.1)':eval=frame", "-c:a", "libmp3lame", "-b:a", "192k",
                    "-f", "mp3", str(tmp)]
         else:
@@ -130,7 +132,7 @@ DEFAULT_TEXTS = [
 
 class Task:
     def __init__(self, root, shots=None, texts=None, mood="warm", code="V261117_001", workflow=True,
-                 music=True, music_seconds=14.0, music_kind="tone", music_amp=0.3):
+                 music=True, music_seconds=14.0, music_kind="tone", music_amp=0.3, music_seed=None):
         self.root = Path(root).resolve()
         self.code = code
         self.dir = self.root / "task"
@@ -171,7 +173,7 @@ class Task:
         self.music_input = None
         if music:
             self.music_dir.mkdir(parents=True)
-            make_music(self.music_path, seconds=music_seconds, kind=music_kind, amp=music_amp)
+            make_music(self.music_path, seconds=music_seconds, kind=music_kind, amp=music_amp, seed=music_seed)
             (self.music_dir / "music-state.json").write_text('{"schema":1}')
             (self.music_dir / "result.json").write_text('{"status":"succeeded"}')
             self.music_input = {"role": "music", "step_id": "music", "run_id": "run-music-1",

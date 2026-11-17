@@ -23,7 +23,7 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 - `--timeout-s N` (ไม่ใส่ = 900) คือเวลารวมของทั้งงาน หมดเวลา = receipt ล้มเหลว
 - exit code 0 = สำเร็จ, ไม่ใช่ 0 = ล้มเหลว (เหตุผลอยู่ใน `result.json` และ stderr)
   - **exit 2** (อ่าน request/envelope ไม่ได้) และ **exit 3** (เขียน receipt ไม่สำเร็จ) = สคริปต์อาจไม่มี `result.json` เลย → ดู "ถ้าไม่มี result.json" ด้านล่าง
-  - **exit 4** = `result.json` มี receipt สถานะสิ้นสุด (succeeded/failed) ของ correlation เดียวกันอยู่แล้ว สคริปต์ไม่เขียนทับและไม่แตะไฟล์ใดเลย (รวมไฟล์ final เดิม)
+  - **exit 4** = `result.json` มี receipt สถานะสิ้นสุด (succeeded/failed) ของ correlation เดียวกันอยู่แล้ว สคริปต์ไม่เขียนทับและไม่แตะไฟล์ใดเลย (รวมไฟล์ final ที่ receipt `succeeded` ชี้อยู่ — แม้ receipt นั้นโผล่ขึ้นระหว่างที่สคริปต์กำลังรัน การเขียน receipt ใช้ no-clobber link จึงไม่มีช่วงให้เขียนทับ)
     → **หยุด** รายงานตาม receipt ที่มีอยู่ ห้ามรันซ้ำ ห้ามแก้ไฟล์
 - ใช้ ffmpeg/ffprobe ที่ `/opt/homebrew/bin` ฟอนต์ Kanit-Bold หาจาก `GG_SHORT_FONT` → `remotion-composer/public/fonts/` ของ repo → checkout หลัก
 
@@ -37,6 +37,7 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
    ไฟล์ต้องอยู่ในโฟลเดอร์งาน, อยู่ใน `files` ของ input, ไม่ว่าง, มี audio stream และ **ยาวไม่น้อยกว่าวิดีโอ** (สั้นกว่า = ล้มเหลว ไม่ลูปเพลง)
    ตัดเพลงให้ยาวเท่าวิดีโอ, fade-in 0.1 วินาที, fade-out 1.2 วินาที, ปรับความดัง −14 LUFS (เป้า true peak −2 dBTP) แล้วตรวจไฟล์สุดท้ายซ้ำจริง (เกณฑ์: −14±1 LUFS, TP ≤ −1 dBTP)
    (เพลงที่ peak สูงจนปรับด้วย gain เฉยๆ ไม่ถึงเป้า สคริปต์ใช้ gain + peak limiter แทน)
+   หลัง mux สคริปต์วัดไฟล์จริงซ้ำ: ถ้าความดังถูกแต่ true peak ใกล้เกณฑ์เกิน (> −1.2 dBTP เพราะ AAC encode ดัน peak ขึ้น) จะสร้างเพลงใหม่ด้วย peak target ที่ต่ำลงแล้ว mux ซ้ำ (สูงสุด 4 รอบ) — ด่านตรวจสุดท้ายยังเป็นเกณฑ์เดิม
 6. ตรวจความยาว 10–90 วินาที, ไม่เขียนทับไฟล์เดิม (เขียน `.partial.mp4` แล้วค่อยย้ายเข้าที่)
 7. ล้มเหลว → ลบไฟล์ครึ่งๆ กลางๆ, เขียน `<final>.FAILED.json` และ receipt `status: failed` พร้อม `retry_safe`
 

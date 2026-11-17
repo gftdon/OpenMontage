@@ -67,6 +67,40 @@ def write_receipt(result_path, data):
     _atomic_write_json(result_path, data)
 
 
+def _before_link(tmp, result_path):
+    """Seam for tests: runs after the temp file is complete, immediately before the no-clobber link."""
+
+
+def publish_receipt(result_path, data, correlation):
+    """No-clobber atomic publication of a receipt: temp file -> os.link(tmp, result_path) (fails with EEXIST instead of
+    replacing). Returns None when `data` is now result_path; otherwise the status ('succeeded'/'failed') of the terminal
+    receipt of THIS correlation that was already there, which is left untouched. An existing file that is anything else
+    (other correlation, non-terminal, garbage) is replaced atomically as before. The temp file never outlives the call."""
+    path = Path(result_path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".result.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _before_link(tmp, path)
+        try:
+            os.link(tmp, path)
+            return None
+        except FileExistsError:
+            pass
+        status = existing_terminal_status(path, correlation)
+        if status is not None:
+            return status
+        os.replace(tmp, path)
+        return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def write_diagnostic(path, data):
     """<final>.FAILED.json — same atomic write, separate entry point (not a receipt)."""
     _atomic_write_json(path, data)

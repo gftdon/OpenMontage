@@ -17,6 +17,10 @@ TOL_I, MAX_TP = 1.0, -1.0
 FADE_IN_S, FADE_OUT_S = 0.1, 1.2
 MUSIC_SUFFIX = "_30_Music.mp3"
 LIMITER_HEADROOM_DB, LIMITER_ITERATIONS, LIMITER_TOL_I = 1.0, 6, 0.25   # peak limit = TARGET_TP - 1 dB (inter-sample margin)
+# Closed loop on the DELIVERED file (the AAC encode can overshoot the bed's peak by 1-2 dB, depending on the music):
+# when the muxed file measures on-target loudness but a true peak closer than TP_SAFETY_DB to the gate, the bed is rebuilt
+# with a lower peak target (tp_trim_db) and muxed again, at most MUX_ATTEMPTS times; verify_final stays the real gate.
+TP_SAFETY_DB, TP_LAND_DB, MAX_TP_TRIM_DB, MUX_ATTEMPTS = 0.2, 0.5, 6.0, 4
 SHORT_TOLERANCE_S = 1 / 30     # music may be at most one video frame shorter than the video (mp3 framing)
 
 
@@ -157,19 +161,34 @@ def validate_music(path, deadline, min_duration_s=None):
     return info
 
 
-def build_music_bed(music, duration_s, out_wav, deadline):
-    """Trim to the video length (never loop), 0.1 s fade-in, 1.2 s fade-out, two-pass loudnorm (I=-14, TP=-2)
-    -> 48 kHz stereo wav. Music too peaky for a linear gain gets gain + peak limiter instead (see below)."""
+def next_tp_trim(loudness, true_peak, trim_db):
+    """After muxing: the peak-target trim (dB, cumulative) for the next attempt, or None when no retry can help
+    (loudness itself off target, or the true peak already clear of the gate by TP_SAFETY_DB, or trim exhausted)."""
+    try:
+        i, tp = float(loudness), float(true_peak)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(i) and math.isfinite(tp)) or abs(i - TARGET_I) > TOL_I or tp <= MAX_TP - TP_SAFETY_DB:
+        return None
+    if trim_db >= MAX_TP_TRIM_DB:
+        return None
+    return min(trim_db + (tp - (MAX_TP - TP_LAND_DB)), MAX_TP_TRIM_DB)
+
+
+def build_music_bed(music, duration_s, out_wav, deadline, tp_trim_db=0.0):
+    """Trim to the video length (never loop), 0.1 s fade-in, 1.2 s fade-out, two-pass loudnorm (I=-14, TP=-2 minus
+    tp_trim_db) -> 48 kHz stereo wav. Music too peaky for a linear gain gets gain + peak limiter instead (see below)."""
     ffmpeg = common.find_tool("ffmpeg")
+    target_tp = TARGET_TP - tp_trim_db
     chain = (f"aformat=sample_rates=48000:channel_layouts=stereo,"
              f"afade=t=in:st=0:d={FADE_IN_S:g},"
              f"afade=t=out:st={max(duration_s - FADE_OUT_S, 0):.3f}:d={FADE_OUT_S:g}")
     base = [ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-v", "info", "-t", f"{duration_s:.3f}", "-i", music,
             "-map", "0:a:0"]
-    ln = f"loudnorm=I={TARGET_I:g}:TP={TARGET_TP:g}:LRA={TARGET_LRA:g}"
+    ln = f"loudnorm=I={TARGET_I:g}:TP={target_tp:g}:LRA={TARGET_LRA:g}"
     m = _loudnorm_run(base + ["-af", f"{chain},{ln}:print_format=json", "-f", "null", "-"], deadline, "วัดความดังเพลง (pass 1)")
     gain = TARGET_I - m["input_i"]
-    if m["input_tp"] + gain <= TARGET_TP:      # a purely linear gain reaches -14 LUFS under the true-peak target
+    if m["input_tp"] + gain <= target_tp:      # a purely linear gain reaches -14 LUFS under the true-peak target
         second = (f"{chain},{ln}:measured_I={m['input_i']}:measured_TP={m['input_tp']}:measured_LRA={m['input_lra']}:"
                   f"measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true:print_format=summary")
         common.run_cmd(base + ["-af", second, "-c:a", "pcm_f32le", "-ar", "48000", "-y", out_wav], deadline,
@@ -177,10 +196,10 @@ def build_music_bed(music, duration_s, out_wav, deadline):
         return
     # Peaky music (crest factor too high for a linear gain): loudnorm would fall back to dynamic mode and undershoot
     # the target. Use gain + peak limiter instead, iterating the gain until the limited result measures on target.
-    limiter = f"alimiter=limit={10 ** ((TARGET_TP - LIMITER_HEADROOM_DB) / 20):.4f}:attack=5:release=60:level=0"
+    limiter = f"alimiter=limit={10 ** ((target_tp - LIMITER_HEADROOM_DB) / 20):.4f}:attack=5:release=60:level=0"
     for _ in range(LIMITER_ITERATIONS):
         shaped = f"{chain},volume={gain:.3f}dB,{limiter}"
-        meas = _loudnorm_run(base + ["-af", f"{shaped},loudnorm=I={TARGET_I:g}:TP={TARGET_TP:g}:LRA=20:print_format=json",
+        meas = _loudnorm_run(base + ["-af", f"{shaped},loudnorm=I={TARGET_I:g}:TP={target_tp:g}:LRA=20:print_format=json",
                                      "-f", "null", "-"], deadline, "วัดความดังเพลงหลังลิมิตเตอร์")
         err = TARGET_I - meas["input_i"]
         if abs(err) <= LIMITER_TOL_I:

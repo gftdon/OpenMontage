@@ -44,8 +44,9 @@ def check_duration(duration_s):
         raise common.GgError(f"ความยาววิดีโอ {duration_s:.4f} วินาที อยู่นอกช่วง {MIN_DURATION_S:g}-{MAX_DURATION_S:g} วินาที")
 
 
-def verify_final(path, deadline):
-    """The delivered file itself: exactly 1 H.264 video + 1 AAC audio, 1080x1920, SAR 1, 30 fps, duration + loudness gates."""
+def verify_final(path, deadline, measured=None):
+    """The delivered file itself: exactly 1 H.264 video + 1 AAC audio, 1080x1920, SAR 1, 30 fps, duration + loudness gates.
+    `measured` = (LUFS, dBTP) just taken from this very file (saves a second measurement pass)."""
     info = common.probe(path, deadline)
     v, a = common.streams_of(info, "video"), common.streams_of(info, "audio")
     if len(v) != 1 or len(a) != 1 or len(info.get("streams", [])) != 2:
@@ -64,7 +65,7 @@ def verify_final(path, deadline):
     except (KeyError, TypeError, ValueError):
         raise common.GgError("อ่านความยาวไฟล์สุดท้ายไม่ได้")
     check_duration(duration)
-    loud, peak = audio.measure_loudness(path, deadline)
+    loud, peak = measured if measured is not None else audio.measure_loudness(path, deadline)
     if not audio.loudness_ok(loud, peak):
         raise common.GgError(f"loudness {loud:.1f} LUFS / true peak {peak:.1f} dBTP อยู่นอกเกณฑ์ "
                              f"(เป้า {audio.TARGET_I:g}±{audio.TOL_I:g} LUFS, TP ≤ {audio.MAX_TP:g} dBTP)")
@@ -121,13 +122,19 @@ def pipeline(env, state, provider, deadline):
         raise common.GgError(f"เพลงไม่พร้อมใช้งาน: {e}")
     audio.validate_music(music, deadline, min_duration_s=duration)
     bed = work / "bed.wav"
-    audio.build_music_bed(music, duration, bed, deadline)
-
-    state.stage = "mux"
-    audio.mux(video, bed, state.partial, deadline)
-
+    trim, measured = 0.0, None
+    for attempt in range(audio.MUX_ATTEMPTS):
+        state.stage = "music"
+        audio.build_music_bed(music, duration, bed, deadline, tp_trim_db=trim)
+        state.stage = "mux"
+        audio.mux(video, bed, state.partial, deadline)      # -y: a retry overwrites our own partial
+        state.stage = "verify"
+        measured = audio.measure_loudness(state.partial, deadline)
+        trim = audio.next_tp_trim(*measured, trim)          # the AAC encode can push the peak over the gate: re-aim the bed
+        if trim is None:
+            break
     state.stage = "verify"
-    verify_final(state.partial, deadline)
+    verify_final(state.partial, deadline, measured=measured)
 
     state.stage = "publish"
     os.link(state.partial, final)              # fails if final appeared meanwhile: never overwrite
@@ -150,27 +157,39 @@ def describe(exc, state):
     return f"[{state.stage}] {' '.join(msg.split())}"[:ERROR_MAX]
 
 
-def _cleanup(state):
+def _unlink_ours(p):
+    try:
+        os.unlink(p)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"gg_short_reel: ลบ {p} ไม่ได้: {e}", file=sys.stderr)
+
+
+def _cleanup_work(state):
+    """Our scratch only: the work dir and our own .partial. Never a delivered file."""
     if state.workdir is not None:
         shutil.rmtree(state.workdir, ignore_errors=True)
-    for p, ours in ((state.partial, True), (state.final, state.final_produced)):
-        if p is not None and ours:
-            try:
-                os.unlink(p)
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                print(f"gg_short_reel: ลบ {p} ไม่ได้: {e}", file=sys.stderr)
+    if state.partial is not None:
+        _unlink_ours(state.partial)
 
 
-def _receipt_exists(env):
-    """True (after saying so on stderr) when a terminal receipt of this correlation is already in result_path."""
-    status = receipt.existing_terminal_status(env.result_path, env.correlation)
-    if status is None:
-        return False
+def _cleanup_final(state):
+    """Our own published final (only when this run's os.link created it)."""
+    if state.final is not None and state.final_produced:
+        _unlink_ours(state.final)
+
+
+def _refuse(state, status):
+    """A terminal receipt of this correlation is already in result_path (`status`): it stands and we exit 4.
+    Our scratch goes. Our final goes too, unless that receipt is a success: it points at the final path, so the file
+    there must stay exactly as it is (a success receipt whose output vanished fails AIOS' verify and locks the step)."""
     print(f"gg_short_reel: result.json มี receipt สถานะ {status} ของ correlation นี้อยู่แล้ว — ไม่เขียนทับ "
           f"และไม่แตะไฟล์อื่น (exit {EXIT_RECEIPT_EXISTS})", file=sys.stderr)
-    return True
+    _cleanup_work(state)
+    if status != "succeeded":
+        _cleanup_final(state)
+    return EXIT_RECEIPT_EXISTS
 
 
 def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
@@ -180,10 +199,11 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
     except request_io.RequestError as e:
         print(f"gg_short_reel: {e}", file=sys.stderr)
         return 2
-    if _receipt_exists(env):                    # a finished run is never re-run over: first line of defence, touches nothing
-        return EXIT_RECEIPT_EXISTS
-    provider = music_provider if music_provider is not None else audio.FileMusicProvider(env.request)
     state, failure = State(), None
+    status = receipt.existing_terminal_status(env.result_path, env.correlation)
+    if status is not None:                      # a finished run is never re-run over: first line of defence, touches nothing
+        return _refuse(state, status)
+    provider = music_provider if music_provider is not None else audio.FileMusicProvider(env.request)
     deadline = common.Deadline(timeout_s)
     try:
         with common.armed(deadline):
@@ -198,26 +218,36 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
         if failure is None:
             state.stage = "receipt"
             try:
-                if _receipt_exists(env):        # someone wrote a terminal receipt while we ran: theirs stands
-                    _cleanup(state)
-                    return EXIT_RECEIPT_EXISTS
-                receipt.write_receipt(env.result_path, receipt.success_receipt(env.correlation, env.request["outputs"]))
+                # no-clobber link: a terminal receipt that appeared while we ran (even a moment ago) is never replaced
+                status = receipt.publish_receipt(env.result_path,
+                                                 receipt.success_receipt(env.correlation, env.request["outputs"]), env.correlation)
+                if status is not None:
+                    return _refuse(state, status)
                 return 0
             except BaseException as e:   # noqa: BLE001
                 failure = e
         error = describe(failure, state)
-        _cleanup(state)
-        if _receipt_exists(env):                # same, and no diagnostic file beside a receipt we are not replacing
-            return EXIT_RECEIPT_EXISTS
+        _cleanup_work(state)
+        status = receipt.existing_terminal_status(env.result_path, env.correlation)
+        if status is not None:                  # someone else's receipt, and no diagnostic file beside it
+            return _refuse(state, status)
         retry_safe = receipt.decide_retry_safe(state.paid_call_started)
+        diagnostic = None
         if state.final is not None:
+            diagnostic = state.final.with_name(state.final.name + ".FAILED.json")
             try:
-                receipt.write_diagnostic(state.final.with_name(state.final.name + ".FAILED.json"),
-                                         {"error": error, "stage": state.stage, "retry_safe": retry_safe,
-                                          "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                receipt.write_diagnostic(diagnostic, {"error": error, "stage": state.stage, "retry_safe": retry_safe,
+                                                      "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
             except OSError as e:
+                diagnostic = None
                 print(f"gg_short_reel: เขียน .FAILED.json ไม่ได้: {e}", file=sys.stderr)
-        receipt.write_receipt(env.result_path, receipt.failure_receipt(env.correlation, error, retry_safe))
+        status = receipt.publish_receipt(env.result_path, receipt.failure_receipt(env.correlation, error, retry_safe),
+                                         env.correlation)
+        if status is not None:                  # lost the race at the last moment: theirs stands, our diagnostic goes
+            if diagnostic is not None:
+                _unlink_ours(diagnostic)
+            return _refuse(state, status)
+        _cleanup_final(state)
         print(f"gg_short_reel: FAILED {error}", file=sys.stderr)
         return 130 if isinstance(failure, KeyboardInterrupt) else 1
     except BaseException as e:   # noqa: BLE001 - even the failure receipt could not be written
