@@ -59,23 +59,23 @@ def _num(v):
 
 
 _SAMPLE_MAX = 5
-_LATIN_STARTS = tuple(a for a, _ in latin_script_ranges.LATIN_RANGES)
+_NON_LATIN_LETTER_STARTS = tuple(a for a, _ in latin_script_ranges.NON_LATIN_LETTER_RANGES)
 
 
-def _is_latin(cp):
-    """Script=Latin by table (generated from node's /\\p{Script=Latin}/u, the same standard AIOS uses)."""
-    i = bisect.bisect_right(_LATIN_STARTS, cp) - 1
-    return i >= 0 and cp <= latin_script_ranges.LATIN_RANGES[i][1]
+def _is_non_latin_letter(cp):
+    """True iff cp is a letter that is not Script=Latin, by table only (generated from node's /\\p{L}/u and not
+    /\\p{Script=Latin}/u, the same standard AIOS uses). Python's unicodedata is not consulted for this decision."""
+    i = bisect.bisect_right(_NON_LATIN_LETTER_STARTS, cp) - 1
+    return i >= 0 and cp <= latin_script_ranges.NON_LATIN_LETTER_RANGES[i][1]
 
 
 def non_latin_letters(text):
     """Distinct letters (in order of appearance) that are not Script=Latin, after NFC. Digits, punctuation, symbols,
-    emoji and whitespace are not letters (category L*); Latin with diacritics, modifier letters and fullwidth Latin are Latin."""
+    emoji and whitespace are not letters; Latin with diacritics, modifier letters and fullwidth Latin are Latin.
+    Only the NFC step itself still uses Python's unicodedata; whether a character is an offending letter comes from the table."""
     seen = []
     for ch in unicodedata.normalize("NFC", text):
-        if ch in seen or not unicodedata.category(ch).startswith("L"):
-            continue
-        if not _is_latin(ord(ch)):
+        if ch not in seen and _is_non_latin_letter(ord(ch)):
             seen.append(ch)
     return seen
 

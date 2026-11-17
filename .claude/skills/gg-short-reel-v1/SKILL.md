@@ -22,7 +22,7 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 - path ของ `request.json` อยู่ในข้อความสั่งงาน (`AIOS runtime request: ...`) — ต้องเป็น absolute path
 - `--timeout-s N` (ไม่ใส่ = 900) คือเวลารวมของทั้งงาน หมดเวลา = receipt ล้มเหลว
 - exit code 0 = สำเร็จ, ไม่ใช่ 0 = ล้มเหลว (เหตุผลอยู่ใน `result.json` และ stderr)
-  - **exit 2** (อ่าน request/envelope ไม่ได้) และ **exit 3** (เขียน receipt ไม่สำเร็จ) = สคริปต์อาจไม่มี `result.json` เลย → ดู "ถ้าไม่มี result.json" ด้านล่าง
+  - **exit 2** (อ่าน request/envelope ไม่ได้) และ **exit 3** (เขียน receipt ไม่สำเร็จ — รวมกรณีรอ `.result.lock` ของ run dir ไม่ได้: สคริปต์รอสูงสุด 30 วินาที (ไม่เกินเวลาที่เหลือของงาน ขั้นต่ำ 1 วินาที) แล้วเลิกโดยไม่รอซ้ำ และลบ final ของตัวเองที่เพิ่งสร้าง) = สคริปต์อาจไม่มี `result.json` เลย → ดู "ถ้าไม่มี result.json" ด้านล่าง
   - **exit 4** = `result.json` มี receipt สถานะสิ้นสุด (succeeded/failed) ของ correlation เดียวกันอยู่แล้ว สคริปต์ไม่เขียนทับและไม่แตะไฟล์ใดเลย (รวมไฟล์ final ที่ receipt `succeeded` ชี้อยู่ — แม้ receipt นั้นโผล่ขึ้นระหว่างที่สคริปต์กำลังรัน การเขียน receipt ใช้ no-clobber link จึงไม่มีช่วงให้เขียนทับ)
     → **หยุด** รายงานตาม receipt ที่มีอยู่ ห้ามรันซ้ำ ห้ามแก้ไฟล์
 - ใช้ ffmpeg/ffprobe ที่ `/opt/homebrew/bin` ฟอนต์ Kanit-Bold หาจาก `GG_SHORT_FONT` → `remotion-composer/public/fonts/` ของ repo → checkout หลัก
@@ -43,7 +43,7 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 
 ## ถ้าไม่มี result.json (exit 2 หรือ 3)
 
-สคริปต์เขียน receipt ไม่ได้ในสองกรณีนี้ (envelope พัง / disk เขียนไม่ได้) ถ้าไม่มี `result.json` AIOS จะรอจนหมดเวลา — ให้ agent เขียน receipt ล้มเหลวเอง **ครั้งเดียว** ตาม runtime instruction ในข้อความสั่งงาน:
+สคริปต์เขียน receipt ไม่ได้ในสองกรณีนี้ (envelope พัง / disk เขียนไม่ได้ / มีโพรเซสอื่นถือ `.result.lock` ค้าง) ถ้าไม่มี `result.json` AIOS จะรอจนหมดเวลา — ให้ agent เขียน receipt ล้มเหลวเอง **ครั้งเดียว** ตาม runtime instruction ในข้อความสั่งงาน:
 
 1. ตรวจก่อนว่า `result.json` ยัง **ไม่มี** (`[ -e <result_path> ]`) — ถ้ามีอยู่แล้ว (ไม่ว่าสถานะอะไร) **ห้ามเขียนอะไรทั้งสิ้น** ให้รายงานตามที่มี
 2. อ่าน `request.json` แล้วคัดลอก `schema`, `task_id`, `step_id`, `run_id`, `dispatch_id`, `target` **ตรงตัวอักษร** (ห้ามเดา/สร้าง ID — ถ้า request.json อ่านไม่ได้จนคัดลอกไม่ได้ ให้รายงานแล้วหยุด)

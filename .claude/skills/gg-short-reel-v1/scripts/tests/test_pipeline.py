@@ -359,11 +359,11 @@ class RobustnessTests(Base):
         real = receipt.publish_receipt
         calls = []
 
-        def flaky(path, data, correlation):
+        def flaky(path, data, correlation, **kw):
             calls.append(data.get("status"))
             if len(calls) == 1:
                 raise OSError("disk full")
-            return real(path, data, correlation)
+            return real(path, data, correlation, **kw)
 
         with mock.patch.object(receipt, "publish_receipt", side_effect=flaky):
             rc = self.run_task(task, FakeMusic())

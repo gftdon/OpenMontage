@@ -10,6 +10,15 @@ import test_support as ts  # noqa: F401  (puts scripts/ on sys.path)
 MUST_PASS = ("ʰ", "ˢ", "ᵗ", "Ⅎ", "ª", "º", "é", "ﬀ", "Ａ", "100ᵗʰ birthday", "❤️👵", "2026")
 MUST_FAIL = ("สวัสดี", "Привет", "Γειά", "你好", "こんにちは")
 
+DUMP_DECISION_JS = (
+    # per code point: the offending letters of String.fromCodePoint(cp) after NFC, by the AIOS regexes (L and not Latin)
+    "const L=/\\p{L}/u,Lat=/\\p{Script=Latin}/u;const out=[];"
+    "for(let c=0;c<=0x10FFFF;c++){const n=String.fromCodePoint(c).normalize('NFC');const bad=[];"
+    "for(const ch of n){if(L.test(ch)&&!Lat.test(ch)&&!bad.includes(ch.codePointAt(0)))bad.push(ch.codePointAt(0))}"
+    "if(bad.length)out.push(c+':'+bad.join(','))}"
+    "process.stdout.write(out.join(' '))"
+)
+
 DUMP_JS = (
     "const re=/\\p{Script=Latin}/u;const out=[];"
     "for(let c=0;c<=0x10FFFF;c++){if(re.test(String.fromCodePoint(c)))out.push(c)}"
@@ -73,6 +82,64 @@ class TableTests(unittest.TestCase):
         for cp in (0x41, 0x2B0, 0x2E2, 0x1D57, 0x2132, 0xAA, 0xBA, 0xFB00, 0xFF21):
             i = bisect.bisect_right(starts, cp) - 1
             self.assertTrue(i >= 0 and cp <= t.LATIN_RANGES[i][1], hex(cp))
+
+    def test_non_latin_letter_table_is_sorted_disjoint_and_disjoint_from_latin(self):
+        import latin_script_ranges as t
+        prev_end = -1
+        for a, b in t.NON_LATIN_LETTER_RANGES:
+            self.assertLessEqual(a, b)
+            self.assertGreater(a, prev_end + 1, "sorted, disjoint and non-adjacent (merged)")
+            prev_end = b
+        latin = {cp for a, b in t.LATIN_RANGES for cp in range(a, b + 1)}
+        non_latin = {cp for a, b in t.NON_LATIN_LETTER_RANGES for cp in range(a, b + 1)}
+        self.assertEqual(set(), latin & non_latin)
+
+    def test_overlay_decides_from_the_generated_table_not_unicodedata_category(self):
+        import overlay
+        for fn in (overlay.non_latin_letters, overlay._is_non_latin_letter):
+            code = fn.__code__
+            self.assertNotIn("category", code.co_names, fn.__name__)        # no unicodedata.category call
+        self.assertIn("normalize", overlay.non_latin_letters.__code__.co_names, "NFC is the only unicodedata use")
+
+    def _run_node(self, js):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not on PATH: cannot compare with the live regexes")
+        proc = subprocess.Popen([node, "-e", js], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            out, err = proc.communicate(timeout=180)   # exits on its own
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.assertEqual(0, proc.returncode, err)
+        return out
+
+    def test_non_latin_letter_table_matches_live_node_over_all_planes(self):
+        import latin_script_ranges as t
+        js = ("const L=/\\p{L}/u,Lat=/\\p{Script=Latin}/u;const out=[];"
+              "for(let c=0;c<=0x10FFFF;c++){const s=String.fromCodePoint(c);if(L.test(s)&&!Lat.test(s))out.push(c)}"
+              "process.stdout.write(out.join(' '))")
+        live = {int(x) for x in self._run_node(js).split()}
+        table = {cp for a, b in t.NON_LATIN_LETTER_RANGES for cp in range(a, b + 1)}
+        self.assertEqual(live, table)
+
+    def test_whole_decision_matches_live_node_for_every_code_point(self):
+        """The full decision of overlay.non_latin_letters (NFC + table) against node's (NFC + \\p{L} and not Script=Latin),
+        for EVERY code point 0..0x10FFFF, compared as the exact list of offending letters."""
+        import overlay
+        live = {}
+        for tok in self._run_node(DUMP_DECISION_JS).split():
+            cp, bad = tok.split(":")
+            live[int(cp)] = [int(x) for x in bad.split(",")]
+        mine = {}
+        for cp in range(0x110000):
+            got = overlay.non_latin_letters(chr(cp))
+            if got:
+                mine[cp] = [ord(c) for c in got]
+        diff = sorted(set(live) ^ set(mine)) + sorted(cp for cp in set(live) & set(mine) if live[cp] != mine[cp])
+        self.assertEqual([], [hex(cp) for cp in diff[:20]])
+        self.assertEqual(live, mine)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ DEFAULT_TIMEOUT_S = 900.0
 MIN_DURATION_S, MAX_DURATION_S = 10.0, 90.0
 PREFLIGHT_SLACK_S = 1.0   # source-duration estimate is only used to refuse clearly impossible inputs early
 ERROR_MAX = 480
+LOCK_WAIT_MAX_S = receipt.LOCK_TIMEOUT_MAX_S   # ceiling of the one wait for result.lock when a receipt is published (30 s)
+LOCK_WAIT_MIN_S = 1.0     # floor: even with the run deadline spent, a failure receipt gets one short attempt
+EXIT_LOCK_TIMEOUT = 3     # same code as "could not write the receipt": the agent then writes it with the `ln` fallback
 EXIT_RECEIPT_EXISTS = 4   # result.json already holds a terminal receipt of this correlation: nothing was touched
 
 
@@ -192,6 +195,22 @@ def _refuse(state, status):
     return EXIT_RECEIPT_EXISTS
 
 
+def _lock_budget(deadline):
+    """Seconds to wait for result.lock: what is left of the run deadline, at most LOCK_WAIT_MAX_S, at least LOCK_WAIT_MIN_S."""
+    return max(LOCK_WAIT_MIN_S, min(deadline.remaining(), LOCK_WAIT_MAX_S))
+
+
+def _lock_timeout_exit(state, exc):
+    """A peer holds result.lock and did not let go: no receipt was written and none is attempted again (same lock, same wait).
+    Our scratch and our own final go, because the agent's fallback writes a *failed* receipt and a leftover final would make
+    every retry fail with "destination exists"."""
+    print(f"gg_short_reel: เขียน receipt ไม่สำเร็จ: {exc} (exit {EXIT_LOCK_TIMEOUT}; agent ต้องเขียน receipt ล้มเหลวด้วย ln no-clobber)",
+          file=sys.stderr)
+    _cleanup_work(state)
+    _cleanup_final(state)
+    return EXIT_LOCK_TIMEOUT
+
+
 def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
     """Returns the process exit code. `music_provider` is a Python-only injection point (tests); the CLI always uses FileMusicProvider."""
     try:
@@ -220,10 +239,13 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
             try:
                 # no-clobber link: a terminal receipt that appeared while we ran (even a moment ago) is never replaced
                 status = receipt.publish_receipt(env.result_path,
-                                                 receipt.success_receipt(env.correlation, env.request["outputs"]), env.correlation)
+                                                 receipt.success_receipt(env.correlation, env.request["outputs"]), env.correlation,
+                                                 timeout_s=_lock_budget(deadline))
                 if status is not None:
                     return _refuse(state, status)
                 return 0
+            except receipt.ReceiptLockTimeout as e:   # never fall through to a failure receipt on the very same lock
+                return _lock_timeout_exit(state, e)
             except BaseException as e:   # noqa: BLE001
                 failure = e
         error = describe(failure, state)
@@ -242,7 +264,8 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
                 diagnostic = None
                 print(f"gg_short_reel: เขียน .FAILED.json ไม่ได้: {e}", file=sys.stderr)
         status = receipt.publish_receipt(env.result_path, receipt.failure_receipt(env.correlation, error, retry_safe),
-                                         env.correlation)
+                                         env.correlation,
+                                         timeout_s=_lock_budget(deadline))
         if status is not None:                  # lost the race at the last moment: theirs stands, our diagnostic goes
             if diagnostic is not None:
                 _unlink_ours(diagnostic)
@@ -250,6 +273,8 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
         _cleanup_final(state)
         print(f"gg_short_reel: FAILED {error}", file=sys.stderr)
         return 130 if isinstance(failure, KeyboardInterrupt) else 1
+    except receipt.ReceiptLockTimeout as e:
+        return _lock_timeout_exit(state, e)
     except BaseException as e:   # noqa: BLE001 - even the failure receipt could not be written
         print(f"gg_short_reel: เขียน receipt ไม่สำเร็จ: {type(e).__name__}: {e}", file=sys.stderr)
         return 3
