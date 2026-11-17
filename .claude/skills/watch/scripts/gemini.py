@@ -6,6 +6,7 @@ scrubbed from every diagnostic.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import math
 import mimetypes
@@ -35,6 +36,31 @@ DEFAULT_QUESTION = ('Give a thorough summary of this video: what is shown, any o
 PROMPT_SUFFIX = ('\n\nCite an MM:SS (or H:MM:SS) timestamp for every claim about a specific moment. '
                  'Separate what is seen from what is heard when it matters. If the video does not '
                  'show or say something needed to answer, say so plainly instead of guessing.')
+
+
+# Local patch (not upstream): paid-tier list price, USD per 1M tokens, as
+# (input, output incl. thinking, cached input). Intro rates run through 2026-12-31.
+# A free-tier key is billed nothing. Source: ai.google.dev/gemini-api/docs/pricing.
+_FLASH_PRICES = {'intro': (0.75, 3.75, 0.075), 'standard': (1.50, 7.50, 0.15)}
+PRICES = {model: _FLASH_PRICES for model in ('gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash')}
+_STANDARD_FROM = datetime.date(2027, 1, 1)
+
+
+def estimate_cost(usage: dict, model: str, today: datetime.date | None = None):
+    """Return (usd, rates) at paid-tier list price, or None for an unpriced model."""
+    prices = PRICES.get(model)
+    if not prices or not usage:
+        return None
+    rates = prices['standard' if (today or datetime.date.today()) >= _STANDARD_FROM else 'intro']
+
+    def count(name):
+        value = usage.get(name)
+        return value if isinstance(value, int) else 0
+
+    cached = count('total_cached_tokens')
+    billed_in = max(count('total_input_tokens') - cached, 0) + count('total_tool_use_tokens')
+    billed_out = count('total_output_tokens') + count('total_thought_tokens')
+    return (billed_in * rates[0] + billed_out * rates[1] + cached * rates[2]) / 1e6, rates
 
 
 def is_youtube(source: str) -> bool:
@@ -107,13 +133,15 @@ def ask(video: dict, question: str | None, *, model: str, key: str, clip=None, t
         data = json.loads(body)
         parts = [part['text'] for step in data['steps'] if step.get('type') == 'model_output'
                  for part in step.get('content', []) if part.get('type') == 'text' and part.get('text')]
-        tokens = (data.get('usage') or {}).get('total_tokens')
+        usage = data.get('usage') or {}
+        tokens = usage.get('total_tokens')
     except (ValueError, KeyError, TypeError, AttributeError):
         raise _fail('response', body[:300].decode('utf-8', errors='replace'), key) from None
     if not parts:
         raise _fail('response', f'no answer text (status {data.get("status")})', key)
     return {'text': '\n'.join(parts).strip(), 'model': model, 'processing': label,
-            'total_tokens': tokens if isinstance(tokens, int) else None}
+            'total_tokens': tokens if isinstance(tokens, int) else None,
+            'usage': usage if isinstance(usage, dict) else {}}
 
 
 def upload_file(path: Path, key: str, *, poll_seconds: float = 2.0, max_wait: float = 900.0, sleep=time.sleep) -> dict:

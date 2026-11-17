@@ -74,6 +74,24 @@ def run_gemini(args, config, key, start_sec, end_sec, auth) -> int:
         print(f"- **Ignored local options:** {', '.join(ignored)} (these only apply with --engine local)")
     if result and result["total_tokens"] is not None:
         print(f"- **Gemini tokens:** {result['total_tokens']}")
+    if result and result.get("usage"):  # Local patch (not upstream): token breakdown + cost.
+        usage = result["usage"]
+        parts = [f"{label} {usage[name]:,}" for name, label in (
+            ("total_input_tokens", "input"), ("total_cached_tokens", "cached"),
+            ("total_tool_use_tokens", "tool-use"), ("total_output_tokens", "output"),
+            ("total_thought_tokens", "thinking")) if isinstance(usage.get(name), int)]
+        by_modality = [f"{m.get('modality')} {m.get('tokens'):,}" for m in usage.get("input_tokens_by_modality") or []
+                       if isinstance(m, dict) and isinstance(m.get("tokens"), int)]
+        if by_modality:
+            parts[0:1] = [f"{parts[0]} ({', '.join(by_modality)})"] if parts else []
+        print(f"- **Gemini usage:** {' · '.join(parts) or 'not reported'}")
+        cost = gemini.estimate_cost(usage, result["model"])
+        if cost:
+            usd, (rate_in, rate_out, _) = cost
+            print(f"- **Estimated cost:** ${usd:.4f} at {result['model']} paid-tier list price "
+                  f"${rate_in}/${rate_out} per 1M input/output tokens; $0 if the key is on the free tier")
+        else:
+            print(f"- **Estimated cost:** unknown — no price on file for {result['model']} (add it to gemini.PRICES)")
     if warning:
         print(f"- **Cleanup warning:** {warning}")
     print()
