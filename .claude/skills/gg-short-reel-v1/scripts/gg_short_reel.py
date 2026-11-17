@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AIOS edit_short for G&G Short Reels: clips -> 1080x1920 -> burned text -> music bed -> verified final + receipt.
+"""AIOS edit_short for G&G Short Reels: clips -> 1080x1920 -> burned text -> AIOS music bed -> verified final + receipt.
 
 The script always writes the correlated AIOS receipt (result.json) itself, success or failure.
 """
@@ -113,11 +113,11 @@ def pipeline(env, state, provider, deadline):
     state.stage = "music"
     state.paid_call_started = bool(getattr(provider, "is_paid", False))
     try:
-        music = provider.get_music(duration, plan.mood, work / "music_source.wav")
+        music = provider.get_music(duration, None, work / "music_source.wav")
     except audio.MusicUnavailable as e:
         state.paid_call_started = False       # contract: raised only when nothing paid was started
         raise common.GgError(f"เพลงไม่พร้อมใช้งาน: {e}")
-    audio.validate_music(music, deadline)
+    audio.validate_music(music, deadline, min_duration_s=duration)
     bed = work / "bed.wav"
     audio.build_music_bed(music, duration, bed, deadline)
 
@@ -162,13 +162,13 @@ def _cleanup(state):
 
 
 def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
-    """Returns the process exit code. `music_provider` is a Python-only injection point (tests / future provider)."""
+    """Returns the process exit code. `music_provider` is a Python-only injection point (tests); the CLI always uses FileMusicProvider."""
     try:
         env = request_io.parse_envelope(request_path)
     except request_io.RequestError as e:
         print(f"gg_short_reel: {e}", file=sys.stderr)
         return 2
-    provider = music_provider if music_provider is not None else audio.NotConfiguredMusicProvider()
+    provider = music_provider if music_provider is not None else audio.FileMusicProvider(env.request)
     state, failure = State(), None
     deadline = common.Deadline(timeout_s)
     try:

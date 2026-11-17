@@ -39,7 +39,6 @@ class Plan:
     shots: list
     script_text: str
     texts_raw: list
-    mood: object = None
     script_path: Path = None
 
 
@@ -155,15 +154,6 @@ def _check_originality(script_file, script_bytes, script_files):
         raise RequestError(GATE_MESSAGE)
 
 
-def _read_mood(task_dir):
-    try:
-        wf = json.loads((task_dir / "workflow.json").read_text(encoding="utf-8"))
-        mood = wf["viral"]["production_plan"]["audio"]["mood"]
-        return mood.strip() if isinstance(mood, str) and mood.strip() else None
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
 def load_plan(env):
     r = env.request
     task_dir = derive_task_dir(env)
@@ -228,4 +218,4 @@ def load_plan(env):
         shots.append(compose.Shot(seq=seq, path=Path(real), continues=kind == "grok_i2v_continue"))
 
     return Plan(task_dir=Path(real_task), shots=shots, script_text="", texts_raw=script["on_screen_text"],
-                mood=_read_mood(Path(real_task)), script_path=Path(scripts[0]))
+                script_path=Path(scripts[0]))

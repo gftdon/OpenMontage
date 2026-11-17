@@ -51,10 +51,32 @@ def make_clip(path, *, w=416, h=752, frames=150, base=20, step=3, two_video=True
                f"color=c=black:s={w}x{h}:r={fps},geq=lum='clip({base}+{step}*N,0,255)':cb=128:cr=128"]
         if two_video:
             cmd += ["-f", "lavfi", "-i", f"color=c=red:s={w}x{h}:r={fps}"]
-        cmd += ["-f", "lavfi", "-i", "sine=frequency=300:sample_rate=44100"]
+        cmd += ["-f", "lavfi", "-i", f"sine=frequency=300:sample_rate=44100:duration={frames / fps + 1:.3f}"]
         cmd += ["-map", "0:v"] + (["-map", "1:v", "-map", "2:a"] if two_video else ["-map", "1:a"])
-        cmd += ["-frames:v", str(frames), "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10",
+        cmd += ["-frames:v", str(frames), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", str(tmp)]
+        subprocess.run(cmd, check=True)
+        tmp.replace(cached)
+    shutil.copy(cached, path)
+
+
+def make_music(path, *, seconds=14.0, kind="tone", amp=0.3, freq=440, video_only=False):
+    """AIOS-style music fixture (mp3). kind: 'tone' (steady sine), 'bursts' (loud transient-rich pink-noise bursts)."""
+    key = hashlib.sha1(json.dumps(["music", seconds, kind, amp, freq, video_only]).encode()).hexdigest()[:16]
+    cached = cache_dir() / f"music-{key}.bin"
+    if not cached.exists():
+        tmp = cache_dir() / f"tmp-{key}.bin"
+        if video_only:   # content is an mp4 with no audio (the name still says .mp3)
+            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=blue:s=64x64:r=10:d={seconds}",
+                   "-pix_fmt", "yuv420p", "-f", "mp4", str(tmp)]
+        elif kind == "bursts":
+            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"anoisesrc=d={seconds}:c=pink:a={amp}:r=44100",
+                   "-af", "volume='if(lt(mod(t,0.8),0.06),1,0.1)':eval=frame", "-c:a", "libmp3lame", "-b:a", "192k",
+                   "-f", "mp3", str(tmp)]
+        else:
+            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
+                   f"sine=frequency={freq}:sample_rate=44100:duration={seconds}",
+                   "-af", f"volume={amp}", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", str(tmp)]
         subprocess.run(cmd, check=True)
         tmp.replace(cached)
     shutil.copy(cached, path)
@@ -104,7 +126,8 @@ DEFAULT_TEXTS = [
 
 
 class Task:
-    def __init__(self, root, shots=None, texts=None, mood="warm", code="V261117_001", workflow=True):
+    def __init__(self, root, shots=None, texts=None, mood="warm", code="V261117_001", workflow=True,
+                 music=True, music_seconds=14.0, music_kind="tone", music_amp=0.3):
         self.root = Path(root).resolve()
         self.code = code
         self.dir = self.root / "task"
@@ -139,6 +162,18 @@ class Task:
         if workflow:
             (self.dir / "workflow.json").write_text(json.dumps(
                 {"viral": {"production_plan": {"audio": {"type": "ai_music", "mood": mood}}}}))
+        # AIOS `music` step output (produced and paid for by AIOS, never by the skill)
+        self.music_dir = self.dir / "steps/music/runs/1"
+        self.music_path = self.music_dir / f"{code}_30_Music.mp3"
+        self.music_input = None
+        if music:
+            self.music_dir.mkdir(parents=True)
+            make_music(self.music_path, seconds=music_seconds, kind=music_kind, amp=music_amp)
+            (self.music_dir / "music-state.json").write_text('{"schema":1}')
+            (self.music_dir / "result.json").write_text('{"status":"succeeded"}')
+            self.music_input = {"role": "music", "step_id": "music", "run_id": "run-music-1",
+                                "files": [str(self.music_dir / "music-state.json"), str(self.music_dir / "result.json"),
+                                          str(self.music_path)]}
         self.script_input_run_id = "run-script-1"
         self.clips_input_run_id = "run-clips-1"
         self.extra_clip_files = []
@@ -169,6 +204,8 @@ class Task:
             ],
             "outputs": [str(self.final)], "result_path": str(self.result_path),
         }
+        if self.music_input is not None:
+            req["inputs"].append(copy.deepcopy(self.music_input))
         req.update(overrides)
         self.request = req
         self.request_path.write_text(json.dumps(req))

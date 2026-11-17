@@ -72,10 +72,10 @@ class SuccessTests(Base):
                             "-of", "csv=p=0", str(task.final)], capture_output=True, text=True, check=True)
         pts = sorted(float(x) for x in r.stdout.split())
         self.assertTrue(all(abs((b - a_) - 1 / 30) < 1e-3 for a_, b in zip(pts, pts[1:])))
-        # music provider got duration + mood from workflow.json
+        # music provider got the video duration (mood is no longer passed: AIOS built the music prompt)
         self.assertEqual(1, len(music.calls))
         self.assertAlmostEqual(359 / 30, music.calls[0][0], delta=0.05)
-        self.assertEqual("warm", music.calls[0][1])
+        self.assertIsNone(music.calls[0][1])
         # receipt h: correlation exact, outputs == request outputs, only expected files remain
         res = task.result()
         self.assertEqual({*CORR, "status", "outputs"}, set(res))
@@ -86,14 +86,8 @@ class SuccessTests(Base):
         self.assertEqual(sorted(["request.json", "result.json", task.final.name]), task.run_dir_names())
         self.assertEqual([], [p for p in self.root.rglob("*") if ".gg-short-work" in p.name or p.suffix == ".tmp"])
 
-    def test_missing_workflow_json_gives_no_mood(self):
-        task = self.task(workflow=False)
-        music = FakeMusic()
-        self.assertEqual(0, self.run_task(task, music))
-        self.assertIsNone(music.calls[0][1])
-
     def test_d_loudness_of_final(self):
-        for amp, secs in ((0.05, None), (0.9, 4)):  # very quiet, and loud + shorter than video (loops)
+        for amp, secs in ((0.05, None), (0.9, 20)):  # very quiet, and loud + much longer than the video (trimmed)
             with self.subTest(amp=amp), tempfile.TemporaryDirectory() as d:
                 task = Task(Path(d))
                 self.assertEqual(0, self.run_task(task, FakeMusic(amp=amp, seconds=secs)))
@@ -148,11 +142,6 @@ class MusicFailureTests(Base):
                 rc = self.run_task(task, prov)
                 self.assertFailed(task, rc)
                 self.assertEqual(1, len(prov.calls))
-
-    def test_f_default_provider_not_configured(self):
-        task = self.task()
-        rc = self.run_task(task, None)
-        self.assertFailed(task, rc, contains="ยังไม่ได้ตั้งตัวสร้างเพลง AI (CF-A85 รอแผนเพลง)")
 
     def test_paid_provider_exception_is_not_retry_safe(self):
         class Paid(FakeMusic):
@@ -441,17 +430,6 @@ class CliTests(unittest.TestCase):
         r2 = self.cli("--request", "/x/request.json", "--music", "/x/a.wav")
         self.assertNotEqual(0, r2.returncode)
         self.assertIn("unrecognized", r2.stderr)
-
-    @needs_ffmpeg
-    def test_cli_end_to_end_without_music_provider_fails_with_receipt(self):
-        with tempfile.TemporaryDirectory() as d:
-            task = Task(Path(d))
-            r = self.cli("--request", str(task.request_path), "--timeout-s", "120")
-            self.assertNotEqual(0, r.returncode)
-            res = task.result()
-            self.assertEqual("failed", res["status"])
-            self.assertIn("ยังไม่ได้ตั้งตัวสร้างเพลง AI", res["error"])
-            self.assertFalse(task.final.exists())
 
 
 if __name__ == "__main__":

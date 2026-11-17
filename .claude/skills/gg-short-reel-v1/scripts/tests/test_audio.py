@@ -7,13 +7,10 @@ from test_support import needs_ffmpeg
 
 
 class AudioUnitTests(unittest.TestCase):
-    def test_default_provider_is_not_configured(self):
+    def test_not_configured_default_is_gone(self):
         import audio
-        p = audio.NotConfiguredMusicProvider()
-        self.assertFalse(p.is_paid)
-        with self.assertRaises(audio.MusicUnavailable) as cm:
-            p.get_music(12.0, "calm", Path("/nonexistent/x.wav"))
-        self.assertEqual("ยังไม่ได้ตั้งตัวสร้างเพลง AI (CF-A85 รอแผนเพลง)", str(cm.exception))
+        self.assertFalse(hasattr(audio, "NotConfiguredMusicProvider"))
+        self.assertFalse(audio.FileMusicProvider({}).is_paid)
 
     def test_loudness_acceptance(self):
         import audio
@@ -39,12 +36,12 @@ class AudioFfmpegTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name).resolve()
 
-    def test_music_bed_is_looped_trimmed_and_normalised(self):
+    def test_music_bed_is_trimmed_and_normalised(self):
         import audio
         import common
-        short = ts.FakeMusic(seconds=3).get_music(12.0, None, self.tmp / "m.wav")  # shorter than the video: must loop
+        long_ = ts.FakeMusic(seconds=20).get_music(12.0, None, self.tmp / "m.wav")  # longer than the video: trimmed, never looped
         out = self.tmp / "bed.wav"
-        audio.build_music_bed(short, 12.0, out, common.Deadline(120))
+        audio.build_music_bed(long_, 12.0, out, common.Deadline(120))
         info = ts.probe(out)
         self.assertAlmostEqual(12.0, float(info["format"]["duration"]), delta=0.05)
         i, tp = ts.measure_loudness(out)
@@ -64,8 +61,12 @@ class AudioFfmpegTests(unittest.TestCase):
         noaudio = ts.FakeMusic(mode="noaudio").get_music(10, None, self.tmp / "v.wav")
         with self.assertRaises(common.GgError):
             audio.validate_music(noaudio, dl)
-        ok = ts.FakeMusic().get_music(10, None, self.tmp / "ok.wav")
+        ok = ts.FakeMusic().get_music(10, None, self.tmp / "ok.wav")   # 12 s
         audio.validate_music(ok, dl)
+        audio.validate_music(ok, dl, min_duration_s=12.0)
+        with self.assertRaises(common.GgError) as cm:
+            audio.validate_music(ok, dl, min_duration_s=13.0)
+        self.assertIn("เพลงสั้นกว่าวิดีโอ", str(cm.exception))
 
 
 if __name__ == "__main__":
