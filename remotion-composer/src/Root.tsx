@@ -1,4 +1,6 @@
 import { YtNewsStyle01V3, calculateYtNewsStyle01V3Metadata } from "./YtNewsStyle01V3";
+import { GeminiNotebookNewsV3, calculateGeminiNotebookNewsV3Metadata } from "./GeminiNotebookNewsV3";
+import { Gemini4CarbonNewsV3, calculateGemini4CarbonNewsV3Metadata } from "./Gemini4CarbonNewsV3";
 import { Composition, CalculateMetadataFunction } from "remotion";
 import { Explainer, ExplainerProps } from "./Explainer";
 import {
@@ -67,6 +69,31 @@ import {
   KimiK31NewsYTV1Props,
   calculateKimiK31NewsYTV1Metadata,
 } from "./KimiK31NewsYTV1";
+import {
+  KimiK31NewsV2,
+  KimiK31NewsV2Props,
+  calculateKimiK31NewsV2Metadata,
+} from "./KimiK31NewsV2";
+import {
+  Gpt61TerraNewsV2,
+  Gpt61TerraNewsV2Props,
+  calculateGpt61TerraNewsV2Metadata,
+} from "./Gpt61TerraNewsV2";
+import {
+  GrokBotNewsV2,
+  GrokBotNewsV2Props,
+  calculateGrokBotNewsV2Metadata,
+} from "./GrokBotNewsV2";
+import {
+  GptImage26NewsV2,
+  GptImage26NewsV2Props,
+  calculateGptImage26NewsV2Metadata,
+} from "./GptImage26NewsV2";
+import {
+  ClaudeArtifactsNewsV2,
+  ClaudeArtifactsNewsV2Props,
+  calculateClaudeArtifactsNewsV2Metadata,
+} from "./ClaudeArtifactsNewsV2";
 import {
   ClaudeTop1NewsYTV1,
   ClaudeTop1NewsYTV1Props,
@@ -555,6 +582,66 @@ export const Root: React.FC = () => {
         calculateMetadata={calculateKimiK31NewsYTV1Metadata}
       />
       <Composition
+        id="KimiK31NewsV2"
+        component={KimiK31NewsV2}
+        durationInFrames={Math.ceil(535.4 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 535.4,
+        } as KimiK31NewsV2Props}
+        calculateMetadata={calculateKimiK31NewsV2Metadata}
+      />
+      <Composition
+        id="Gpt61TerraNewsV2"
+        component={Gpt61TerraNewsV2}
+        durationInFrames={Math.ceil(510.5 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 510.5,
+        } as Gpt61TerraNewsV2Props}
+        calculateMetadata={calculateGpt61TerraNewsV2Metadata}
+      />
+      <Composition
+        id="GrokBotNewsV2"
+        component={GrokBotNewsV2}
+        durationInFrames={Math.ceil(265.7 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 265.7,
+        } as GrokBotNewsV2Props}
+        calculateMetadata={calculateGrokBotNewsV2Metadata}
+      />
+      <Composition
+        id="GptImage26NewsV2"
+        component={GptImage26NewsV2}
+        durationInFrames={Math.ceil(341.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 341.0,
+        } as GptImage26NewsV2Props}
+        calculateMetadata={calculateGptImage26NewsV2Metadata}
+      />
+      <Composition
+        id="ClaudeArtifactsNewsV2"
+        component={ClaudeArtifactsNewsV2}
+        durationInFrames={Math.ceil(500.0 * 25)}
+        fps={25}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          durationSec: 500.0,
+        } as ClaudeArtifactsNewsV2Props}
+        calculateMetadata={calculateClaudeArtifactsNewsV2Metadata}
+      />
+      <Composition
         id="ClaudeTop1NewsYTV1"
         component={ClaudeTop1NewsYTV1}
         durationInFrames={Math.ceil(473.9 * 25)}
@@ -797,6 +884,8 @@ export const Root: React.FC = () => {
         } as EndTagProps}
       />
       <Composition id="YtNewsStyle01V3" component={YtNewsStyle01V3} width={1920} height={1080} fps={25} durationInFrames={8525} defaultProps={{}} calculateMetadata={calculateYtNewsStyle01V3Metadata} />
+      <Composition id="GeminiNotebookNewsV3" component={GeminiNotebookNewsV3} width={1920} height={1080} fps={25} durationInFrames={10558} defaultProps={{}} calculateMetadata={calculateGeminiNotebookNewsV3Metadata} />
+      <Composition id="Gemini4CarbonNewsV3" component={Gemini4CarbonNewsV3} width={1920} height={1080} fps={25} durationInFrames={16296} defaultProps={{}} calculateMetadata={calculateGemini4CarbonNewsV3Metadata} />
     </>
   );
 };
