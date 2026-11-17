@@ -18,6 +18,9 @@ CORR = {"schema": 1, "task_id": "t", "step_id": "s", "run_id": "r", "dispatch_id
         "target": {"project_id": "p", "config_ref": "c"}}
 
 
+RUN_JOIN_S = 90      # R6-2: a whole run with the lock held must end well inside this; a blocking flock would never end
+
+
 @contextlib.contextmanager
 def held_lock(run_dir):
     """A peer that holds <run_dir>/.result.lock and never lets go (until the with block ends)."""
@@ -29,6 +32,26 @@ def held_lock(run_dir):
         os.close(fd)
 
 
+def call_in_daemon_thread(testcase, fn, join_s):
+    """R6-2: run `fn` in a daemon thread and fail (instead of hanging the suite) if it has not finished within `join_s`.
+    Returns fn's value; an exception raised by fn is re-raised here, so assertRaises keeps working around the call."""
+    box = {}
+
+    def target():
+        try:
+            box["value"] = fn()
+        except BaseException as e:   # noqa: BLE001
+            box["error"] = e
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(join_s)
+    testcase.assertFalse(t.is_alive(), f"the call did not return within {join_s} s: it is blocked on the lock instead of giving up")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 class LockBoundUnitTests(unittest.TestCase):
     def test_r5_1_publish_gives_up_on_a_lock_held_forever(self):
         import receipt
@@ -37,7 +60,8 @@ class LockBoundUnitTests(unittest.TestCase):
             with held_lock(d):
                 t0 = time.monotonic()
                 with self.assertRaises(receipt.ReceiptLockTimeout):
-                    receipt.publish_receipt(p, receipt.success_receipt(CORR, ["/x"]), CORR, timeout_s=0.4)
+                    call_in_daemon_thread(self, lambda: receipt.publish_receipt(
+                        p, receipt.success_receipt(CORR, ["/x"]), CORR, timeout_s=0.4), 10)
                 elapsed = time.monotonic() - t0
                 self.assertGreaterEqual(elapsed, 0.35, "it did wait for the lock first")
                 self.assertLess(elapsed, 3.0, "and then gave up")
@@ -54,7 +78,8 @@ class LockBoundUnitTests(unittest.TestCase):
             with held_lock(d), mock.patch.object(receipt, "LOCK_TIMEOUT_MAX_S", 0.3):
                 t0 = time.monotonic()
                 with self.assertRaises(receipt.ReceiptLockTimeout):
-                    receipt.publish_receipt(p, receipt.success_receipt(CORR, ["/x"]), CORR, timeout_s=600)
+                    call_in_daemon_thread(self, lambda: receipt.publish_receipt(
+                        p, receipt.success_receipt(CORR, ["/x"]), CORR, timeout_s=600), 10)
                 self.assertLess(time.monotonic() - t0, 3.0)
 
     def test_r5_1_lock_budget_is_remaining_deadline_clamped_to_floor_and_ceiling(self):
@@ -98,7 +123,9 @@ class LockBoundRunTests(unittest.TestCase):
         err = io.StringIO()
         with held_lock(self.task.run_dir), mock.patch.object(receipt, "publish_receipt", side_effect=spy), \
                 contextlib.redirect_stderr(err):
-            rc = self.gg.run(self.task.request_path, music_provider=kw.pop("provider", FakeMusic()), **kw)
+            provider = kw.pop("provider", FakeMusic())
+            rc = call_in_daemon_thread(self, lambda: self.gg.run(self.task.request_path, music_provider=provider, **kw),
+                                       RUN_JOIN_S)
         return rc, calls, err.getvalue()
 
     def _assert_ended_cleanly(self, rc, err):
@@ -261,6 +288,40 @@ class LockInodeRecheckTests(unittest.TestCase):
             self.assertEqual("succeeded", results["B"], "B saw C's terminal receipt and left it alone")
             self.assertEqual(c_data, json.loads(p.read_text()), "no terminal receipt was overwritten")
             self.assertEqual(["result.json"], sorted(os.listdir(d)), "no temp file and no lock file left")
+
+
+class LockReopenCeilingTests(unittest.TestCase):
+    """R6-1: when the flock is won at once but the path no longer names the locked inode, the lock is re-opened. Those
+    re-open rounds never hit the contended branch, so the ceiling must be checked on every round, not only while waiting."""
+
+    def test_r6_1_endless_inode_mismatch_ends_with_a_timeout_within_the_ceiling(self):
+        import receipt
+        rounds = [0]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+
+            def after_flock(lock_path):
+                # the flock was won immediately; now make the path stop naming the locked inode, every single round
+                rounds[0] += 1
+                if rounds[0] > 1500:
+                    raise AssertionError("still re-opening after 1500 rounds: the ceiling is not enforced on re-open rounds")
+                time.sleep(0.001)            # keeps a correct run to a few hundred rounds
+                try:
+                    os.unlink(lock_path)
+                except FileNotFoundError:
+                    pass
+
+            with mock.patch.object(receipt, "_after_flock", side_effect=after_flock):
+                t0 = time.monotonic()
+                with self.assertRaises(receipt.ReceiptLockTimeout):
+                    call_in_daemon_thread(self, lambda: receipt.publish_receipt(
+                        p, receipt.success_receipt(CORR, ["/x"]), CORR, timeout_s=0.4), 10)
+                elapsed = time.monotonic() - t0
+            self.assertGreaterEqual(elapsed, 0.35, "it kept trying until the budget was used up")
+            self.assertLess(elapsed, 3.0, "and then gave up within the ceiling")
+            self.assertGreater(rounds[0], 1, "the mismatch really repeated")
+            self.assertFalse(p.exists(), "nothing was published")
+            self.assertEqual([], sorted(os.listdir(d)), "no temp file and no lock file left")
 
 
 if __name__ == "__main__":

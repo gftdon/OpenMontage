@@ -130,6 +130,8 @@ def _result_lock(result_path, timeout_s=LOCK_TIMEOUT_MAX_S):
             os.close(fd)
             raise
         os.close(fd)                     # the previous holder unlinked the file we waited on: lock the new one
+        if time.monotonic() >= end:      # re-open rounds win the flock at once, so the contended branch never sees the clock
+            raise ReceiptLockTimeout(f"รอ lock ของ result.json ไม่ได้ภายใน {budget:g} วินาที (lock file ถูกเปลี่ยนซ้ำระหว่างรอ)")
     try:
         yield
     finally:
