@@ -10,7 +10,9 @@ const [id,outArg,composerArg,...args]=process.argv.slice(2);
 if(!id||!outArg||!composerArg)throw Error('qc_layout.mjs <comp-id> <out-dir> <composer-dir> [--frames 225,2225]');
 const out=path.resolve(outArg),composer=path.resolve(composerArg);
 await fs.mkdir(out,{recursive:true});
-const meta={compositionId:id,runId:randomUUID(),startedAt:new Date().toISOString()};
+const runIdIdx=args.indexOf('--run-id');
+const runId=runIdIdx>=0?args[runIdIdx+1]:randomUUID();
+const meta={compositionId:id,runId,startedAt:new Date().toISOString()};
 await beginReport(out,meta);let browser;let runOut;
 try {
  runOut=await createRunDirectory(out,meta.runId);meta.artifactDirectory=runOut;
@@ -38,15 +40,25 @@ try {
  let plan;
  const composition=await selectComposition({...common,id});
  const capture=async(frame)=>{
+  const jsonPath=path.join(runOut,`${frame}.json`);
+  const pngPath=path.join(runOut,`${frame}.png`);
+  if(frame!==0||plan){
+   try{
+    const existing=JSON.parse(await fs.readFile(jsonPath,'utf8'));
+    if(existing&&existing.frame===frame&&await fs.stat(pngPath).then(()=>true).catch(()=>false)){
+     return existing;
+    }
+   }catch{}
+  }
   const logs=[];
-  await renderStill({...common,composition,frame,output:path.join(runOut,`${frame}.png`),onBrowserLog:l=>{
+  await renderStill({...common,composition,frame,output:pngPath,onBrowserLog:l=>{
    if(l.text.startsWith('__QC_PLAN__'))plan=JSON.parse(l.text.slice(11));
    if(l.text.startsWith('__QC__'))logs.push(JSON.parse(l.text.slice(6)));
   }});
   // renderStill may mount at frame zero then seek; only retain the requested frame.
   const matching=logs.filter(s=>s.frame===frame);
   if(matching.length!==1)throw Error(`frame ${frame}: expected one probe log, got ${matching.length}`);
-  await fs.writeFile(path.join(runOut,`${frame}.json`),JSON.stringify(matching[0],null,2));
+  await fs.writeFile(jsonPath,JSON.stringify(matching[0],null,2));
   return matching[0];
  };
  const first=await capture(0);
