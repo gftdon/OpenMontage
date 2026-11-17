@@ -13,7 +13,8 @@ if (!comp) { console.error('usage: node stills.mjs <CompId> <frames> <outDir> [r
 const require = createRequire(path.join(root, 'package.json'));
 const { bundle } = require('@remotion/bundler');
 const { renderStill, selectComposition } = require('@remotion/renderer');
-const serveUrl = await bundle({ entryPoint: path.join(root, 'src/index.tsx'), onProgress: () => {} });
+// symlinkPublicDir: link public/ instead of copying it (~10 GB) into $TMPDIR on every run
+const serveUrl = await bundle({ symlinkPublicDir: true, entryPoint: path.join(root, 'src/index.tsx'), onProgress: () => {} });
 const composition = await selectComposition({ serveUrl, id: comp, inputProps: {} });
 for (const f of frames) {
   const out = path.join(outDir, `f${String(f).padStart(5, '0')}.png`);

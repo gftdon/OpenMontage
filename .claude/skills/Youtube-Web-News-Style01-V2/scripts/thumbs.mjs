@@ -14,7 +14,8 @@ const require = createRequire(path.join(root, "package.json"));
 const { bundle } = require("@remotion/bundler");
 const { renderStill, selectComposition } = require("@remotion/renderer");
 fs.mkdirSync(outDir, { recursive: true });
-const serveUrl = await bundle({ entryPoint: path.join(root, "src/index.tsx"), onProgress: () => {} });
+// symlinkPublicDir: link public/ instead of copying it (~10 GB) into $TMPDIR on every run
+const serveUrl = await bundle({ symlinkPublicDir: true, entryPoint: path.join(root, "src/index.tsx"), onProgress: () => {} });
 for (const v of variants) {
   const inputProps = { variant: v, avatarSec };
   const composition = await selectComposition({ serveUrl, id: compId, inputProps });
