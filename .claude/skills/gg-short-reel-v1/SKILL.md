@@ -29,7 +29,7 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 1. ตรวจ request: `schema 1`, `kind edit_short`, `aspect 9:16`, output เดียวที่ลงท้าย `_40_Short_Final.mp4`
 2. หา input ตามชื่อไฟล์ ไม่ใช่ตามลำดับ: `manifest.json` ใน `*_20_Clips`, `*_00_Script.txt` และเพลง `*_30_Music.mp3` ใน input role `music`; ตรวจ `run_id` ของ manifest, seq 1..N ต่อเนื่อง, ไฟล์คลิปอยู่ในโฟลเดอร์งานและอยู่ใน input, และ `originality.json` ที่ผ่านด่านกันลอกตรงกับ hash ของสคริปต์
 3. ต่อคลิป (ใช้ video stream แรกเท่านั้น, ทิ้งเสียงต้นทาง, ช็อตต่อทิ้งเฟรมแรก) เป็น 1080×1920, 30 fps คงที่, H.264
-4. ใส่ข้อความ `on_screen_text` ด้วยฟอนต์ Kanit-Bold ใน safe zone ของ Instagram (x 90–990, y 210–1600)
+4. ใส่ข้อความ `on_screen_text` ด้วยฟอนต์ Kanit-Bold ใน safe zone ของ Instagram (x 90–990, y 210–1600) — ตัดอักขระที่ฟอนต์ไม่มีกลิฟ (อีโมจิ/สัญลักษณ์) ออกก่อน ไม่วาดเป็นกล่องว่าง; รายการที่เหลือว่างจะถูกตัดทิ้ง และ stderr บอก `on_screen_text[i]` ที่ลบ (ไม่เปลี่ยน receipt)
 5. อ่านเพลงจาก input role `music` (ขั้น `music` ของ AIOS สร้างและจ่ายเงินไปแล้ว — สคริปต์ไม่เรียกเครือข่ายและไม่เรียก API ที่เสียเงิน)
    ไฟล์ต้องอยู่ในโฟลเดอร์งาน, อยู่ใน `files` ของ input, ไม่ว่าง, มี audio stream และ **ยาวไม่น้อยกว่าวิดีโอ** (สั้นกว่า = ล้มเหลว ไม่ลูปเพลง)
    ตัดเพลงให้ยาวเท่าวิดีโอ, fade-in 0.1 วินาที, fade-out 1.2 วินาที, ปรับความดัง −14 LUFS (เป้า true peak −2 dBTP) แล้วตรวจไฟล์สุดท้ายซ้ำจริง (เกณฑ์: −14±1 LUFS, TP ≤ −1 dBTP)

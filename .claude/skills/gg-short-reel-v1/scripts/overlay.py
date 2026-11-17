@@ -1,6 +1,8 @@
 """On-screen text: Pillow-rendered PNG per item, burned with ffmpeg overlay inside the Instagram safe zone."""
 import math
 import os
+import re
+import sys
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -47,6 +49,7 @@ class TextItem:
     start_s: float
     end_s: float
     placement: str
+    index: int = -1       # position in the request's on_screen_text (used in log lines only)
 
 
 def _num(v):
@@ -68,7 +71,7 @@ def parse_items(raw):
             raise OverlayError(f"{p}.start_s/end_s ต้องเป็นตัวเลขจำกัด (start_s >= 0)")
         if it.get("placement") not in PLACEMENTS:
             raise OverlayError(f"{p}.placement ต้องเป็น top, center หรือ bottom (placement)")
-        items.append(TextItem(text.strip(), float(it["start_s"]), float(it["end_s"]), it["placement"]))
+        items.append(TextItem(text.strip(), float(it["start_s"]), float(it["end_s"]), it["placement"], i))
     return items
 
 
@@ -78,7 +81,7 @@ def clamp_items(items, duration_s):
     for it in items:
         s, e = max(0.0, it.start_s), min(float(duration_s), it.end_s)
         if e > s:
-            kept.append(TextItem(it.text, s, e, it.placement))
+            kept.append(TextItem(it.text, s, e, it.placement, it.index))
     return kept
 
 
@@ -89,6 +92,64 @@ def _font(path, size):
         return ImageFont.truetype(str(path), size)
     except OSError as e:
         raise OverlayError(f"โหลดฟอนต์ไม่ได้: {path} ({e})")
+
+
+# Dropped even though the font draws them as blanks (so a glyph test cannot see them):
+# ZWJ, variation selectors, emoji skin-tone modifiers (meaningless without an emoji).
+_ALWAYS_STRIP = re.compile("[‍︀-️\U000e0100-\U000e01ef\U0001f3fb-\U0001f3ff]")
+_NOTDEF_PROBE = "￾"   # a noncharacter: no font maps it, so it renders as the font's .notdef (tofu) box
+
+
+@lru_cache(maxsize=8)
+def _notdef_mask(font_path):
+    m = _font(font_path, START_FONT).getmask(_NOTDEF_PROBE)
+    return m.size, bytes(m)
+
+
+@lru_cache(maxsize=4096)
+def _renders(font_path, ch):
+    """True when the font has a real glyph for ch: pixel-compare ch with the .notdef box (same size and bytes = tofu).
+    Blank glyphs (spaces, zero-width) are fine, they are not boxes."""
+    if ch == "\n" or ch.isspace():
+        return True
+    if _ALWAYS_STRIP.fullmatch(ch):
+        return False
+    m = _font(font_path, START_FONT).getmask(ch)
+    return (m.size, bytes(m)) != _notdef_mask(font_path)
+
+
+def strip_unrenderable(text, font_path):
+    """Remove every character the font cannot draw (emoji, symbols, ZWJ, variation selectors, skin tones).
+    Returns (clean_text, removed_chars). Text with nothing to remove comes back untouched; otherwise the blanks
+    left behind are collapsed and every line is trimmed (a line that only held removed characters vanishes)."""
+    fp = str(font_path)
+    kept, removed = [], []
+    for ch in text:
+        (kept if _renders(fp, ch) else removed).append(ch)
+    if not removed:
+        return text, ""
+    lines = []
+    for line in "".join(kept).replace("\r", "").split("\n"):
+        line = re.sub(r"[^\S\n]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines), "".join(removed)
+
+
+def sanitize_items(items, font_path):
+    """Strip unrenderable characters from every item, log each change to stderr (one line per item),
+    drop items that end up empty."""
+    out = []
+    for it in items:
+        clean, removed = strip_unrenderable(it.text, font_path)
+        if removed:
+            shown = " ".join(f"U+{ord(c):04X}" for c in removed)
+            note = "ข้อความว่างหลังลบ จึงตัดรายการนี้ออก" if not clean else "ลบออกแล้ว"
+            print(f"gg_short_reel: on_screen_text[{it.index}] ฟอนต์ไม่มีอักขระ {removed!r} ({shown}) - {note}",
+                  file=sys.stderr)
+        if clean:
+            out.append(TextItem(clean, it.start_s, it.end_s, it.placement, it.index) if removed else it)
+    return out
 
 
 def _clusters(word):
@@ -219,6 +280,7 @@ def burn(base_video, items, font_path, out_video, workdir, deadline):
     """Overlay every (already clamped) item between its start/end; video-only output, re-encoded once."""
     if not items:
         raise OverlayError("ไม่มีข้อความให้ burn")
+    items = sanitize_items(items, font_path)     # may leave nothing: the video is then just re-encoded without text
     workdir = Path(workdir)
     args = [common.find_tool("ffmpeg"), "-nostdin", "-hide_banner", "-v", "error", "-y", "-i", base_video]
     chain, prev = [], "0:v"

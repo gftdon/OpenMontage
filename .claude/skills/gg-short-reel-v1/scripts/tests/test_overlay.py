@@ -114,5 +114,110 @@ class SafeZoneTests(unittest.TestCase):
             self.assertEqual(second, ov.resolve_font(env={}, repo_fonts=[Path(d) / "a.ttf", second]))
 
 
+class UnrenderableStripTests(unittest.TestCase):
+    """Characters Kanit has no glyph for (emoji etc.) are removed before layout, never rendered as tofu boxes."""
+
+    def setUp(self):
+        import overlay
+        self.overlay = overlay
+        self.font = overlay.resolve_font()
+
+    def strip(self, text):
+        return self.overlay.strip_unrenderable(text, self.font)
+
+    def test_emoji_variation_selector_zwj_and_skin_tone_removed(self):
+        self.assertEqual("ใจ", self.strip("❤️ ใจ")[0])
+        self.assertEqual("ok", self.strip("👍🏽 ok")[0])
+        self.assertEqual("สวัสดีค่ะ", self.strip("สวัสดีค่ะ 🙏")[0])
+        self.assertEqual("a b", self.strip("a 👨‍👩‍👧 b")[0])
+        self.assertEqual("", self.strip("❤️👍🏽\U0001F64F")[0])
+        self.assertEqual("ใครคิดถึงคุณยายบ้าง กดหัวใจให้หน่อย",
+                         self.strip("ใครคิดถึงคุณยายบ้าง กดหัวใจให้หน่อย ❤")[0])
+
+    def test_removed_characters_are_reported(self):
+        clean, removed = self.strip("สวัสดีค่ะ 🙏")
+        self.assertEqual("🙏", removed)
+        self.assertEqual("", self.strip("ok")[1])
+
+    def test_supported_text_is_unchanged(self):
+        for text in ("สวัสดีค่ะ คุณยาย", "ยายกับตาหัวเราะเสียงดังเมื่อหลานทำสิ่งที่ไม่มีใครคาดคิด", "Hello World",
+                     "2026 100% real!?.,", "บรรทัดแรก\nบรรทัดสอง", "café — ok’s…", "a  b"):
+            with self.subTest(text=text):
+                self.assertEqual((text, ""), self.strip(text))
+
+    def test_double_spaces_collapsed_and_trimmed_only_after_removal(self):
+        self.assertEqual("a b", self.strip("a ❤ b")[0])
+        self.assertEqual("ก ข", self.strip("  ❤  ก  ❤❤  ข  ❤ ")[0])
+        self.assertEqual("บน\nล่าง", self.strip("บน ❤\n\n❤\nล่าง")[0])
+
+    def _items(self, *texts):
+        return self.overlay.parse_items([{"text": t, "start_s": 0, "end_s": 2, "placement": "top"} for t in texts])
+
+    def test_sanitize_items_drops_emoji_only_item_and_logs_to_stderr(self):
+        import contextlib
+        import io
+        items = self._items("ใจ ❤️", "❤️❤️", "ok")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            kept = self.overlay.sanitize_items(items, self.font)
+        self.assertEqual(["ใจ", "ok"], [k.text for k in kept])
+        log = buf.getvalue()
+        self.assertIn("on_screen_text[0]", log)
+        self.assertIn("❤", log)
+        self.assertIn("on_screen_text[1]", log)
+        self.assertNotIn("on_screen_text[2]", log)
+
+    def test_sanitize_items_keeps_original_index_after_clamp(self):
+        import contextlib
+        import io
+        items = self.overlay.clamp_items(self._items("a", "b ❤"), 12.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.overlay.sanitize_items(items[1:], self.font)
+        self.assertIn("on_screen_text[1]", buf.getvalue())
+
+    def test_sanitize_items_silent_when_nothing_removed(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            kept = self.overlay.sanitize_items(self._items("สวัสดี", "ok"), self.font)
+        self.assertEqual("", buf.getvalue())
+        self.assertEqual(["สวัสดี", "ok"], [k.text for k in kept])
+
+    def test_rendered_png_has_no_tofu(self):
+        from PIL import Image
+        ov = self.overlay
+        with tempfile.TemporaryDirectory() as d:
+            def render(text, name):
+                lay = ov.layout_item(text, "center", self.font)
+                png = Path(d) / name
+                ov.render_png(lay, self.font, png)
+                return Image.open(png).convert("RGBA").tobytes(), lay.box
+
+            clean_text, _ = self.strip("ใครคิดถึงคุณยายบ้าง ❤")
+            self.assertEqual("ใครคิดถึงคุณยายบ้าง", clean_text)
+            got = render(clean_text, "a.png")
+            self.assertEqual(render("ใครคิดถึงคุณยายบ้าง", "b.png"), got)
+            self.assertNotEqual(render("ใครคิดถึงคุณยายบ้าง ❤", "c.png"), got)   # the unstripped one has a tofu box
+
+    @unittest.skipUnless(ts.HAVE_FFMPEG, "ffmpeg not installed")
+    def test_burn_with_only_unrenderable_text_still_produces_video(self):
+        import contextlib
+        import io
+        import common
+        ov = self.overlay
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "base.mp4"
+            ts.subprocess.run([ts.FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=216x384:r=30:d=1",
+                               "-pix_fmt", "yuv420p", str(base)], check=True)
+            out = Path(d) / "out.mp4"
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ov.burn(base, self._items("❤️"), self.font, out, d, common.Deadline(60))
+            self.assertTrue(out.is_file() and out.stat().st_size > 0)
+            self.assertIn("on_screen_text[0]", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
