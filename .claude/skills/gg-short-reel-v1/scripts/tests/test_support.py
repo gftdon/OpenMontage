@@ -60,9 +60,12 @@ def make_clip(path, *, w=416, h=752, frames=150, base=20, step=3, two_video=True
     shutil.copy(cached, path)
 
 
+MUSIC_NOISE_SEED = 8501  # fixed anoisesrc seed: the fixture must be byte-identical on every generation
+
+
 def make_music(path, *, seconds=14.0, kind="tone", amp=0.3, freq=440, video_only=False):
     """AIOS-style music fixture (mp3). kind: 'tone' (steady sine), 'bursts' (loud transient-rich pink-noise bursts)."""
-    key = hashlib.sha1(json.dumps(["music", seconds, kind, amp, freq, video_only]).encode()).hexdigest()[:16]
+    key = hashlib.sha1(json.dumps(["music", seconds, kind, amp, freq, video_only, MUSIC_NOISE_SEED]).encode()).hexdigest()[:16]
     cached = cache_dir() / f"music-{key}.bin"
     if not cached.exists():
         tmp = cache_dir() / f"tmp-{key}.bin"
@@ -70,7 +73,7 @@ def make_music(path, *, seconds=14.0, kind="tone", amp=0.3, freq=440, video_only
             cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=blue:s=64x64:r=10:d={seconds}",
                    "-pix_fmt", "yuv420p", "-f", "mp4", str(tmp)]
         elif kind == "bursts":
-            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"anoisesrc=d={seconds}:c=pink:a={amp}:r=44100",
+            cmd = [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"anoisesrc=d={seconds}:c=pink:a={amp}:r=44100:seed={MUSIC_NOISE_SEED}",
                    "-af", "volume='if(lt(mod(t,0.8),0.06),1,0.1)':eval=frame", "-c:a", "libmp3lame", "-b:a", "192k",
                    "-f", "mp3", str(tmp)]
         else:

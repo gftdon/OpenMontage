@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 
 CORRELATION_KEYS = ("schema", "task_id", "step_id", "run_id", "dispatch_id", "target")
+TERMINAL_STATUSES = ("succeeded", "failed")
+RECEIPT_READ_MAX_BYTES = 1024 * 1024
 
 
 def correlation_of(request):
@@ -42,6 +44,23 @@ def _atomic_write_json(path, data):
         except OSError:
             pass
         raise
+
+
+def existing_terminal_status(result_path, correlation):
+    """'succeeded' / 'failed' when result_path already holds a terminal receipt of THIS correlation, else None.
+    Anything unreadable, non-terminal or of another correlation counts as "nothing to protect"."""
+    try:
+        if os.path.getsize(result_path) > RECEIPT_READ_MAX_BYTES:
+            return None
+        with open(result_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("status") not in TERMINAL_STATUSES:
+        return None
+    if any(k not in data or data[k] != correlation[k] for k in CORRELATION_KEYS):
+        return None
+    return data["status"]
 
 
 def write_receipt(result_path, data):

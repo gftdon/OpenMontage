@@ -22,6 +22,9 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 - path ของ `request.json` อยู่ในข้อความสั่งงาน (`AIOS runtime request: ...`) — ต้องเป็น absolute path
 - `--timeout-s N` (ไม่ใส่ = 900) คือเวลารวมของทั้งงาน หมดเวลา = receipt ล้มเหลว
 - exit code 0 = สำเร็จ, ไม่ใช่ 0 = ล้มเหลว (เหตุผลอยู่ใน `result.json` และ stderr)
+  - **exit 2** (อ่าน request/envelope ไม่ได้) และ **exit 3** (เขียน receipt ไม่สำเร็จ) = สคริปต์อาจไม่มี `result.json` เลย → ดู "ถ้าไม่มี result.json" ด้านล่าง
+  - **exit 4** = `result.json` มี receipt สถานะสิ้นสุด (succeeded/failed) ของ correlation เดียวกันอยู่แล้ว สคริปต์ไม่เขียนทับและไม่แตะไฟล์ใดเลย (รวมไฟล์ final เดิม)
+    → **หยุด** รายงานตาม receipt ที่มีอยู่ ห้ามรันซ้ำ ห้ามแก้ไฟล์
 - ใช้ ffmpeg/ffprobe ที่ `/opt/homebrew/bin` ฟอนต์ Kanit-Bold หาจาก `GG_SHORT_FONT` → `remotion-composer/public/fonts/` ของ repo → checkout หลัก
 
 ## สิ่งที่สคริปต์ทำ (อ่านเพื่อเข้าใจผล ไม่ต้องทำเอง)
@@ -37,9 +40,22 @@ PY="$PWD/.venv/bin/python"; [ -x "$PY" ] || PY=/Volumes/Ext_SS990Pro/Dev/openMon
 6. ตรวจความยาว 10–90 วินาที, ไม่เขียนทับไฟล์เดิม (เขียน `.partial.mp4` แล้วค่อยย้ายเข้าที่)
 7. ล้มเหลว → ลบไฟล์ครึ่งๆ กลางๆ, เขียน `<final>.FAILED.json` และ receipt `status: failed` พร้อม `retry_safe`
 
+## ถ้าไม่มี result.json (exit 2 หรือ 3)
+
+สคริปต์เขียน receipt ไม่ได้ในสองกรณีนี้ (envelope พัง / disk เขียนไม่ได้) ถ้าไม่มี `result.json` AIOS จะรอจนหมดเวลา — ให้ agent เขียน receipt ล้มเหลวเอง **ครั้งเดียว** ตาม runtime instruction ในข้อความสั่งงาน:
+
+1. ตรวจก่อนว่า `result.json` ยัง **ไม่มี** (`[ -e <result_path> ]`) — ถ้ามีอยู่แล้ว (ไม่ว่าสถานะอะไร) **ห้ามเขียนอะไรทั้งสิ้น** ให้รายงานตามที่มี
+2. อ่าน `request.json` แล้วคัดลอก `schema`, `task_id`, `step_id`, `run_id`, `dispatch_id`, `target` **ตรงตัวอักษร** (ห้ามเดา/สร้าง ID — ถ้า request.json อ่านไม่ได้จนคัดลอกไม่ได้ ให้รายงานแล้วหยุด)
+3. เขียน JSON นี้ไปที่ `result_path` (ต้องอยู่โฟลเดอร์เดียวกับ `request.json`; ถ้าไม่ใช่ ให้รายงานแล้วหยุด):
+   `{ <correlation 6 ฟิลด์>, "status": "failed", "error": "<เหตุผลเฉพาะเจาะจง: exit code + บรรทัด stderr ของสคริปต์>", "retry_safe": true, "outputs": [] }`
+   — `retry_safe` เป็น `true` เสมอเพราะสกิลนี้ไม่ทำงานที่เสียเงิน
+4. เขียนด้วย temp file ในโฟลเดอร์เดียวกันแล้ว rename เข้าที่แบบไม่ทับ (`mv -n <tmp> <result_path>` แล้วลบ tmp ที่เหลือถ้ามี) — ห้ามเขียนตรงลง `result.json`
+5. ห้ามทำอย่างอื่นเพิ่ม (ไม่รันสคริปต์ซ้ำ ไม่สร้างไฟล์ final)
+
 ## ข้อห้าม
 
 - **ห้ามเขียนหรือแก้ `result.json` เอง** — สคริปต์เป็นเจ้าของไฟล์นี้ (เขียนแบบ atomic พร้อม correlation ครบ)
+  ข้อยกเว้นเดียว: สคริปต์จบด้วย exit 2 หรือ 3 **และ** ไม่มี `result.json` เลย — ดูหัวข้อ "ถ้าไม่มี result.json" ด้านบน
 - **ห้ามตัดต่อ/แก้วิดีโอด้วยมือ** ห้าม ffmpeg เพิ่มเอง ห้ามสร้างหรือ copy ไฟล์ `*_40_Short_Final.mp4` ด้วยวิธีอื่น
 - **ห้ามหา/สร้าง/แทนเพลงเอง**: เพลงมาจาก input role `music` (ขั้น `music` ของ AIOS) เท่านั้น — ห้ามใช้ stock/Pixabay/ไฟล์เพลงที่หามาเอง/
   เครื่องมือสร้างเพลงใน repo/ดาวน์โหลดจากเครือข่าย และห้ามลูปหรือต่อเพลงให้ยาวขึ้น ถ้า receipt บอกว่าเพลงไม่มี (`ต้องมี input role music`,

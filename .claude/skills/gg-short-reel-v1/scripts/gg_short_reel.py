@@ -23,8 +23,8 @@ import request_io  # noqa: E402
 DEFAULT_TIMEOUT_S = 900.0
 MIN_DURATION_S, MAX_DURATION_S = 10.0, 90.0
 PREFLIGHT_SLACK_S = 1.0   # source-duration estimate is only used to refuse clearly impossible inputs early
-DURATION_EPS = 1e-3
 ERROR_MAX = 480
+EXIT_RECEIPT_EXISTS = 4   # result.json already holds a terminal receipt of this correlation: nothing was touched
 
 
 class State:
@@ -38,8 +38,10 @@ class State:
 
 
 def check_duration(duration_s):
-    if not (MIN_DURATION_S - DURATION_EPS <= duration_s <= MAX_DURATION_S + DURATION_EPS):
-        raise common.GgError(f"ความยาววิดีโอ {duration_s:.2f} วินาที อยู่นอกช่วง {MIN_DURATION_S:g}-{MAX_DURATION_S:g} วินาที")
+    """Exactly AIOS' gate (10 <= d <= 90 on ffprobe format.duration). No tolerance: anything the skill lets through
+    that AIOS then rejects would end as outcome_unknown and lock the single-flight, so this must never be looser."""
+    if not (MIN_DURATION_S <= duration_s <= MAX_DURATION_S):
+        raise common.GgError(f"ความยาววิดีโอ {duration_s:.4f} วินาที อยู่นอกช่วง {MIN_DURATION_S:g}-{MAX_DURATION_S:g} วินาที")
 
 
 def verify_final(path, deadline):
@@ -161,6 +163,16 @@ def _cleanup(state):
                 print(f"gg_short_reel: ลบ {p} ไม่ได้: {e}", file=sys.stderr)
 
 
+def _receipt_exists(env):
+    """True (after saying so on stderr) when a terminal receipt of this correlation is already in result_path."""
+    status = receipt.existing_terminal_status(env.result_path, env.correlation)
+    if status is None:
+        return False
+    print(f"gg_short_reel: result.json มี receipt สถานะ {status} ของ correlation นี้อยู่แล้ว — ไม่เขียนทับ "
+          f"และไม่แตะไฟล์อื่น (exit {EXIT_RECEIPT_EXISTS})", file=sys.stderr)
+    return True
+
+
 def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
     """Returns the process exit code. `music_provider` is a Python-only injection point (tests); the CLI always uses FileMusicProvider."""
     try:
@@ -168,6 +180,8 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
     except request_io.RequestError as e:
         print(f"gg_short_reel: {e}", file=sys.stderr)
         return 2
+    if _receipt_exists(env):                    # a finished run is never re-run over: first line of defence, touches nothing
+        return EXIT_RECEIPT_EXISTS
     provider = music_provider if music_provider is not None else audio.FileMusicProvider(env.request)
     state, failure = State(), None
     deadline = common.Deadline(timeout_s)
@@ -184,12 +198,17 @@ def run(request_path, music_provider=None, timeout_s=DEFAULT_TIMEOUT_S):
         if failure is None:
             state.stage = "receipt"
             try:
+                if _receipt_exists(env):        # someone wrote a terminal receipt while we ran: theirs stands
+                    _cleanup(state)
+                    return EXIT_RECEIPT_EXISTS
                 receipt.write_receipt(env.result_path, receipt.success_receipt(env.correlation, env.request["outputs"]))
                 return 0
             except BaseException as e:   # noqa: BLE001
                 failure = e
         error = describe(failure, state)
         _cleanup(state)
+        if _receipt_exists(env):                # same, and no diagnostic file beside a receipt we are not replacing
+            return EXIT_RECEIPT_EXISTS
         retry_safe = receipt.decide_retry_safe(state.paid_call_started)
         if state.final is not None:
             try:

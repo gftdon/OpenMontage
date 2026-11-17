@@ -120,6 +120,19 @@ def _input(request, role):
     return inp, files
 
 
+def _resolve_input_file(real_task, path, listed, what):
+    """The one resolver for every file read out of a request input: realpath (symlinks followed), inside the task dir
+    (realpath containment), listed in the input's `files`, and a regular file. Returns the real path; callers read THAT."""
+    real = os.path.realpath(path)
+    if not real.startswith(real_task + os.sep):
+        raise RequestError(f"{what}: ไฟล์อยู่นอกโฟลเดอร์งาน (task dir)")
+    if real not in listed:
+        raise RequestError(f"{what}: ไฟล์ไม่อยู่ในรายการ files ของ input")
+    if not os.path.isfile(real):
+        raise RequestError(f"{what}: ไม่ใช่ไฟล์ปกติหรือไม่พบไฟล์")
+    return real
+
+
 def _read_capped(path, cap, what):
     try:
         if os.path.getsize(path) > cap:
@@ -139,13 +152,14 @@ def _json_obj(raw, what):
     return v
 
 
-def _check_originality(script_file, script_bytes, script_files):
+def _check_originality(script_file, script_bytes, script_files, real_task, listed):
     """originality.json is always written beside the G&G script by the AIOS script step (viral-script-step.ts)."""
     sib = [f for f in script_files if os.path.dirname(f) == os.path.dirname(script_file) and os.path.basename(f) == "originality.json"]
     if len(sib) != 1:
         raise RequestError(GATE_MESSAGE + " (ไม่พบ originality.json ข้างไฟล์สคริปต์ใน input)")
+    real = _resolve_input_file(real_task, sib[0], listed, "originality.json")
     try:
-        rec = json.loads(_read_capped(sib[0], ORIGINALITY_MAX_BYTES, "originality.json").decode("utf-8"))
+        rec = json.loads(_read_capped(real, ORIGINALITY_MAX_BYTES, "originality.json").decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise RequestError(GATE_MESSAGE + " (originality.json อ่านไม่ได้)")
     sha = rec.get("script_sha256") if isinstance(rec, dict) else None
@@ -166,8 +180,10 @@ def load_plan(env):
     scripts = [f for f in script_files if os.path.basename(f).endswith("_00_Script.txt")]
     if len(scripts) != 1:
         raise RequestError(f"ไม่พบไฟล์ *_00_Script.txt ตัวเดียวใน input script (พบ {len(scripts)})")
-    script_bytes = _read_capped(scripts[0], SCRIPT_MAX_BYTES, "ไฟล์สคริปต์")
-    _check_originality(scripts[0], script_bytes, script_files)
+    script_listed = {os.path.realpath(f) for f in script_files}
+    real_script = _resolve_input_file(real_task, scripts[0], script_listed, "ไฟล์สคริปต์")
+    script_bytes = _read_capped(real_script, SCRIPT_MAX_BYTES, "ไฟล์สคริปต์")
+    _check_originality(scripts[0], script_bytes, script_files, real_task, script_listed)
     script = _json_obj(script_bytes, "สคริปต์ G&G")
     if not isinstance(script.get("on_screen_text"), list):
         raise RequestError("สคริปต์ไม่มี on_screen_text (list) — เป็น JSON ของโหมด G&G หรือไม่")
@@ -177,7 +193,9 @@ def load_plan(env):
                  and os.path.basename(os.path.dirname(f)).endswith("_20_Clips")]
     if len(manifests) != 1:
         raise RequestError(f"ไม่พบ manifest.json ใน *_20_Clips ตัวเดียวใน input clips (พบ {len(manifests)})")
-    manifest = _json_obj(_read_capped(manifests[0], SMALL_JSON_MAX_BYTES, "manifest"), "manifest.json")
+    listed = {os.path.realpath(f) for f in clips_files}
+    real_manifest = _resolve_input_file(real_task, manifests[0], listed, "manifest.json")
+    manifest = _json_obj(_read_capped(real_manifest, SMALL_JSON_MAX_BYTES, "manifest"), "manifest.json")
     if manifest.get("schema") != 1:
         raise RequestError("manifest schema ต้องเป็น 1")
     if not isinstance(manifest.get("run_id"), str) or manifest["run_id"] != clips_in.get("run_id"):
@@ -193,7 +211,6 @@ def load_plan(env):
     if sorted(shots_by_seq) != list(range(1, len(shots_by_seq) + 1)):
         raise RequestError(f"manifest shots: seq ต้องเป็น 1..N ต่อเนื่อง (ได้ {sorted(shots_by_seq)})")
 
-    listed = {os.path.realpath(f) for f in clips_files}
     shots = []
     for seq in sorted(shots_by_seq):
         s = shots_by_seq[seq]
@@ -208,14 +225,8 @@ def load_plan(env):
         rel = s.get("file")
         if not isinstance(rel, str) or not rel or os.path.isabs(rel):
             raise RequestError(f"ช็อต {seq}: file ต้องเป็น path สัมพัทธ์กับโฟลเดอร์งาน")
-        real = os.path.realpath(os.path.join(real_task, rel))
-        if not real.startswith(real_task + os.sep):
-            raise RequestError(f"ช็อต {seq}: ไฟล์อยู่นอกโฟลเดอร์งาน (task dir)")
-        if real not in listed:
-            raise RequestError(f"ช็อต {seq}: ไฟล์ไม่อยู่ในรายการ files ของ input clips")
-        if not os.path.isfile(real):
-            raise RequestError(f"ช็อต {seq}: ไม่พบไฟล์คลิป")
+        real = _resolve_input_file(real_task, os.path.join(real_task, rel), listed, f"ช็อต {seq}")
         shots.append(compose.Shot(seq=seq, path=Path(real), continues=kind == "grok_i2v_continue"))
 
     return Plan(task_dir=Path(real_task), shots=shots, script_text="", texts_raw=script["on_screen_text"],
-                script_path=Path(scripts[0]))
+                script_path=Path(real_script))

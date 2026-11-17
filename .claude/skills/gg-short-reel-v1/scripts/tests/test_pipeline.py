@@ -97,11 +97,35 @@ class SuccessTests(Base):
 
     def test_e_duration_gate_boundaries(self):
         import common
-        for ok in (10.0, 10.0005, 50.0, 90.0, 90.0005):
+        # F5: at least as strict as AIOS 10 <= d <= 90 (ffprobe format.duration) — no epsilon that widens the window
+        for ok in (10.0, 10.0005, 50.0, 90.0):
             self.gg.check_duration(ok)
-        for bad in (9.9, 9.998, 90.01, 95.0, 0.0):
-            with self.assertRaises(common.GgError):
+        for bad in (9.9, 9.998, 9.9995, 9.9999999, 90.0000001, 90.0005, 90.01, 95.0, 0.0):
+            with self.subTest(bad=bad), self.assertRaises(common.GgError):
                 self.gg.check_duration(bad)
+
+    def test_e_verify_final_applies_the_strict_gate_to_format_duration(self):
+        import audio
+        import common
+        import compose
+
+        def info(duration):
+            return {"streams": [{"codec_type": "video", "codec_name": "h264", "width": compose.W, "height": compose.H,
+                                 "pix_fmt": "yuv420p", "sample_aspect_ratio": "1:1",
+                                 "r_frame_rate": f"{compose.FPS}/1", "avg_frame_rate": f"{compose.FPS}/1"},
+                                {"codec_type": "audio", "codec_name": "aac"}],
+                    "format": {"duration": duration}}
+
+        for bad in ("9.999500", "90.000500"):
+            with self.subTest(bad=bad), mock.patch.object(common, "probe", return_value=info(bad)), \
+                    mock.patch.object(audio, "measure_loudness", side_effect=AssertionError("duration gate must fire first")):
+                with self.assertRaises(common.GgError) as cm:
+                    self.gg.verify_final("x.mp4", None)
+                self.assertIn("ช่วง", str(cm.exception))
+        for ok, expect in (("10.000000", 10.0), ("90.000000", 90.0)):
+            with self.subTest(ok=ok), mock.patch.object(common, "probe", return_value=info(ok)), \
+                    mock.patch.object(audio, "measure_loudness", return_value=(-14.0, -2.0)):
+                self.assertEqual(expect, self.gg.verify_final("x.mp4", None)["duration_s"])
 
     def test_e_9_9_seconds_fails_10_seconds_succeeds(self):
         with tempfile.TemporaryDirectory() as d:
@@ -363,6 +387,88 @@ class RobustnessTests(Base):
         self.assertEqual(sorted(["request.json", "result.json", task.final.name]), task.run_dir_names())
 
 
+@needs_ffmpeg
+class TerminalReceiptNotOverwrittenTests(Base):
+    """F6b: a terminal receipt (succeeded/failed) with the same correlation is never overwritten; nothing else is touched."""
+
+    def _snapshot(self, task):
+        return {p.name: p.read_bytes() for p in task.run_dir.iterdir() if p.is_file()}
+
+    def _run_refused(self, task, provider=None):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self.run_task(task, provider if provider is not None else FakeMusic())
+        self.assertEqual(self.gg.EXIT_RECEIPT_EXISTS, rc)
+        self.assertNotEqual(0, rc)
+        self.assertIn("receipt", err.getvalue())
+        self.assertIn("ไม่เขียนทับ", err.getvalue())
+        return err.getvalue()
+
+    def test_second_run_after_success_leaves_receipt_and_final_intact(self):
+        task = self.task()
+        self.assertEqual(0, self.run_task(task, FakeMusic()))
+        before = self._snapshot(task)
+        music = FakeMusic()
+        self._run_refused(task, music)
+        self.assertEqual(before, self._snapshot(task), "receipt, final and every other file byte-identical")
+        self.assertEqual("succeeded", task.result()["status"])
+        self.assertEqual([], music.calls)
+
+    def test_second_run_after_failure_leaves_failed_receipt_intact(self):
+        task = self.task()
+        rc = self.run_task(task, FakeMusic(mode="empty"))
+        self.assertFailed(task, rc)
+        before = self._snapshot(task)
+        self._run_refused(task)
+        self.assertEqual(before, self._snapshot(task))
+        self.assertEqual("failed", task.result()["status"])
+
+    def test_receipt_written_by_someone_else_mid_run_is_not_overwritten_on_failure(self):
+        import receipt
+        task = self.task()
+        planted = receipt.failure_receipt(receipt.correlation_of(task.request), "planted", True)
+
+        class Plant(FakeMusic):
+            def get_music(inner, duration_s, mood, out_path):
+                receipt.write_receipt(task.result_path, planted)
+                raise RuntimeError("provider blew up")
+
+        self._run_refused(task, Plant())
+        self.assertEqual(planted, task.result())
+        self.assertFalse(task.final.exists())
+        self.assertEqual([], [n for n in task.run_dir_names() if n.endswith(".FAILED.json")], "no diagnostic beside it either")
+
+    def test_receipt_written_by_someone_else_mid_run_is_not_overwritten_on_success(self):
+        import receipt
+        task = self.task()
+        planted = receipt.success_receipt(receipt.correlation_of(task.request), task.request["outputs"])
+
+        class Plant(FakeMusic):
+            def get_music(inner, duration_s, mood, out_path):
+                receipt.write_receipt(task.result_path, planted)
+                return FakeMusic.get_music(inner, duration_s, mood, out_path)
+
+        self._run_refused(task, Plant())
+        self.assertEqual(planted, task.result())
+
+    def test_receipt_with_different_correlation_is_replaced_as_before(self):
+        import receipt
+        task = self.task()
+        stale = receipt.success_receipt({**receipt.correlation_of(task.request), "dispatch_id": "older-dispatch"}, ["/old/x.mp4"])
+        receipt.write_receipt(task.result_path, stale)
+        self.assertEqual(0, self.run_task(task, FakeMusic()))
+        self.assertEqual("dispatch-1", task.result()["dispatch_id"])
+        self.assertEqual(task.request["outputs"], task.result()["outputs"])
+
+    def test_non_terminal_or_garbage_result_json_is_replaced_as_before(self):
+        for content in ('{"status": "running"}', "not json at all", "[]", ""):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as d:
+                task = Task(Path(d))
+                task.result_path.write_text(content)
+                self.assertEqual(0, self.run_task(task, FakeMusic()))
+                self.assertEqual("succeeded", task.result()["status"])
+
+
 class ReceiptUnitTests(unittest.TestCase):
     def test_decide_retry_safe(self):
         import receipt
@@ -382,6 +488,28 @@ class ReceiptUnitTests(unittest.TestCase):
             receipt.write_receipt(p, {"a": 1})
             self.assertEqual({"a": 1}, json.loads(p.read_text()))
             self.assertEqual(["result.json"], sorted(x.name for x in Path(d).iterdir()))
+
+    def test_existing_terminal_status_needs_terminal_status_and_full_correlation(self):
+        import receipt
+        corr = {"schema": 1, "task_id": "t", "step_id": "s", "run_id": "r", "dispatch_id": "d",
+                "target": {"project_id": "p", "config_ref": "c"}}
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "result.json"
+            self.assertIsNone(receipt.existing_terminal_status(p, corr), "absent file")
+            receipt.write_receipt(p, receipt.success_receipt(corr, ["/x"]))
+            self.assertEqual("succeeded", receipt.existing_terminal_status(p, corr))
+            receipt.write_receipt(p, receipt.failure_receipt(corr, "e", True))
+            self.assertEqual("failed", receipt.existing_terminal_status(p, corr))
+            for key, other in (("dispatch_id", "d2"), ("run_id", "r2"), ("task_id", "t2"), ("step_id", "s2"), ("schema", 2),
+                               ("target", {"project_id": "p", "config_ref": "other"})):
+                receipt.write_receipt(p, receipt.failure_receipt({**corr, key: other}, "e", True))
+                self.assertIsNone(receipt.existing_terminal_status(p, corr), key)
+            partial = {k: v for k, v in receipt.failure_receipt(corr, "e", True).items() if k != "run_id"}
+            p.write_text(json.dumps(partial))
+            self.assertIsNone(receipt.existing_terminal_status(p, corr), "missing correlation key")
+            for content in ('{"status": "running", "task_id": "t"}', "garbage", "[]", ""):
+                p.write_text(content)
+                self.assertIsNone(receipt.existing_terminal_status(p, corr), content)
 
     def test_correlation_is_copied_exactly(self):
         import receipt
