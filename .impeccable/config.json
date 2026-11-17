@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "remotion-composer/src/GeminiNotebookNewsV3.tsx"
+        ],
+        "createdAt": "2026-11-10T10:02:26.734Z",
+        "reason": "YtNewsStyle01V3 canonical broadcast lower-third style inherited from YtNewsStyle01V3.reference.tsx"
+      }
+    ]
+  }
+}
