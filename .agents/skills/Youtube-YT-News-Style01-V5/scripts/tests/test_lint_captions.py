@@ -1,0 +1,686 @@
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+FIX = Path(__file__).resolve().parent / 'fixtures' / 'a67' / 'captions'
+
+
+def load():
+    spec = importlib.util.spec_from_file_location('lint_captions', SCRIPTS / 'lint_captions.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def codes(issues):
+    return [i['code'] for i in issues]
+
+
+class ScriptLintTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def lint(self, lines, source=None):
+        return self.m.lint_script(lines, source_text=source)
+
+    def test_flagged_midword_spaces(self):
+        for line in ['ได้ข้า มวันโดยไม่ต้อง', 'ตรวจสอบการเคลื่อนไห วของมันเอง', 'สร้างภา พสามมิติ', 'มากก ว่าเดิม']:
+            with self.subTest(line=line):
+                issues = self.lint([line])
+                self.assertEqual(codes(issues), ['midword-space'])
+                self.assertEqual(issues[0]['line'], 1)
+                self.assertIn(' ', issues[0]['context'])
+
+    def test_controls_not_flagged(self):
+        for line in ['ทำงาน ข้ามวัน ได้', 'ทำได้ ดี', 'โมเดล Gemini 4 ตัวใหม่', 'ราคา 20 บาท',
+                     'ใช้ Three.js สร้างภาพ', 'เวอร์ชัน 4 ตัวใหม่']:
+            with self.subTest(line=line):
+                self.assertEqual(self.lint([line]), [])
+
+    def test_line_numbers(self):
+        issues = self.lint(['สะอาดดี', 'ทำงาน ข้ามวัน', 'มากก ว่าเดิม'])
+        self.assertEqual([i['line'] for i in issues], [3])
+
+    def test_space_not_in_source(self):
+        # whitespace-legit per oracle ("ทำได้ ดี") but the source has none there
+        issues = self.lint(['ทำได้ ดี'], source='Part 1:\nทำได้ดี\n')
+        self.assertEqual(codes(issues), ['space-not-in-source'])
+        # same space exists in source -> clean
+        self.assertEqual(self.lint(['ทำได้ ดี'], source='ทำได้ ดี\n'), [])
+
+    def test_source_space_next_to_quote_counts_as_space(self):
+        self.assertEqual(self.lint(['ผู้ทดสอบ ได้รับ'], source='ผู้ทดสอบ \u201cได้รับ\u201d\n'), [])
+
+    def test_source_stream_mismatch_reported_not_skipped(self):
+        issues = self.lint(['ทำได้ ดี'], source='ทำได้ดีมาก\n')
+        self.assertIn('source-stream-mismatch', codes(issues))
+
+    def test_space_before_mai_yamok_is_legal(self):
+        for line in ['เริ่มจากไอเดียคร่าว ๆ แล้วระบบ', 'ค่อย ๆ ทำไปทีละขั้น', 'ทำแบบง่าย ๆ ก็พอ']:
+            with self.subTest(line=line):
+                self.assertEqual(self.lint([line]), [])
+
+    def test_space_after_mai_yamok_is_normal_boundary(self):
+        self.assertEqual(self.lint(['คร่าวๆ แล้วระบบ', 'คร่าว ๆ แล้วระบบ']), [])
+
+    def test_space_after_mai_yamok_before_any_word_is_boundary(self):
+        # real jobs: oracle has no boundary at ๆ|บ once the space is removed, but a space after ๆ is always a boundary
+        for line in ['กำลังมาแรงมาก ๆ บน GitHub', 'ดีสุด ๆ บนโลก', 'เริ่มจากไอเดียคร่าว ๆ บนระบบ']:
+            with self.subTest(line=line):
+                self.assertEqual(self.lint([line]), [])
+
+    def test_script_line_starting_with_mai_yamok_flagged(self):
+        issues = self.lint(['เริ่มจากไอเดียคร่าว', 'ๆ แล้วระบบ'])
+        self.assertEqual(codes(issues), ['midword-space'])
+        self.assertEqual(issues[0]['line'], 2)
+        self.assertIn('ๆ', issues[0]['detail'])
+        issues = self.lint(['  ๆ แล้วระบบ'])
+        self.assertEqual(codes(issues), ['midword-space'])
+
+    def test_real_split_still_flagged_with_mai_yamok_nearby(self):
+        for line in ['ตรวจสอบระ บบ', 'เริ่มจากไอเดียคร่าว ๆ ระ บบ']:
+            with self.subTest(line=line):
+                self.assertEqual(codes(self.lint([line])), ['midword-space'])
+
+    def test_space_before_other_thai_marks_not_exempt(self):
+        # only ๆ is exempt; ฯ keeps the old oracle verdict
+        self.assertEqual(codes(self.lint(['ท่านผู้ว่า ฯ ได้กล่าว'])), ['midword-space'])
+
+    def test_mai_yamok_space_must_still_match_source(self):
+        issues = self.lint(['คร่าว ๆ แล้ว'], source='คร่าวๆ แล้ว\n')
+        self.assertEqual(codes(issues), ['space-not-in-source'])
+        self.assertEqual(self.lint(['คร่าว ๆ แล้ว'], source='คร่าว ๆ แล้ว\n'), [])
+
+
+# (left, right): a Thai|Thai junction that is legal Thai spacing (rule 1/2: around ๆ; rule 4: two dictionary words)
+LEGAL = [('เริ่มจากไอเดียคร่าว ๆ', 'แล้วระบบ'), ('กำลังมาแรงมาก ๆ', 'บน GitHub'), ('ซึ่งบอกว่า', 'การขับรถ'),
+         ('ผู้ใช้คาดว่า', 'การสร้างไฟล์'), ('พร้อมแล้ว', 'ไปเริ่ม'), ('คนเรียกว่า', 'การสร้าง'), ('ทั้งวัน', 'ตัวนี้')]
+# real split: left is a word but the right token is not a dictionary word
+SPLIT = ('ตรวจสอบระ', 'บบ')
+# neither side qualifies: the token touching the junction is a single character / not in the dictionary
+NOT_WORDS = [('ได้ข้ามวันโดยไม่ต้อ', 'ง'), ('ทำงานอัตโนมั', 'ติ'), ('ตรวจสอบการเคลื่อนไห', 'วของมันเอง'), ('สร้างภา', 'พสามมิติ')]
+
+
+class JunctionRuleTests(unittest.TestCase):
+    """thai_junction_ok(): the ONE rule behind midword-space and midword-page-break."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    @staticmethod
+    def page(text, start=0.0, display=None, lead=None):
+        p = {'start': start, 'text': text, 'displayText': text.strip() if display is None else display}
+        if lead is not None:
+            p['leadingWhitespace'] = lead
+        return p
+
+    def test_legal_junction_as_script_line_space(self):
+        for left, right in LEGAL:
+            with self.subTest(left=left, right=right):
+                self.assertEqual(self.m.lint_script([f'{left} {right}'], f'{left} {right}\n'), [])
+
+    def test_legal_junction_inside_page_space(self):
+        for left, right in LEGAL:
+            with self.subTest(left=left, right=right):
+                self.assertEqual(self.m.lint_pages([self.page(f'{left} {right}')], f'{left} {right}\n'), [])
+
+    def test_legal_junction_as_page_break(self):
+        for left, right in LEGAL:
+            with self.subTest(left=left, right=right):
+                pages = [self.page(left), self.page(' ' + right, 2.0, display=right, lead=' ')]
+                self.assertEqual(self.m.lint_pages(pages, f'{left} {right}\n'), [])
+
+    def test_inside_page_line_break_between_words_is_legal(self):
+        self.assertEqual(self.m.lint_pages([self.page('พร้อมแล้ว\nไปเริ่ม')], 'พร้อมแล้ว ไปเริ่ม\n'), [])
+
+    def test_rule4_needs_a_source(self):
+        # without --source-script rule 4 is not available: stricter, not looser
+        self.assertEqual(codes(self.m.lint_script(['บอกว่า การขับรถ'])), ['midword-space'])
+        self.assertEqual(codes(self.m.lint_pages([self.page('บอกว่า การขับรถ')])), ['midword-page-break'])
+
+    def test_rule4_accepted_risk_typo_in_the_source_passes(self):
+        # ACCEPTED RISK: a typo IN THE SOURCE whose halves are both words ("แส ดง") passes; that is the script
+        # step's fault, the edit step cannot change the source.
+        self.assertEqual(self.m.lint_script(['การแส ดงผล'], 'การแส ดงผล\n'), [])
+        self.assertEqual(self.m.lint_pages([self.page('การแส ดงผล')], 'การแส ดงผล\n'), [])
+
+    def test_rule4_page_break_without_source_whitespace_fails(self):
+        # the engine breaks a page mid-word where the source has no space: only rules 1-3 apply
+        src = 'การแสดงผล\n'
+        for ws in ('', ' '):
+            with self.subTest(ws=ws):
+                pages = [self.page('การแส'), self.page(ws + 'ดงผล', 2.0, display='ดงผล', lead=ws)]
+                issues = self.m.lint_pages(pages, src)
+                self.assertEqual(codes(issues), ['midword-page-break'])
+                self.assertEqual(issues[0]['page'], 2)
+        self.assertEqual(codes(self.m.lint_pages([self.page('การแส ดงผล')], src)), ['midword-page-break'])
+
+    def test_rule4_page_break_at_source_space_passes_but_not_at_other_space(self):
+        src = 'ซึ่งบอกว่า การขับรถ\n'
+        pages = [self.page('ซึ่งบอกว่า'), self.page(' การขับรถ', 2.0, display='การขับรถ', lead=' ')]
+        self.assertEqual(self.m.lint_pages(pages, src), [])
+        self.assertEqual(self.m.lint_pages([self.page('ซึ่งบอกว่า การขับรถ')], src), [])
+        # same words, but the source has NO space there: rule 4 is not available
+        src2 = 'ซึ่งบอกว่าการขับรถ\n'
+        self.assertEqual(codes(self.m.lint_pages(pages, src2)), ['midword-page-break'])
+        self.assertEqual(codes(self.m.lint_script(['ซึ่งบอกว่า การขับรถ'], src2)),
+                         ['midword-space', 'space-not-in-source'])
+
+    def test_rule4_pages_must_match_the_source_stream(self):
+        # pages whose characters differ from the source cannot be mapped: rule 4 off
+        pages = [self.page('ซึ่งบอกว่า การขับรถ')]
+        self.assertEqual(codes(self.m.lint_pages(pages, 'อย่างอื่นเลย\n')), ['midword-page-break'])
+
+    def test_real_split_fails_as_space_and_as_break(self):
+        # with the space present in the source, rule 4 is a candidate, but "บบ" is not a dictionary word
+        left, right = SPLIT
+        for src in (None, f'{left} {right}\n'):
+            with self.subTest(source=src):
+                self.assertEqual(codes(self.m.lint_script([f'{left} {right}'], src))[:1], ['midword-space'])
+                self.assertEqual(codes(self.m.lint_pages([self.page(f'{left} {right}')], src)), ['midword-page-break'])
+                self.assertEqual(codes(self.m.lint_pages([self.page(f'{left}\n{right}')], src)), ['midword-page-break'])
+                for ws in ('', ' '):
+                    pages = [self.page(left), self.page(ws + right, 2.0, display=right, lead=ws)]
+                    issues = self.m.lint_pages(pages, src)
+                    self.assertEqual(codes(issues), ['midword-page-break'])
+                    self.assertEqual(issues[0]['page'], 2)
+
+    def test_single_char_or_non_dictionary_token_fails(self):
+        for left, right in NOT_WORDS:
+            for src in (None, f'{left} {right}\n'):
+                with self.subTest(left=left, right=right, source=src):
+                    self.assertEqual(codes(self.m.lint_script([f'{left} {right}'], src))[:1], ['midword-space'])
+                    self.assertEqual(codes(self.m.lint_pages([self.page(f'{left} {right}')], src)), ['midword-page-break'])
+
+    def test_one_side_being_a_word_is_not_enough(self):
+        # SPLIT covers "left is a word, right is not"; here the mirror: left token "มั" is not a word, right "ติดตั้ง" is
+        text = 'ตรวจสอบอัตโนมั ติดตั้ง'
+        for src in (None, text + '\n'):
+            with self.subTest(source=src):
+                self.assertEqual(codes(self.m.lint_script([text], src))[:1], ['midword-space'])
+                self.assertEqual(codes(self.m.lint_pages([self.page(text)], src)), ['midword-page-break'])
+
+    def test_extra_split_with_single_character_right_token_fails(self):
+        # new extra test: right token "ง" is a single character, so it fails even when the source has the space
+        text = 'ข้อมูลที่ถูกต้อ งการ'
+        for src in (None, text + '\n'):
+            with self.subTest(source=src):
+                self.assertEqual(codes(self.m.lint_script([text], src))[:1], ['midword-space'])
+
+    def test_function_contract(self):
+        f = self.m.thai_junction_ok
+        self.assertTrue(f('คร่าว', 'ๆ', 'space'))
+        self.assertFalse(f('คร่าว', 'ๆ', 'break'))
+        self.assertFalse(f('', 'ๆ แล้ว', 'break'))
+        self.assertTrue(f('มาก ๆ', 'บน', 'break'))
+        self.assertTrue(f('มาก ๆ', 'บน', 'space'))
+        self.assertFalse(f('บอกว่า', 'การขับรถ', 'space'))   # rule 4 needs src_ok
+        self.assertTrue(f('บอกว่า', 'การขับรถ', 'space', src_ok=True))
+        self.assertTrue(f('บอกว่า', 'การขับรถ', 'break', src_ok=True))
+        self.assertFalse(f('ตรวจสอบระ', 'บบ', 'space', src_ok=True))
+        self.assertFalse(f('ตรวจสอบระ', 'บบ', 'space'))
+        self.assertFalse(f('ตรวจสอบระ', 'บบ', 'break'))
+
+
+class PageLintTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def pages(self, name):
+        return self.m.load_pages(FIX / name)
+
+    def test_page_break_midword_flagged(self):
+        issues = self.m.lint_pages(self.pages('pages_midword.json'))
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+        self.assertAlmostEqual(issues[0]['t'], 103.34)
+
+    def test_clean_page_break_not_flagged(self):
+        self.assertEqual(self.m.lint_pages(self.pages('pages_clean.json')), [])
+
+    def test_script_line_break_between_pages_not_flagged(self):
+        # fix5: a page junction across a script line break is judged like any other, and rule 4 needs the source
+        # (finalize always passes --source-script). The source is the exact script the fixture's pages came from.
+        pages = self.pages('pages_newline.json')
+        self.assertEqual(self.m.lint_pages(pages, ''.join(p['text'] for p in pages)), [])
+
+    def test_script_line_break_between_pages_without_a_source_is_judged(self):
+        # same pages, no source: rule 4 is off, ICU/newmm see no boundary at ได้|การ -> one midword-page-break at page 2
+        issues = self.m.lint_pages(self.pages('pages_newline.json'))
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+    def test_whitespace_between_pages_still_tested(self):
+        issues = self.m.lint_pages(self.pages('pages_midword_spaced.json'))
+        self.assertEqual(codes(issues), ['midword-page-break'])
+
+    def test_display_text_inner_break_flagged(self):
+        issues = self.m.lint_pages(self.pages('pages_display_break.json'))
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertIn('displayText', issues[0]['detail'])
+
+    @staticmethod
+    def page(text, start=0.0, display=None, lead=None):
+        p = {'start': start, 'text': text, 'displayText': text.strip() if display is None else display}
+        if lead is not None:
+            p['leadingWhitespace'] = lead
+        return p
+
+    def test_space_before_mai_yamok_inside_page_legal(self):
+        for body in ['เริ่มจากไอเดียคร่าว ๆ', 'คร่าว ๆ', 'เริ่มจากไอเดียคร่าว ๆ แล้วระบบ']:
+            with self.subTest(body=body):
+                self.assertEqual(self.m.lint_pages([self.page(body)]), [])
+
+    def test_page_starting_with_mai_yamok_flagged(self):
+        for first, lead, second in [('เริ่มจากไอเดียคร่าว', ' ', ' ๆ แล้ว'), ('เริ่มจากไอเดียคร่าว', '', 'ๆ แล้ว'),
+                                    ('เริ่มจากไอเดียคร่าว\n', '', 'ๆ แล้ว')]:
+            with self.subTest(first=first, lead=lead, second=second):
+                pages = [self.page(first), self.page(second, 2.0, display=second.strip(),
+                                                      lead=(second[:len(second) - len(second.lstrip())]))]
+                issues = self.m.lint_pages(pages)
+                self.assertEqual(codes(issues), ['midword-page-break'])
+                self.assertEqual(issues[0]['page'], 2)
+                self.assertIn('ๆ', issues[0]['detail'])
+
+    def test_first_page_starting_with_mai_yamok_flagged(self):
+        issues = self.m.lint_pages([self.page('ๆ แล้ว')])
+        self.assertEqual(codes(issues), ['midword-page-break'])
+
+    def test_display_line_starting_with_mai_yamok_flagged(self):
+        issues = self.m.lint_pages([self.page('เริ่มจากไอเดียคร่าว\nๆ แล้ว')])
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertIn('ๆ', issues[0]['detail'])
+        issues = self.m.lint_pages([self.page('เริ่มจากไอเดียคร่าว \n ๆ แล้ว')])
+        self.assertEqual(codes(issues), ['midword-page-break'])
+
+    def test_space_after_mai_yamok_page_break_ok(self):
+        pages = [self.page('เริ่มจากไอเดียคร่าว ๆ'), self.page(' แล้วระบบ', 2.0, display='แล้วระบบ', lead=' ')]
+        self.assertEqual(self.m.lint_pages(pages), [])
+
+    def test_space_before_other_thai_marks_not_exempt_in_page(self):
+        self.assertEqual(codes(self.m.lint_pages([self.page('ท่านผู้ว่า ฯ ได้กล่าว')])), ['midword-page-break'])
+
+    def test_space_after_mai_yamok_before_any_word_is_boundary_in_page(self):
+        self.assertEqual(self.m.lint_pages([self.page('กำลังมาแรงมาก ๆ บน GitHub')]), [])
+
+    def test_page_break_across_space_after_mai_yamok_is_boundary(self):
+        pages = [self.page('กำลังมาแรงมาก ๆ'), self.page(' บน GitHub', 2.0, display='บน GitHub', lead=' ')]
+        self.assertEqual(self.m.lint_pages(pages), [])
+
+    def test_real_page_split_still_flagged(self):
+        pages = [self.page('ทำงานของระ'), self.page('บบอัตโนมัติ', 2.0)]
+        issues = self.m.lint_pages(pages)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+        self.assertEqual(codes(self.m.lint_pages([self.page('ทำงานของระ บบอัตโนมัติ')])), ['midword-page-break'])
+
+    def test_load_pages_accepts_dict_and_list(self):
+        self.assertEqual(len(self.pages('pages_midword.json')), 3)
+        self.assertEqual(len(self.pages('pages_clean.json')), 4)
+
+    def test_load_pages_rejects_bad_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'x.json'
+            p.write_text('{"nope": 1}')
+            with self.assertRaises(self.m.BadInput):
+                self.m.load_pages(p)
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        (self.d / 'bad.txt').write_text('ได้ข้า มวันโดยไม่ต้อง\nทำงาน ข้ามวัน ได้\n', encoding='utf-8')
+        (self.d / 'good.txt').write_text('ได้ข้ามวันโดยไม่ต้อง\nทำงาน ข้ามวัน ได้\n', encoding='utf-8')
+
+    def run_cli(self, *args, env=None):
+        e = dict(os.environ)
+        e.pop('LINT_CAPTIONS_SIMULATE_MISSING', None)
+        e.update(env or {})
+        return subprocess.run([sys.executable, str(SCRIPTS / 'lint_captions.py'), *args],
+                              capture_output=True, text=True, env=e)
+
+    def test_exit1_and_report_schema(self):
+        rep = self.d / 'r.json'
+        r = self.run_cli('--script', str(self.d / 'bad.txt'), '--pages', str(FIX / 'pages_clean.json'),
+                         '--report', str(rep))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        report = json.loads(rep.read_text(encoding='utf-8'))
+        self.assertEqual(json.loads(r.stdout), report)
+        self.assertEqual(report['schema'], 'yt-news-v4-captions-lint')
+        self.assertEqual(report['version'], 1)
+        self.assertFalse(report['pass'])
+        self.assertEqual(report['counts']['midword-space'], 1)
+        self.assertEqual(len(report['issues']), 1)
+        self.assertEqual(len(report['inputs']), 2)
+        for sha in report['inputs'].values():
+            self.assertRegex(sha, r'^[0-9a-f]{64}$')
+        self.assertIn('icu', report['tools'])
+        self.assertIn('pythainlp', report['tools'])
+
+    def test_exit0_pass(self):
+        rep = self.d / 'r.json'
+        r = self.run_cli('--script', str(self.d / 'good.txt'), '--pages', str(FIX / 'pages_clean.json'),
+                         '--report', str(rep))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(json.loads(rep.read_text())['pass'])
+
+    def test_source_script_enables_rule4_end_to_end(self):
+        (self.d / 'phrase.txt').write_text('ซึ่งบอกว่า การขับรถ\n', encoding='utf-8')
+        (self.d / 'pages.json').write_text(json.dumps({'pages': [
+            {'start': 0.0, 'text': 'ซึ่งบอกว่า', 'displayText': 'ซึ่งบอกว่า', 'leadingWhitespace': ''},
+            {'start': 1.0, 'text': ' การขับรถ', 'displayText': 'การขับรถ', 'leadingWhitespace': ' '}]}, ensure_ascii=False),
+            encoding='utf-8')
+        base = ['--script', str(self.d / 'phrase.txt'), '--pages', str(self.d / 'pages.json'), '--report', str(self.d / 'r.json')]
+        r = self.run_cli(*base, '--source-script', str(self.d / 'phrase.txt'))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.run_cli(*base).returncode, 1)
+
+    def test_exit2_missing_input(self):
+        r = self.run_cli('--script', str(self.d / 'nope.txt'), '--pages', str(FIX / 'pages_clean.json'),
+                         '--report', str(self.d / 'r.json'))
+        self.assertEqual(r.returncode, 2)
+
+    def test_exit2_bad_pages_json(self):
+        (self.d / 'p.json').write_text('{not json')
+        r = self.run_cli('--script', str(self.d / 'good.txt'), '--pages', str(self.d / 'p.json'),
+                         '--report', str(self.d / 'r.json'))
+        self.assertEqual(r.returncode, 2)
+
+    def test_exit4_pythainlp_missing(self):
+        r = self.run_cli('--script', str(self.d / 'good.txt'), '--pages', str(FIX / 'pages_clean.json'),
+                         '--report', str(self.d / 'r.json'), env={'LINT_CAPTIONS_SIMULATE_MISSING': 'pythainlp'})
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('pythainlp', r.stderr)
+
+    def test_exit4_node_missing(self):
+        r = self.run_cli('--script', str(self.d / 'good.txt'), '--pages', str(FIX / 'pages_clean.json'),
+                         '--report', str(self.d / 'r.json'), env={'LINT_CAPTIONS_SIMULATE_MISSING': 'node'})
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('node', r.stderr)
+
+    def test_check_tools_raises(self):
+        m = load()
+        os.environ['LINT_CAPTIONS_SIMULATE_MISSING'] = 'node'
+        try:
+            with self.assertRaises(m.ToolMissing):
+                m.check_tools()
+        finally:
+            del os.environ['LINT_CAPTIONS_SIMULATE_MISSING']
+
+
+def _page(text, start=0.0, display=None, lead=None):
+    p = {'start': start, 'text': text, 'displayText': text.strip() if display is None else display}
+    if lead is not None:
+        p['leadingWhitespace'] = lead
+    return p
+
+
+class LineBreakJunctionTests(unittest.TestCase):
+    """CF-A67 fix5: a junction across a script line break is judged like any other (no more `\\n` skip)."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_script_lines_split_inside_a_word_flagged(self):
+        src = 'ระบบนี้ช่วยให้การแสดงผลบนหน้าจอ\n'
+        issues = self.m.lint_script(['ระบบนี้ช่วยให้การแส', 'ดงผลบนหน้าจอ'], src)
+        self.assertEqual(codes(issues), ['midword-space'])
+        self.assertEqual(issues[0]['line'], 2)
+        self.assertIn('⏎', issues[0]['context'])
+
+    def test_pages_split_across_a_line_break_inside_a_word_flagged(self):
+        src = 'ระบบนี้ช่วยให้การแสดงผลบนหน้าจอ\n'
+        pages = [_page('ระบบนี้ช่วยให้การแส'), _page('\nดงผลบนหน้าจอ', 2.0, display='ดงผลบนหน้าจอ', lead='\n')]
+        issues = self.m.lint_pages(pages, src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+    def test_legal_line_breaks_not_flagged(self):
+        # a real word boundary: no source needed
+        self.assertEqual(self.m.lint_script(['ผู้ใช้ทดสอบระบบ', 'โปรแกรมที่มันสร้างขึ้น']), [])
+        # two dictionary words with the line break in the source: rule 4
+        src = 'ซึ่งบอกว่า\nการขับรถ\n'
+        self.assertEqual(self.m.lint_script(['ซึ่งบอกว่า', 'การขับรถ'], src), [])
+        pages = [_page('ซึ่งบอกว่า'), _page('\nการขับรถ', 2.0, display='การขับรถ', lead='\n')]
+        self.assertEqual(self.m.lint_pages(pages, src), [])
+        # ... but not when the source has no whitespace there
+        src2 = 'ซึ่งบอกว่าการขับรถ\n'
+        self.assertEqual(codes(self.m.lint_script(['ซึ่งบอกว่า', 'การขับรถ'], src2))[:1], ['midword-space'])
+        self.assertEqual(codes(self.m.lint_pages(pages, src2)), ['midword-page-break'])
+
+    def test_line_break_judged_on_the_full_lines_like_lint_script(self):
+        # Short pages on both sides of the line break: judged alone, "แส|ดงผ" has a boundary for ICU/newmm
+        # (the short context fools the oracle), judged on the FULL lines ("ระบบนี้ช่วยให้การแส|ดงผลบน...", what
+        # lint_script and the cue merge in srt_to_script use) it is a word cut in two.
+        line1, line2 = 'ระบบนี้ช่วยให้การแส', 'ดงผลบนหน้าจอลื่นไหลขึ้นมาก'
+        src = line1 + line2 + '\n'
+        short = self.m.break_probe('แส', 'ดงผ')
+        joined = short[0] + short[1]
+        self.assertIn(len(short[0]), self.m.boundary_sets([joined])[joined])   # precondition: short context passes
+        pages = [_page('ระบบนี้ช่วยให้การ'), _page('แส'), _page('\nดงผ', 2.0, display='ดงผ', lead='\n'),
+                 _page('ลบนหน้าจอลื่นไหลขึ้นมาก', 3.0)]
+        by_pages = [i for i in self.m.lint_pages(pages, src) if i['page'] == 3]
+        by_lines = self.m.lint_script([line1, line2], src)
+        self.assertEqual(codes(by_pages), ['midword-page-break'])
+        self.assertEqual(codes(by_lines), ['midword-space'])
+
+
+class CfCharacterTests(unittest.TestCase):
+    """CF-A67 fix5: zero-width Cf characters are whitespace where a junction is FOUND."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_cf_before_mai_yamok_at_a_page_start_flagged(self):
+        for cf in ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'):
+            with self.subTest(cf=hex(ord(cf))):
+                issues = self.m.lint_pages([_page(cf + 'ๆ แล้ว')])
+                self.assertEqual(codes(issues), ['midword-page-break'])
+                self.assertIn('ๆ', issues[0]['detail'])
+
+    def test_cf_before_mai_yamok_at_a_script_line_start_flagged(self):
+        for cf in ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'):
+            with self.subTest(cf=hex(ord(cf))):
+                self.assertEqual(codes(self.m.lint_script([cf + 'ๆ แล้ว'])), ['midword-space'])
+
+    def test_cf_between_two_halves_of_a_split_word_is_judged(self):
+        for cf in ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'):
+            with self.subTest(cf=hex(ord(cf))):
+                self.assertEqual(codes(self.m.lint_script(['ตรวจสอบระ' + cf + 'บบ'])), ['midword-space'])
+                self.assertEqual(codes(self.m.lint_pages([_page('ตรวจสอบระ' + cf + 'บบ')])), ['midword-page-break'])
+
+    def test_cf_inside_a_word_that_is_a_boundary_is_not_flagged(self):
+        self.assertEqual(self.m.lint_script(['ผู้ใช้\u200bทดสอบ']), [])
+
+
+class CfRunSourceTests(unittest.TestCase):
+    """CF-A67 fix6 Fix 1: a whitespace run is judged against the source by the whole kept-offset range it covers."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    CF = '\u200b'
+
+    def test_existing_positive_cf_case_also_with_the_source(self):
+        text = 'ผู้ใช้' + self.CF + 'ทดสอบ'
+        self.assertEqual(self.m.lint_script([text]), [])
+        self.assertEqual(self.m.lint_script([text], text + '\n'), [])          # the Cf is in the source: no space-not-in-source
+        self.assertEqual(self.m.lint_pages([_page(text)], text + '\n'), [])
+
+    def test_cf_after_mai_yamok_already_in_the_source_passes(self):
+        text = 'เริ่มจากไอเดียคร่าวๆ' + self.CF + 'แล้วระบบ'
+        self.assertEqual(self.m.lint_script([text], text + '\n'), [])
+        self.assertEqual(self.m.lint_pages([_page(text)], text + '\n'), [])
+
+    def test_mixed_runs_in_both_orders_give_the_same_verdict(self):
+        cf = self.CF
+        for run in (' ' + cf, cf + ' '):
+            text = 'ซึ่งบอกว่า' + run + 'การขับรถ'
+            with self.subTest(run=repr(run)):
+                self.assertEqual(self.m.lint_script([text], text + '\n'), [])
+                self.assertEqual(self.m.lint_pages([_page(text)], text + '\n'), [])
+        # source with the space on the other side of the Cf: the same verdict for the other order
+        text = 'ซึ่งบอกว่า ' + cf + 'การขับรถ'
+        src = 'ซึ่งบอกว่า' + cf + ' การขับรถ\n'
+        self.assertEqual(self.m.lint_script([text], src), [])
+        self.assertEqual(self.m.lint_pages([_page(text)], src), [])
+
+    def test_cf_only_gap_never_gets_rule_4_even_when_the_source_has_a_space_there(self):
+        text = 'ซึ่งบอกว่า' + self.CF + 'การขับรถ'
+        src = 'ซึ่งบอกว่า' + self.CF + ' การขับรถ\n'
+        issues = self.m.lint_script([text], src)
+        self.assertEqual(codes(issues), ['midword-space'])
+        self.assertEqual(codes(self.m.lint_pages([_page(text)], src)), ['midword-page-break'])
+        # a real space at the same place IS accepted by rule 4
+        self.assertEqual(self.m.lint_script(['ซึ่งบอกว่า การขับรถ'], 'ซึ่งบอกว่า การขับรถ\n'), [])
+
+    def test_real_space_not_in_the_source_still_fires(self):
+        issues = self.m.lint_script(['ผู้ใช้ ทดสอบ'], 'ผู้ใช้ทดสอบ\n')
+        self.assertEqual(codes(issues), ['space-not-in-source'])
+        issues = self.m.lint_script(['ผู้ใช้ ' + self.CF + 'ทดสอบ'], 'ผู้ใช้' + self.CF + 'ทดสอบ\n')
+        self.assertEqual(codes(issues), ['space-not-in-source'])
+
+    def test_line_break_with_cf_judged_by_the_range(self):
+        cf = self.CF
+        # Cf at the end of line 1 / start of line 2, source has the line break: the break is the separator -> rule 4
+        lines = ['ซึ่งบอกว่า' + cf, 'การขับรถ']
+        self.assertEqual(self.m.lint_script(lines, 'ซึ่งบอกว่า' + cf + '\nการขับรถ\n'), [])
+        lines = ['ซึ่งบอกว่า', cf + 'การขับรถ']
+        self.assertEqual(self.m.lint_script(lines, 'ซึ่งบอกว่า\n' + cf + 'การขับรถ\n'), [])
+
+    def test_line_break_without_a_source_break_is_not_rule_4(self):
+        cf = self.CF
+        lines = ['ซึ่งบอกว่า', cf + 'การขับรถ']
+        self.assertEqual(codes(self.m.lint_script(lines, 'ซึ่งบอกว่า' + cf + 'การขับรถ\n')), ['midword-space'])
+
+
+class PageTwoRule4Tests(unittest.TestCase):
+    """CF-A67 fix5: rule 4 maps a junction inside a LATER page onto the source with the page's base offset."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    PAGE1 = 'ทีมงานตรวจสอบ'          # 13 kept characters
+    PAGE2 = 'พร้อมแล้ว ไปเริ่ม'      # junction after 9 kept characters of page 2
+
+    def pages(self):
+        return [_page(self.PAGE1), _page(self.PAGE2, 2.0)]
+
+    def test_oracles_have_no_boundary_at_the_junction(self):
+        # precondition of this class: only rule 4 can accept this junction
+        probe = self.m.break_probe('พร้อมแล้ว', 'ไปเริ่ม')
+        joined = probe[0] + probe[1]
+        self.assertNotIn(len(probe[0]), self.m.boundary_sets([joined])[joined])
+
+    def test_source_space_at_the_junction_passes(self):
+        n = len('ทีมงานตรวจสอบ')
+        self.assertEqual(n, 13)
+        src = self.PAGE1 + 'พร้อมแล้ว ไปเริ่ม' + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages(), src), [])
+
+    def test_source_space_at_the_offset_inside_page_2_only_fails(self):
+        # the only source space sits at global offset 9 (after 'ทีมงานตรว') = the junction's offset INSIDE page 2 ('พร้อมแล้ว' = 9 kept characters), but the junction
+        # really is at offset 13 + 9 = 22: it must NOT be mistaken for it
+        src = 'ทีมงานตรว จสอบพร้อมแล้วไปเริ่ม\n'
+        issues = self.m.lint_pages(self.pages(), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+
+class PageLeadCfOffsetTests(unittest.TestCase):
+    """CF-A67 fix6 (lead review): base[i] counts the page `text` INCLUDING its lead, body (displayText) does not.
+    caption_join.mjs uses /\\s/u, which matches U+FEFF, so a leadingWhitespace can hold a Cf that is a KEPT character."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    FEFF = '\ufeff'
+    PAGE1 = 'ทีมงานตรวจสอบ'          # 13 kept characters
+    BODY2 = 'พร้อมแล้ว ไปเริ่ม'      # junction after 9 kept characters of the body; no ICU/newmm boundary there
+
+    def pages(self, display=None):
+        return [_page(self.PAGE1),
+                _page(self.FEFF + self.BODY2, 2.0, display=self.BODY2 if display is None else display, lead=self.FEFF)]
+
+    def test_source_space_at_the_junction_passes_with_a_cf_lead(self):
+        # the kept stream is 13 + FEFF + 9 characters: the source space sits at kept offset 23, k_after must be 13 + 1 + 9
+        src = self.PAGE1 + self.FEFF + self.BODY2 + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages(), src), [])
+
+    def test_source_space_at_the_offset_without_the_lead_count_fails(self):
+        # the only source space is at kept offset 22 (= 13 + 9, the offset the old code computed): not the junction
+        src = self.PAGE1 + self.FEFF + 'พร้อมแล้' + ' ว' + 'ไปเริ่ม' + '\n'
+        issues = self.m.lint_pages(self.pages(), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+    def test_display_text_that_disagrees_with_text_fails_closed(self):
+        # displayText and text differ in kept characters: no kept offset of the body is known, rule 4 stays off
+        src = self.PAGE1 + self.FEFF + self.BODY2 + '\n'
+        issues = self.m.lint_pages(self.pages(display='พร้อมแล้ว ไปเริ่มx'), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+
+    def test_a_page_without_a_cf_lead_is_unchanged(self):
+        src = self.PAGE1 + self.BODY2 + '\n'
+        self.assertEqual(self.m.lint_pages([_page(self.PAGE1), _page(self.BODY2, 2.0)], src), [])
+
+
+class PageJunctionBodyLeadTests(unittest.TestCase):
+    """CF-A67 fix7: the run that faces a page junction = trailing ws/Cf of the previous text + the page lead + the leading
+    ws/Cf of the body (a U+200B stays in displayText), and k_after is the kept offset of the first real character."""
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    CF = '\u200b'
+    FEFF = '\ufeff'
+    TAIL = 'ซึ่งบอกว่า'
+    HEAD = 'การขับรถด้วยตัวเอง'
+
+    def pages_body_cf(self, display=None):
+        # caption_join: page 2 starts at the line break; the U+200B stays in displayText
+        body = self.CF + ' ' + self.HEAD
+        return [_page(self.TAIL), _page('\n' + body, 2.0, display=body if display is None else display, lead='\n')]
+
+    def test_body_starting_with_a_cf_and_a_source_space_passes_by_rule_4(self):
+        src = self.TAIL + self.CF + ' ' + self.HEAD + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages_body_cf(), src), [])
+
+    def test_source_space_before_the_cf_at_the_body_start_passes_by_rule_4(self):
+        # the source space sits BEFORE the Cf: the judged range must start at the Cf (the body-lead Cf is part of the run)
+        src = self.TAIL + ' ' + self.CF + self.HEAD + '\n'
+        pages = [_page(self.TAIL), _page('\n' + self.CF + self.HEAD, 2.0, display=self.CF + self.HEAD, lead='\n')]
+        self.assertEqual(self.m.lint_pages(pages, src), [])
+
+    def test_body_starting_with_a_cf_and_no_source_space_fails(self):
+        src = self.TAIL + self.CF + self.HEAD + '\n'
+        pages = [_page(self.TAIL), _page('\n' + self.CF + self.HEAD, 2.0, display=self.CF + self.HEAD, lead='\n')]
+        self.assertEqual(codes(self.m.lint_pages(pages, src)), ['midword-page-break'])
+
+    def test_a_cf_in_the_lead_and_the_source_space_passes_and_without_the_space_fails(self):
+        pages = [_page(self.TAIL), _page(self.FEFF + ' ' + self.HEAD, 2.0, display=self.HEAD, lead=self.FEFF + ' ')]
+        self.assertEqual(self.m.lint_pages(pages, self.TAIL + self.FEFF + ' ' + self.HEAD + '\n'), [])
+        src_no_space = self.TAIL + self.FEFF + self.HEAD + '\n'
+        pages2 = [_page(self.TAIL), _page(self.FEFF + self.HEAD, 2.0, display=self.HEAD, lead=self.FEFF)]
+        self.assertEqual(codes(self.m.lint_pages(pages2, src_no_space)), ['midword-page-break'])
+
+    def test_display_text_that_disagrees_with_text_gets_rule_4_off_at_the_page_junction(self):
+        src = self.TAIL + self.CF + ' ' + self.HEAD + '\n'
+        self.assertEqual(self.m.lint_pages(self.pages_body_cf(), src), [])        # the same pages, agreeing: rule 4
+        issues = self.m.lint_pages(self.pages_body_cf(display=self.CF + ' ' + self.HEAD + 'ย'), src)
+        self.assertEqual(codes(issues), ['midword-page-break'])
+        self.assertEqual(issues[0]['page'], 2)
+
+
+if __name__ == '__main__':
+    unittest.main()

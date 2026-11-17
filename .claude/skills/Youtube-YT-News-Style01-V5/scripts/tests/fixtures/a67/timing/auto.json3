@@ -1,0 +1,8 @@
+{"wireMagic":"pb3","pens":[{}],"events":[
+ {"tStartMs":0,"dDurationMs":6000,"id":1,"wpWinPosId":1,"wsWinStyleId":1},
+ {"tStartMs":160,"dDurationMs":2070,"wWinId":1,"segs":[{"utf8":"now","acAsrConf":0},{"utf8":" Marlin","tOffsetMs":480},{"utf8":" 3","tOffsetMs":800},{"utf8":" Quartz","tOffsetMs":1120}]},
+ {"tStartMs":2230,"dDurationMs":10,"wWinId":1,"aAppend":1,"segs":[{"utf8":"\n"}]},
+ {"tStartMs":2240,"dDurationMs":1910,"wWinId":1,"segs":[{"utf8":"now Marlin 3 Quartz"},{"utf8":" has arrived today","tOffsetMs":400}]},
+ {"tStartMs":4150,"dDurationMs":1850,"wWinId":1,"segs":[{"utf8":"now Marlin 3 Quartz has arrived today"}]},
+ {"tStartMs":4160,"dDurationMs":1840,"wWinId":1,"segs":[{"utf8":"tools from Acme"}]}
+]}

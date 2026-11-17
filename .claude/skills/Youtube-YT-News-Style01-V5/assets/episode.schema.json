@@ -1,0 +1,87 @@
+{
+  "$id": "yt-news-v4-episode/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema","assetDir","avatarFile","avatarFaceBox","fps","voEndSec","totalDurationSec","ctaT","captionsInputSha256","brand","dateLabel","breakingLabel","officialTag","page","cta","endcard","brollDur","beats"],
+  "properties": {
+    "schema": {"type":"string","enum":["yt-news-v4-episode/1"]},
+    "assetDir": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "avatarFile": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\.mp4$"},
+    "avatarFaceBox": {"$ref":"#/$defs/normRect"},
+    "fps": {"type":"integer","enum":[25]},
+    "voEndSec": {"type":"number","minimum":10,"maximum":3600},
+    "totalDurationSec": {"type":"number","minimum":13,"maximum":3605},
+    "ctaT": {"$ref":"#/$defs/time"},
+    "captionsInputSha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "brand": {"$ref":"#/$defs/text"},
+    "dateLabel": {"$ref":"#/$defs/text"},
+    "breakingLabel": {"$ref":"#/$defs/text"},
+    "officialTag": {"$ref":"#/$defs/text"},
+    "page": {"type":"object","additionalProperties":false,"required":["domain","path"],"properties":{
+      "domain":{"type":"string","pattern":"^[a-z0-9.-]+\\.[a-z]{2,}$"},
+      "path":{"type":"string","pattern":"^/[^\\s]{0,80}$"}}},
+    "cta": {"$ref":"#/$defs/text"},
+    "endcard": {"type":"object","additionalProperties":false,"required":["eyebrow","titleA","titleB","cta"],"properties":{
+      "eyebrow":{"$ref":"#/$defs/text"},"titleA":{"$ref":"#/$defs/text"},"titleB":{"$ref":"#/$defs/text"},"cta":{"$ref":"#/$defs/text"}}},
+    "brollDur": {"type":"object","propertyNames":{"pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"},"additionalProperties":{"type":"number","minimum":0.5,"maximum":600}},
+    "beats": {"type":"array","minItems":2,"maxItems":400,"items":{"$ref":"#/$defs/beat"}}
+  },
+  "$defs": {
+    "text": {"type":"string","minLength":1,"pattern":"^\\S(?:[^\\n\\r\\t]*\\S)?$"},
+    "time": {"type":"number","minimum":0,"maximum":3600},
+    "unit": {"type":"number","minimum":0,"maximum":1},
+    "normRect": {"type":"object","additionalProperties":false,"required":["x","y","w","h"],"properties":{
+      "x":{"$ref":"#/$defs/unit"},"y":{"$ref":"#/$defs/unit"},"w":{"$ref":"#/$defs/unit"},"h":{"$ref":"#/$defs/unit"}}},
+    "srcCrop": {"type":"object","additionalProperties":false,"required":["x","y","w","h"],"properties":{
+      "x":{"type":"integer","minimum":0,"maximum":1280},"y":{"type":"integer","minimum":0,"maximum":720},
+      "w":{"type":"integer","minimum":640,"maximum":1920},"h":{"type":"integer","minimum":360,"maximum":1080}}},
+    "lines": {"type":"array","minItems":1,"maxItems":3,"items":{"$ref":"#/$defs/text"}},
+    "stat": {"type":"object","additionalProperties":false,"required":["at","dur","label"],"properties":{
+      "at":{"$ref":"#/$defs/time"},"dur":{"type":"number","minimum":1,"maximum":12},
+      "big":{"$ref":"#/$defs/text"},"label":{"$ref":"#/$defs/text"},"tone":{"type":"string","enum":["amber","mint","clay"]}}},
+    "punch": {"type":"object","additionalProperties":false,"required":["at","z"],"properties":{
+      "at":{"$ref":"#/$defs/time"},"z":{"type":"number","minimum":1,"maximum":1.6},"fx":{"$ref":"#/$defs/unit"},"fy":{"$ref":"#/$defs/unit"}}},
+    "card": {"type":"object","additionalProperties":false,"required":["at","lines"],"properties":{"at":{"$ref":"#/$defs/time"},"lines":{"$ref":"#/$defs/lines"}}},
+    "item": {"type":"object","additionalProperties":false,"required":["at","text"],"properties":{
+      "at":{"$ref":"#/$defs/time"},"text":{"$ref":"#/$defs/text"},
+      "icon":{"type":"string","enum":["✍️","📊","💻","💡","📄","📝","🧾","🗣️","🔎","🤖","🌅","⚠️","🧪","⏱️","🗒️","▶️","🌍","🔓","🛡️","🧬","🎭","🚫","🧠","🚀","💸","✨"]}}},
+    "vsSide": {"type":"object","additionalProperties":false,"required":["title","badge","lines"],"properties":{
+      "title":{"$ref":"#/$defs/text"},"badge":{"$ref":"#/$defs/text"},"lines":{"$ref":"#/$defs/lines"}}},
+    "vs": {"type":"object","additionalProperties":false,"required":["left","right","conclusion"],"properties":{
+      "left":{"$ref":"#/$defs/vsSide"},"right":{"$ref":"#/$defs/vsSide"},"conclusion":{"$ref":"#/$defs/text"}}},
+    "lower": {"type":"object","additionalProperties":false,"required":["at","dur","title","sub"],"properties":{
+      "at":{"$ref":"#/$defs/time"},"dur":{"type":"number","minimum":2,"maximum":8},"title":{"$ref":"#/$defs/text"},"sub":{"$ref":"#/$defs/text"}}},
+    "beat": {"type":"object","additionalProperties":false,"required":["t","mode"],"properties":{
+      "t":{"$ref":"#/$defs/time"},
+      "mode":{"type":"string","enum":["full","pip"]},
+      "media":{"type":"string","enum":["broll","clip","typo"]},
+      "layout":{"type":"string","enum":["stage","wide"]},
+      "src":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"},
+      "from":{"type":"number","minimum":0,"maximum":600},
+      "origin":{"type":"string","enum":["source","stock","ai"]},
+      "srcCrop":{"$ref":"#/$defs/srcCrop"},
+      "kicker":{"$ref":"#/$defs/text"},
+      "headline":{"$ref":"#/$defs/text"},
+      "sub":{"$ref":"#/$defs/text"},
+      "stats":{"type":"array","minItems":1,"maxItems":3,"items":{"$ref":"#/$defs/stat"}},
+      "punch":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/$defs/punch"}},
+      "typo":{"type":"string","enum":["card","summary3","final4","vs"]},
+      "cards":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/$defs/card"}},
+      "items":{"type":"array","minItems":3,"maxItems":4,"items":{"$ref":"#/$defs/item"}},
+      "vs":{"$ref":"#/$defs/vs"},
+      "lower":{"$ref":"#/$defs/lower"}}},
+    "word": {"type":"object","additionalProperties":false,"required":["w","s","e"],"properties":{"w":{"type":"string"},"s":{"type":"number"},"e":{"type":"number"}}},
+    "chunk": {"type":"object","additionalProperties":false,"required":["text","displaySpaceBefore","displayStart","displayEnd"],"properties":{
+      "text":{"type":"string","minLength":1},"displaySpaceBefore":{"type":"string"},"displayStart":{"type":"number","minimum":0},"displayEnd":{"type":"number","minimum":0},
+      "spaceBefore":{"type":"string"},"tokens":{"type":"array","items":{"$ref":"#/$defs/word"}},"sourceTokens":{"type":"array","items":{"$ref":"#/$defs/word"}},
+      "merged_from":{"type":"array","items":{"type":"integer","minimum":0}},"scriptStart":{"type":"integer","minimum":0},"scriptEnd":{"type":"integer","minimum":0},"displayBoundReason":{"type":"string"}}},
+    "page": {"type":"object","additionalProperties":false,"required":["start","end","displayText","chunks"],"properties":{
+      "start":{"type":"number","minimum":0},"end":{"type":"number","minimum":0},"displayText":{"type":"string","minLength":1},
+      "chunks":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/chunk"}},
+      "text":{"type":"string"},"leadingWhitespace":{"type":"string"},"boundReason":{"type":"string"},"words":{"type":"array","items":{"$ref":"#/$defs/word"}}}},
+    "captions": {"type":"object","additionalProperties":false,"required":["schema","algorithm","inputSha256","pages"],"properties":{
+      "schema":{"type":"integer","enum":[1]},"algorithm":{"type":"string","pattern":"^a44-exact-icu-start-\\d+$"},
+      "inputSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"pages":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/page"}},
+      "trailingSpace":{"type":"string"},"diagnostics":{"type":"object"}}}
+  }
+}

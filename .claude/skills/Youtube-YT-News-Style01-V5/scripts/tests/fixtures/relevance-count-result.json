@@ -1,0 +1,24 @@
+{
+  "operation": "countTokens",
+  "model": "models/gemini-3.8-flash",
+  "payload_sha256": "0b135a4fe7f748b578af753fae6785009eb60e035e1a464866c9aa9054535220",
+  "generate_called": false,
+  "stage": "precheck",
+  "http_status": 200,
+  "totalTokens": 1198,
+  "error_status": null,
+  "error_message": "",
+  "response": {
+    "totalTokens": 1198,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 98
+      },
+      {
+        "modality": "IMAGE",
+        "tokenCount": 1100
+      }
+    ]
+  }
+}

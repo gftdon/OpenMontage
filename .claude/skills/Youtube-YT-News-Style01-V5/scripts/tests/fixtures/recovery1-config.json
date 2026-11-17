@@ -1,0 +1,46 @@
+{
+  "schema": "a44-budget-config-1",
+  "caps": {
+    "image_attempts": 4,
+    "relevance_calls": 45,
+    "total_estimated_usd": 2.0
+  },
+  "image": {
+    "provider": "gemini-api",
+    "model": "gemini-3.1-flash-image",
+    "reservation_usd": 0.1,
+    "input_usd_per_million": 0.5,
+    "text_thinking_usd_per_million": 3.0,
+    "image_usd_per_million": 60.0,
+    "image_tokens_1k": 1120,
+    "image_size": "1K",
+    "aspect_ratio": "16:9",
+    "rate_source": "https://aistudio.google.com/docs/pricing — Lead verified 2026-11-08; 1K image1120 tokens=.0672 plus text/input; conservative reservation .10",
+    "valid_until": "2026-12-31",
+    "max_input_tokens_reserved": 15000,
+    "max_output_tokens": 1536
+  },
+  "relevance": {
+    "provider": "gemini-api",
+    "model": "gemini-3.8-flash",
+    "input_usd_per_million": 0.75,
+    "output_including_thinking_usd_per_million": 3.75,
+    "rate_source": "https://aistudio.google.com/docs/pricing",
+    "verified": "2026-11-08",
+    "valid_until": "2026-12-31",
+    "max_input_tokens_reserved": 32000,
+    "max_output_tokens": 1024,
+    "thinking_level": "low",
+    "output_cap_authority": "https://aistudio.google.com/docs/thinking ; https://aistudio.google.com/docs/pricing — Lead verified 2026-11-08: combined thinking+output token cap, not hard billing guarantee",
+    "input_bound_status": "bounded-offline-review-only: 12000 serialized UTF-8 text bytes + one high image at 1120 tokens < 32000 conservative reservation; live wire unverified",
+    "max_jpeg_bytes": 262144,
+    "max_dimension": 1024,
+    "image_resolution": "high",
+    "image_token_bound": 1120,
+    "image_token_authority": "Lead official high-resolution bound 2026-11-08: one image 1120 tokens; live wire still pending",
+    "max_serialized_text_bytes": 12000,
+    "max_text_characters": 4000,
+    "max_retries": 0,
+    "timeout_seconds": 90
+  }
+}

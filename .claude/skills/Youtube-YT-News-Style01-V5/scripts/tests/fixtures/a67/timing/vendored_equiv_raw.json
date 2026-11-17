@@ -1,0 +1,496 @@
+{
+ "schema": "yt-news-v4-raw-asr",
+ "version": 1,
+ "audio": {
+  "wav_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "duration": 37.62
+ },
+ "script_sha256": "db9b3b84bfcc103ea0d4582ff4e736b624fce5e7c26dab2a2fb2b7638f2fe440",
+ "model": {
+  "id": "synthetic",
+  "snapshot": "synthetic"
+ },
+ "mlx_whisper": {
+  "version": "synthetic",
+  "files": {}
+ },
+ "tokenizer": {
+  "pythainlp": "synthetic"
+ },
+ "params": {},
+ "rungs": [],
+ "segments": [
+  {
+   "start": 0.4,
+   "end": 3.29,
+   "text": " วันนี้ ทีมงาน ทดสอบ ระบบ ใหม่ สำหรับ",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " วันนี้",
+     "start": 0.4,
+     "end": 0.88
+    },
+    {
+     "word": " ทีมงาน",
+     "start": 0.94,
+     "end": 1.42
+    },
+    {
+     "word": " ทดสอบ",
+     "start": 1.46,
+     "end": 1.87
+    },
+    {
+     "word": " ระบบ",
+     "start": 1.95,
+     "end": 2.32
+    },
+    {
+     "word": " ใหม่",
+     "start": 2.39,
+     "end": 2.72
+    },
+    {
+     "word": " สำหรับ",
+     "start": 2.79,
+     "end": 3.29
+    }
+   ]
+  },
+  {
+   "start": 3.34,
+   "end": 6.86,
+   "text": " จัดการ งาน ประจำวัน ราคา 700-10,000บาท เดือร",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " จัดการ",
+     "start": 3.34,
+     "end": 3.76
+    },
+    {
+     "word": " งาน",
+     "start": 3.85,
+     "end": 4.19
+    },
+    {
+     "word": " ประจำวัน",
+     "start": 4.32,
+     "end": 4.92
+    },
+    {
+     "word": " ราคา",
+     "start": 5.0,
+     "end": 5.36
+    },
+    {
+     "word": " 700-10,000บาท",
+     "start": 5.45,
+     "end": 6.13
+    },
+    {
+     "word": " เดือร",
+     "start": 6.43,
+     "end": 6.86
+    }
+   ]
+  },
+  {
+   "start": 6.99,
+   "end": 10.43,
+   "text": " ขึ้นอยู่กับ แพ็กเกจ ที่ เลือก สอน AI",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " ขึ้นอยู่กับ",
+     "start": 6.99,
+     "end": 7.61
+    },
+    {
+     "word": " แพ็กเกจ",
+     "start": 7.68,
+     "end": 8.21
+    },
+    {
+     "word": " ที่",
+     "start": 8.31,
+     "end": 8.6
+    },
+    {
+     "word": " เลือก",
+     "start": 9.35,
+     "end": 9.69
+    },
+    {
+     "word": " สอน",
+     "start": 9.8,
+     "end": 10.08
+    },
+    {
+     "word": " AI",
+     "start": 10.17,
+     "end": 10.43
+    }
+   ]
+  },
+  {
+   "start": 10.52,
+   "end": 13.18,
+   "text": " 10 อ่า ตัวภายใน หนึ่ง วัน ไม่",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " 10",
+     "start": 10.52,
+     "end": 10.79
+    },
+    {
+     "word": " อ่า",
+     "start": 10.84,
+     "end": 11.09
+    },
+    {
+     "word": " ตัวภายใน",
+     "start": 11.16,
+     "end": 11.63
+    },
+    {
+     "word": " หนึ่ง",
+     "start": 11.72,
+     "end": 12.15
+    },
+    {
+     "word": " วัน",
+     "start": 12.21,
+     "end": 12.56
+    },
+    {
+     "word": " ไม่",
+     "start": 12.87,
+     "end": 13.18
+    }
+   ]
+  },
+  {
+   "start": 13.28,
+   "end": 16.1,
+   "text": " ต้อร เขียน โค้ด ผู้ใช้ งาน กว่า2,500",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " ต้อร",
+     "start": 13.28,
+     "end": 13.6
+    },
+    {
+     "word": " เขียน",
+     "start": 13.69,
+     "end": 14.1
+    },
+    {
+     "word": " โค้ด",
+     "start": 14.2,
+     "end": 14.6
+    },
+    {
+     "word": " ผู้ใช้",
+     "start": 14.67,
+     "end": 15.17
+    },
+    {
+     "word": " งาน",
+     "start": 15.26,
+     "end": 15.54
+    },
+    {
+     "word": " กว่า2,500",
+     "start": 15.61,
+     "end": 16.1
+    }
+   ]
+  },
+  {
+   "start": 16.85,
+   "end": 19.41,
+   "text": " คน ให้ คะแนน 4.8 5 เวอร์ชัน",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " คน",
+     "start": 16.85,
+     "end": 17.12
+    },
+    {
+     "word": " ให้",
+     "start": 17.19,
+     "end": 17.48
+    },
+    {
+     "word": " คะแนน",
+     "start": 17.59,
+     "end": 17.94
+    },
+    {
+     "word": " 4.8",
+     "start": 17.98,
+     "end": 18.27
+    },
+    {
+     "word": " 5",
+     "start": 18.59,
+     "end": 18.82
+    },
+    {
+     "word": " เวอร์ชัน",
+     "start": 18.9,
+     "end": 19.41
+    }
+   ]
+  },
+  {
+   "start": 19.45,
+   "end": 22.35,
+   "text": " 3.1 เพิ่ม ฟีเจอร์ค้นหา แบบ เร็ว และ",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " 3.1",
+     "start": 19.45,
+     "end": 19.76
+    },
+    {
+     "word": " เพิ่ม",
+     "start": 19.82,
+     "end": 20.21
+    },
+    {
+     "word": " ฟีเจอร์ค้นหา",
+     "start": 20.25,
+     "end": 21.11
+    },
+    {
+     "word": " แบบ",
+     "start": 21.22,
+     "end": 21.53
+    },
+    {
+     "word": " เร็ว",
+     "start": 21.62,
+     "end": 21.93
+    },
+    {
+     "word": " และ",
+     "start": 22.06,
+     "end": 22.35
+    }
+   ]
+  },
+  {
+   "start": 22.41,
+   "end": 26.39,
+   "text": " รายงาร อัตโนมัติ ข้อมูล ถูก เก็บ ไว้ใน",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " รายงาร",
+     "start": 22.41,
+     "end": 22.9
+    },
+    {
+     "word": " อัตโนมัติ",
+     "start": 23.0,
+     "end": 23.67
+    },
+    {
+     "word": " ข้อมูล",
+     "start": 23.72,
+     "end": 24.2
+    },
+    {
+     "word": " ถูก",
+     "start": 25.15,
+     "end": 25.43
+    },
+    {
+     "word": " เก็บ",
+     "start": 25.56,
+     "end": 25.87
+    },
+    {
+     "word": " ไว้ใน",
+     "start": 25.92,
+     "end": 26.39
+    }
+   ]
+  },
+  {
+   "start": 26.49,
+   "end": 28.98,
+   "text": " เครื่อง ของ ผู้ใช้ เอง หาก พบ",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " เครื่อง",
+     "start": 26.49,
+     "end": 26.9
+    },
+    {
+     "word": " ของ",
+     "start": 26.95,
+     "end": 27.28
+    },
+    {
+     "word": " ผู้ใช้",
+     "start": 27.33,
+     "end": 27.85
+    },
+    {
+     "word": " เอง",
+     "start": 27.92,
+     "end": 28.26
+    },
+    {
+     "word": " หาก",
+     "start": 28.34,
+     "end": 28.63
+    },
+    {
+     "word": " พบ",
+     "start": 28.74,
+     "end": 28.98
+    }
+   ]
+  },
+  {
+   "start": 29.09,
+   "end": 32.88,
+   "text": " ปัญหร สามารถ ทีมสนับสนุน ได้ ตลอด สัปดาหร",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " ปัญหร",
+     "start": 29.09,
+     "end": 29.47
+    },
+    {
+     "word": " สามารถ",
+     "start": 29.51,
+     "end": 29.91
+    },
+    {
+     "word": " ทีมสนับสนุน",
+     "start": 30.18,
+     "end": 30.78
+    },
+    {
+     "word": " ได้",
+     "start": 30.88,
+     "end": 31.21
+    },
+    {
+     "word": " ตลอด",
+     "start": 31.96,
+     "end": 32.3
+    },
+    {
+     "word": " สัปดาหร",
+     "start": 32.35,
+     "end": 32.88
+    }
+   ]
+  },
+  {
+   "start": 32.97,
+   "end": 35.54,
+   "text": " สรุป แล้ว ระบบ นี้ ช่วย ประหยัด",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " สรุป",
+     "start": 32.97,
+     "end": 33.37
+    },
+    {
+     "word": " แล้ว",
+     "start": 33.42,
+     "end": 33.74
+    },
+    {
+     "word": " ระบบ",
+     "start": 33.83,
+     "end": 34.24
+    },
+    {
+     "word": " นี้",
+     "start": 34.31,
+     "end": 34.62
+    },
+    {
+     "word": " ช่วย",
+     "start": 34.66,
+     "end": 35.0
+    },
+    {
+     "word": " ประหยัด",
+     "start": 35.1,
+     "end": 35.54
+    }
+   ]
+  },
+  {
+   "start": 35.61,
+   "end": 36.5,
+   "text": " เวลรได้ มาก",
+   "compression_ratio": 1.2,
+   "avg_logprob": -0.2,
+   "no_speech_prob": 0.01,
+   "rung": "R0",
+   "words": [
+    {
+     "word": " เวลรได้",
+     "start": 35.61,
+     "end": 36.09
+    },
+    {
+     "word": " มาก",
+     "start": 36.16,
+     "end": 36.5
+    }
+   ]
+  }
+ ]
+}

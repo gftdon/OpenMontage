@@ -1,0 +1,4 @@
+[
+  {"t": 5, "src": "yt_gemini_demo", "cue_line": 1, "subject_terms": ["Gemini demo"], "seen": "title card of the demo"},
+  {"t": 20, "src": "yt_code_lines", "cue_line": 3, "subject_terms": ["lines of code"], "seen": "editor with code"}
+]

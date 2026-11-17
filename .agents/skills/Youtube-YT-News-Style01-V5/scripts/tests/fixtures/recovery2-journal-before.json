@@ -1,0 +1,114 @@
+{
+  "schema": "a44-cost-journal-1",
+  "project": "/Volumes/Ext_SS990Pro/Dev/openMontage-worktrees/cf-a44-yt-news-v3-broll/projects/v261107-001-yt-news-v3-broll-test",
+  "attempts": [
+    {
+      "config_sha256": "5dbcfcc7f2ab2e9e04ce5df93cdb4888c5f321a15715697e8a165d0d1bca5131",
+      "id": "f12facc833714ad484b2bd8af0798ad9",
+      "kind": "image",
+      "provider": "google_imagen",
+      "model": "imagen-4.0-generate-001",
+      "status": "failed_or_ambiguous",
+      "reserved_usd": 0.06,
+      "estimated_usd": 0.06,
+      "actual_usd": null,
+      "rate": {
+        "provider": "google_imagen",
+        "model": "imagen-4.0-generate-001",
+        "reservation_usd": 0.06,
+        "rate_source": "Lead-approved conservative estimate 2026-11-08, ไม่พบในหน้า pricing ปัจจุบัน"
+      },
+      "usage_invalid": false,
+      "usage": null,
+      "usage_ambiguous": false,
+      "exposure_exceeded": false
+    },
+    {
+      "config_sha256": "5dbcfcc7f2ab2e9e04ce5df93cdb4888c5f321a15715697e8a165d0d1bca5131",
+      "id": "4c1fbe35c72d45d7ae93fc9e82699e5e",
+      "kind": "relevance",
+      "provider": "gemini-api",
+      "model": "gemini-3.8-flash",
+      "status": "failed_or_ambiguous",
+      "reserved_usd": 0.02784,
+      "estimated_usd": 0.02784,
+      "actual_usd": null,
+      "rate": {
+        "provider": "gemini-api",
+        "model": "gemini-3.8-flash",
+        "input_usd_per_million": 0.75,
+        "output_including_thinking_usd_per_million": 3.75,
+        "rate_source": "https://aistudio.google.com/docs/pricing",
+        "verified": "2026-11-08",
+        "valid_until": "2026-12-31",
+        "max_input_tokens_reserved": 32000,
+        "max_output_tokens": 1024,
+        "thinking_level": "low",
+        "output_cap_authority": "https://aistudio.google.com/docs/thinking ; https://aistudio.google.com/docs/pricing — Lead verified 2026-11-08: combined thinking+output token cap, not hard billing guarantee",
+        "input_bound_status": "bounded-offline-review-only: 12000 serialized UTF-8 text bytes + one high image at 1120 tokens < 32000 conservative reservation; live wire unverified",
+        "max_jpeg_bytes": 262144,
+        "max_dimension": 1024,
+        "image_resolution": "high",
+        "image_token_bound": 1120,
+        "image_token_authority": "Lead official high-resolution bound 2026-11-08: one image 1120 tokens; live wire still pending",
+        "max_serialized_text_bytes": 12000,
+        "max_text_characters": 4000,
+        "max_retries": 1,
+        "timeout_seconds": 90
+      },
+      "usage_invalid": false,
+      "usage": null,
+      "usage_ambiguous": true,
+      "exposure_exceeded": false
+    },
+    {
+      "counted_input_tokens": 178,
+      "config_sha256": "ced183e9c209fe852ae4ab1743f53c51ed1e2bf06833bcccb2e1c978702cc7ec",
+      "id": "7b316a3bb2dc46c6bf1706bc793e9817",
+      "kind": "image",
+      "provider": "gemini-api",
+      "model": "gemini-3.1-flash-image",
+      "status": "native_image_ok",
+      "reserved_usd": 0.1,
+      "estimated_usd": 0.1,
+      "actual_usd": null,
+      "rate": {
+        "provider": "gemini-api",
+        "model": "gemini-3.1-flash-image",
+        "reservation_usd": 0.1,
+        "input_usd_per_million": 0.5,
+        "text_thinking_usd_per_million": 3.0,
+        "image_usd_per_million": 60.0,
+        "image_tokens_1k": 1120,
+        "image_size": "1K",
+        "aspect_ratio": "16:9",
+        "rate_source": "https://aistudio.google.com/docs/pricing — Lead verified 2026-11-08; 1K image1120 tokens=.0672 plus text/input; conservative reservation .10",
+        "valid_until": "2026-12-31",
+        "max_input_tokens_reserved": 15000,
+        "max_output_tokens": 1536
+      },
+      "usage_invalid": false,
+      "usage": null,
+      "usage_ambiguous": false,
+      "exposure_exceeded": false
+    }
+  ],
+  "stop_paid_reason": "native image usage/modalities ambiguous; retained full reservation",
+  "recovery_events": [
+    {
+      "id": "Lead-recovery-1",
+      "approved": true,
+      "approver": "Lead",
+      "timestamp": "2026-11-08T12:58:23+00:00",
+      "reason": "Lead explicitly authorized one recovery after offline transition review and native exact-payload countTokens prechecks. Both historical attempts remain fully reserved at USD0.08784; no reset/refund or automatic recovery2.",
+      "old_stop_reason": "usage ambiguous",
+      "old_config_sha256": "5dbcfcc7f2ab2e9e04ce5df93cdb4888c5f321a15715697e8a165d0d1bca5131",
+      "new_config_sha256": "ced183e9c209fe852ae4ab1743f53c51ed1e2bf06833bcccb2e1c978702cc7ec",
+      "snapshot_sha256": "652f5eddcfa21cbebcb916e1e0cc3528e6fdfa0c1913136b10681fe1f1d9c2f9",
+      "retained_attempt_ids": [
+        "f12facc833714ad484b2bd8af0798ad9",
+        "4c1fbe35c72d45d7ae93fc9e82699e5e"
+      ]
+    }
+  ]
+}

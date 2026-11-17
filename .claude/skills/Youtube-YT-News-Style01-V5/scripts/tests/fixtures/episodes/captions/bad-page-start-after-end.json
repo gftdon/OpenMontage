@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "algorithm": "a44-exact-icu-start-5",
+  "inputSha256": "bda7cef7b92ed659db4d0460159174ed29b2463b3202b248ebdc5f58cdab26d0",
+  "pages": [
+    {
+      "start": 0,
+      "end": 0,
+      "displayText": "สวัสดีค่ะ",
+      "chunks": [
+        {
+          "text": "สวัสดี",
+          "displaySpaceBefore": "",
+          "displayStart": 0,
+          "displayEnd": 0.6
+        },
+        {
+          "text": "ค่ะ",
+          "displaySpaceBefore": "",
+          "displayStart": 0.6,
+          "displayEnd": 1.2
+        }
+      ]
+    },
+    {
+      "start": 1.2,
+      "end": 3,
+      "displayText": "วันนี้มีข่าว",
+      "chunks": [
+        {
+          "text": "วันนี้",
+          "displaySpaceBefore": "",
+          "displayStart": 1.2,
+          "displayEnd": 2
+        },
+        {
+          "text": "มีข่าว",
+          "displaySpaceBefore": "",
+          "displayStart": 2,
+          "displayEnd": 3
+        }
+      ]
+    }
+  ]
+}

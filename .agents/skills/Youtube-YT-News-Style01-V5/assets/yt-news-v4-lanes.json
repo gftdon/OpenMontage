@@ -1,0 +1,52 @@
+{
+  "schema": "yt-news-v4-lanes",
+  "version": 1,
+  "width": 1920,
+  "height": 1080,
+  "fps": 25,
+  "lanes": {
+    "header.brand": { "x": 96, "y": 54, "w": 480, "h": 44, "r": 12 },
+    "header.kicker": { "x": 1344, "y": 54, "w": 480, "h": 44, "r": 12 },
+    "avatar": { "x": 1362, "y": 100, "w": 478, "h": 850, "r": 26 },
+    "avatar.full": { "x": 0, "y": 0, "w": 1920, "h": 1080 },
+    "stage": { "x": 80, "y": 100, "w": 1210, "h": 840, "r": 22 },
+    "split.chrome": { "x": 80, "y": 100, "w": 1210, "h": 52 },
+    "split.chrome.url": { "x": 164, "y": 104, "w": 700, "h": 44, "r": 10 },
+    "split.chrome.label": { "x": 872, "y": 104, "w": 400, "h": 44 },
+    "split.picture": { "x": 116, "y": 172, "w": 1138, "h": 640, "r": 16 },
+    "split.lower": { "x": 80, "y": 812, "w": 1210, "h": 128 },
+    "split.headline": { "x": 112, "y": 814, "w": 1146, "h": 62 },
+    "typo.backing": { "x": 80, "y": 152, "w": 1210, "h": 716 },
+    "typo.content": { "x": 116, "y": 172, "w": 1138, "h": 676 },
+    "sub": { "x": 112, "y": 876, "w": 1146, "h": 60 },
+    "full.lowerThird": { "x": 96, "y": 520, "w": 960, "h": 196 },
+    "full.cta": { "x": 96, "y": 722, "w": 1728, "h": 150 },
+    "wide.window": { "x": 320, "y": 100, "w": 1280, "h": 844, "r": 22 },
+    "wide.chrome": { "x": 320, "y": 100, "w": 1280, "h": 52 },
+    "wide.chrome.url": { "x": 404, "y": 104, "w": 640, "h": 44, "r": 10 },
+    "wide.chrome.label": { "x": 1182, "y": 104, "w": 400, "h": 44 },
+    "wide.picture": { "x": 320, "y": 152, "w": 1280, "h": 720 },
+    "wide.bar": { "x": 320, "y": 872, "w": 1280, "h": 72 },
+    "wide.headline": { "x": 340, "y": 874, "w": 1240, "h": 62 },
+    "caption": { "x": 96, "y": 954, "w": 1728, "h": 72 },
+    "end.eyebrow": { "x": 360, "y": 300, "w": 1200, "h": 44 },
+    "end.title": { "x": 160, "y": 360, "w": 1600, "h": 94 },
+    "end.sub": { "x": 260, "y": 470, "w": 1400, "h": 60 },
+    "end.cta": { "x": 260, "y": 560, "w": 1400, "h": 144 }
+  },
+  "pictureLaneByScene": {
+    "P": null,
+    "S": "split.picture",
+    "T": null,
+    "W": "wide.picture"
+  },
+  "cardLaneByScene": {
+    "T": "typo.content"
+  },
+  "presenterLaneByScene": {
+    "P": "avatar.full",
+    "S": "avatar",
+    "T": "avatar",
+    "W": null
+  }
+}

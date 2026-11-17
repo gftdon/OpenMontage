@@ -1,0 +1,788 @@
+{
+  "schema": "yt-news-v4-episode/1",
+  "assetDir": "ytNewsV3BrollTest",
+  "avatarFile": "avatar_source.mp4",
+  "avatarFaceBox": {
+    "x": 0.41,
+    "y": 0.11,
+    "w": 0.16,
+    "h": 0.33
+  },
+  "fps": 25,
+  "voEndSec": 336.5,
+  "totalDurationSec": 341,
+  "ctaT": 334.5,
+  "captionsInputSha256": "cd833f95871dffd7a6d115e0d3f7e5300fbdc873bcd28fd21d9ae42d8571a645",
+  "brand": "AI TECH NEWS",
+  "dateLabel": "7 พ.ย. 2026",
+  "breakingLabel": "BREAKING NEWS",
+  "officialTag": "SOURCE · OPENAI",
+  "page": {
+    "domain": "youtube.com",
+    "path": "/watch?v=9ZxCOHkfn_8"
+  },
+  "cta": "คุณจะนำ AI ไปใช้งานอะไร?",
+  "endcard": {
+    "eyebrow": "AI TECH NEWS · NOVEMBER 2026",
+    "titleA": "GPT-Image-2.6",
+    "titleB": "Faster with Flare & Sunburst",
+    "cta": "คุณจะนำ AI ไปใช้งานอะไร?"
+  },
+  "brollDur": {
+    "ai_layout_draft_final": 9.2,
+    "artist_drawing_notebook": 15.04,
+    "boutique_customer_sale": 19.44,
+    "coding_developer_illustration": 10,
+    "content_editor_workflow": 26.32,
+    "developer_api_integration": 12.32,
+    "developer_new_function": 30,
+    "drinking_water_glass": 30,
+    "hourglass_waiting": 14.88,
+    "painter_detail_brush": 9,
+    "photographer_for_images": 10.04,
+    "printing_posters_press": 11.44,
+    "product_shot_milk": 27.48,
+    "rough_layout_pencil": 17.48,
+    "tablet_photo_editing": 12.4,
+    "team_brainstorming_board": 14.48,
+    "yt_complexity_variants": 7.68,
+    "yt_intro_title": 4.52,
+    "yt_markup_experiment": 6.6,
+    "yt_prompt_create": 5.52,
+    "yt_prompt_iteration": 5.68,
+    "yt_table_texture": 3.2
+  },
+  "beats": [
+    {
+      "t": 0,
+      "mode": "full",
+      "lower": {
+        "at": 1,
+        "dur": 5.5,
+        "title": "GPT-IMAGE-2.6 IS HERE",
+        "sub": "GPT-Image-2.6"
+      }
+    },
+    {
+      "t": 6.84,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "photographer_for_images",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "หารูปภาพไปประกอบงาน",
+      "sub": "เลือกรูปให้เหมาะกับงานที่ต้องการสื่อ"
+    },
+    {
+      "t": 14.34,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "artist_drawing_notebook",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "งานวาดภาพด้วยมือ",
+      "sub": "เริ่มลงมือวาดภาพด้วยดินสอ"
+    },
+    {
+      "t": 17.98,
+      "mode": "full"
+    },
+    {
+      "t": 23.48,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "wide",
+      "src": "yt_prompt_create",
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "จากข้อความสู่ภาพ"
+    },
+    {
+      "t": 28.0,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "ช่วงเวลาที่ต้องรอภาพ",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 28.0,
+          "lines": [
+            "ช่วงเวลาที่ต้องรอภาพ",
+            "การรอเป็นส่วนหนึ่งของงาน"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 36.76,
+      "mode": "full"
+    },
+    {
+      "t": 40.5,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "ถ้าภาพแรกไม่ถูกใจ",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 40.5,
+          "lines": [
+            "ต้องกดสั่งภาพใหม่",
+            "เสียเวลาสะสมไปเรื่อยๆ"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 44.2,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 44.76,
+          "z": 1.2,
+          "fx": 0.5,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 47.82,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "wide",
+      "src": "yt_intro_title",
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "GPT-Image-2.6"
+    },
+    {
+      "t": 51.3,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "developer_api_integration",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "API และเครื่องมือเขียนโปรแกรม",
+      "sub": "เชื่อมงานภาพเข้ากับเครื่องมือพัฒนา",
+      "stats": [
+        {
+          "at": 57,
+          "dur": 4.5,
+          "label": "API INTEGRATION",
+          "tone": "mint"
+        }
+      ]
+    },
+    {
+      "t": 59.78,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "IDEA TO IMAGE",
+      "headline": "จากไอเดียสู่ภาพ",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 59.78,
+          "lines": [
+            "พิมพ์สิ่งที่อยากเห็น",
+            "ดูภาพ แล้วทดลองต่อ"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 65.2,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 73.2,
+          "z": 1.2,
+          "fx": 0.65,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 74.68,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "IDEA TO IMAGE",
+      "headline": "Flare และ Sunburst",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 74.68,
+          "lines": [
+            "GPT-Image-2.6",
+            "Flare · Sunburst"
+          ]
+        },
+        {
+          "at": 82.2,
+          "lines": [
+            "เริ่มจากภาพร่าง",
+            "แล้วค่อยลงรายละเอียด"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 88.62,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "rough_layout_pencil",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "เริ่มจากภาพร่างและองค์ประกอบ",
+      "sub": "ลองตำแหน่งและองค์ประกอบก่อนลงรายละเอียด"
+    },
+    {
+      "t": 96.62,
+      "mode": "full"
+    },
+    {
+      "t": 100.1,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "ดูโครงร่างก่อนลงรายละเอียด",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 100.1,
+          "lines": [
+            "ทิศทางของแสงและองค์ประกอบ",
+            "ตำแหน่งของสิ่งของ"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 104.68,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "painter_detail_brush",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "รายละเอียดในงานภาพ",
+      "sub": "ค่อยๆ เติมสีและเก็บรายละเอียดของภาพ"
+    },
+    {
+      "t": 108.64,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "stage",
+      "src": "yt_table_texture",
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "พื้นผิว แสง และองค์ประกอบ",
+      "sub": "มองแสงเงาและพื้นผิวในภาพให้ชัดขึ้น"
+    },
+    {
+      "t": 111.2,
+      "mode": "full"
+    },
+    {
+      "t": 114.66,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "WORKFLOW COMPARISON",
+      "headline": "มองภาพรวม แล้วพิจารณารายละเอียด",
+      "typo": "vs",
+      "vs": {
+        "left": {
+          "title": "ภาพรวม",
+          "badge": "OVERVIEW",
+          "lines": [
+            "ภาพร่าง",
+            "องค์ประกอบ"
+          ]
+        },
+        "right": {
+          "title": "รายละเอียด",
+          "badge": "DETAIL",
+          "lines": [
+            "พื้นผิว",
+            "แสงเงา"
+          ]
+        },
+        "conclusion": "ทดลอง แล้วปรับไอเดีย"
+      }
+    },
+    {
+      "t": 122,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "WORKFLOW COMPARISON",
+      "headline": "พิจารณารายละเอียดของภาพ",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 122,
+          "lines": [
+            "พื้นผิวและแสงเงา",
+            "พิจารณารายละเอียดของภาพ"
+          ]
+        },
+        {
+          "at": 129,
+          "lines": [
+            "ทดลอง แล้วปรับไอเดีย",
+            "เลือกภาพที่สื่อสารงานได้"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 136.86,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 137.5,
+          "z": 1.2,
+          "fx": 0.5,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 140,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 141,
+          "z": 1.2,
+          "fx": 0.65,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 143.62,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "IDEA TO IMAGE",
+      "headline": "จากไอเดียสู่ภาพได้เร็วขึ้น",
+      "sub": "ทดลองภาพ แล้วปรับไอเดียต่อ",
+      "typo": "final4",
+      "items": [
+        {
+          "at": 143.62,
+          "text": "พิมพ์ข้อความ",
+          "icon": "✍️"
+        },
+        {
+          "at": 145.4,
+          "text": "ปรับไอเดีย",
+          "icon": "💡"
+        },
+        {
+          "at": 147.2,
+          "text": "ทดลองภาพ",
+          "icon": "🧪"
+        },
+        {
+          "at": 149,
+          "text": "ได้ภาพเร็วขึ้น",
+          "icon": "🚀"
+        }
+      ]
+    },
+    {
+      "t": 153.02,
+      "mode": "full"
+    },
+    {
+      "t": 156.84,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "stage",
+      "src": "yt_prompt_iteration",
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "ลองสร้างภาพจาก prompt",
+      "sub": "พิมพ์คำอธิบายเพื่อทดลองภาพที่ต้องการ",
+      "stats": [
+        {
+          "at": 160.5,
+          "dur": 4,
+          "big": "GPT-Image-2.6",
+          "label": "SOURCE DEMO"
+        }
+      ]
+    },
+    {
+      "t": 161.86,
+      "mode": "full"
+    },
+    {
+      "t": 166.26,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "drinking_water_glass",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "ภาพเปรียบในชีวิตประจำวัน",
+      "sub": "นึกถึงจังหวะสั้นๆ ในชีวิตประจำวัน"
+    },
+    {
+      "t": 171.8,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "wide",
+      "src": "yt_markup_experiment",
+      "from": 0.1,
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "ทดลองปรับภาพด้วย markup"
+    },
+    {
+      "t": 175,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "wide",
+      "src": "yt_markup_experiment",
+      "from": 3.3,
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "ทดลองปรับภาพด้วย markup"
+    },
+    {
+      "t": 177.64,
+      "mode": "full"
+    },
+    {
+      "t": 181.9,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "ลองเปลี่ยนสีและมุมกล้อง",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 181.9,
+          "lines": [
+            "เปลี่ยนพื้นหลังเป็นสีอ่อน",
+            "ภาพจะดูเด่นขึ้นไหม"
+          ]
+        },
+        {
+          "at": 185.8,
+          "lines": [
+            "ขยับมุมกล้องไปทางขวา",
+            "สินค้าน่าสนใจกว่าเดิมไหม"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 192.5,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 194.8,
+          "z": 1.2,
+          "fx": 0.5,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 197.12,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "SOURCE DEMO",
+      "headline": "ตัวเลือกภาพหลายแบบ",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 197.12,
+          "lines": [
+            "ลองตัวเลือกภาพหลายแบบ",
+            "เปรียบเทียบภาพจากตัวเลือกที่ต่างกัน"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 200.92,
+      "mode": "pip",
+      "media": "clip",
+      "layout": "wide",
+      "src": "yt_complexity_variants",
+      "origin": "source",
+      "kicker": "SOURCE DEMO",
+      "headline": "ลองตัวเลือกภาพหลายแบบ"
+    },
+    {
+      "t": 204.6,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 207.5,
+          "z": 1.2,
+          "fx": 0.5,
+          "fy": 0.5
+        },
+        {
+          "at": 209.5,
+          "z": 1,
+          "fx": 0.5,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 210.6,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "ระบบนี้ไปอยู่ตรงไหน",
+      "typo": "summary3",
+      "items": [
+        {
+          "at": 211.2,
+          "text": "แอปประจำวัน",
+          "icon": "💻"
+        },
+        {
+          "at": 219.4,
+          "text": "โปรแกรมแต่งภาพ",
+          "icon": "✨"
+        },
+        {
+          "at": 221.9,
+          "text": "โปรแกรมออกแบบ",
+          "icon": "✍️"
+        }
+      ]
+    },
+    {
+      "t": 222.76,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "product_shot_milk",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "ภาพสินค้าและการจัดฉาก",
+      "sub": "ลองคิดฉากและองค์ประกอบสำหรับสินค้า"
+    },
+    {
+      "t": 230.76,
+      "mode": "full",
+      "punch": [
+        {
+          "at": 231.8,
+          "z": 1.2,
+          "fx": 0.5,
+          "fy": 0.5
+        }
+      ]
+    },
+    {
+      "t": 234.6,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "จำลองฉากหลังได้เร็ว",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 234.6,
+          "lines": [
+            "จำลองฉากหลังหลายแบบ",
+            "ทำได้อย่างรวดเร็ว"
+          ]
+        },
+        {
+          "at": 239.2,
+          "lines": [
+            "ไม่ต้องจัดฉากถ่ายจริง",
+            "ทุกครั้งที่ต้องการเปลี่ยน"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 243.52,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "printing_posters_press",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "งานพิมพ์และสื่อประชาสัมพันธ์",
+      "sub": "เตรียมภาพไปใช้กับสื่อสิ่งพิมพ์"
+    },
+    {
+      "t": 250.96,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "ai_layout_draft_final",
+      "origin": "ai",
+      "kicker": "ILLUSTRATIVE CONCEPT",
+      "headline": "ภาพร่างสำหรับจัดวางข้อความ",
+      "sub": "เห็นพื้นที่ว่างสำหรับเติมข้อความ"
+    },
+    {
+      "t": 259.32,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "team_brainstorming_board",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "นำภาพมาคุยร่วมกันในทีม",
+      "sub": "ใช้ภาพช่วยแลกเปลี่ยนไอเดียในทีม"
+    },
+    {
+      "t": 267.4,
+      "mode": "full"
+    },
+    {
+      "t": 271.1,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "headline": "ทุกคนเห็นภาพตรงกัน",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 271.1,
+          "lines": [
+            "เห็นภาพตรงกันในไม่กี่วินาที",
+            "ไม่ต้องอธิบายด้วยคำพูดยาวๆ"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 277.1,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "coding_developer_illustration",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "นำระบบภาพไปใช้ในงานพัฒนา",
+      "sub": "ต่อยอดระบบภาพในงานเขียนโปรแกรม"
+    },
+    {
+      "t": 285.86,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "developer_new_function",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "พัฒนาฟังก์ชันเกี่ยวกับภาพ",
+      "sub": "สร้างเครื่องมือให้ทำงานกับภาพได้"
+    },
+    {
+      "t": 294.66,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "tablet_photo_editing",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "งานปรับแต่งภาพในแอป",
+      "sub": "ปรับส่วนต่างๆ ของภาพบนหน้าจอ"
+    },
+    {
+      "t": 303.3,
+      "mode": "full"
+    },
+    {
+      "t": 306.46,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "content_editor_workflow",
+      "from": 8,
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "เวิร์กโฟลว์ของคนทำคอนเทนต์",
+      "sub": "เตรียมสื่อสำหรับงานคอนเทนต์"
+    },
+    {
+      "t": 311.92,
+      "mode": "full"
+    },
+    {
+      "t": 316.54,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "boutique_customer_sale",
+      "origin": "stock",
+      "kicker": "ILLUSTRATIVE FOOTAGE",
+      "headline": "งานขายและการดูแลร้าน",
+      "sub": "แบ่งเวลาไปดูแลงานขายและร้านค้า"
+    },
+    {
+      "t": 322.68,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "FINAL RECAP",
+      "headline": "GPT-Image-2.6 กับงานภาพ",
+      "typo": "summary3",
+      "items": [
+        {
+          "at": 322.68,
+          "text": "Flare",
+          "icon": "✨"
+        },
+        {
+          "at": 324.6,
+          "text": "Sunburst",
+          "icon": "🌅"
+        },
+        {
+          "at": 326.6,
+          "text": "ทดลองไอเดีย",
+          "icon": "💡"
+        }
+      ]
+    },
+    {
+      "t": 329.5,
+      "mode": "pip",
+      "media": "typo",
+      "layout": "stage",
+      "kicker": "FINAL RECAP",
+      "headline": "ภาพกับงานประจำวัน",
+      "typo": "card",
+      "cards": [
+        {
+          "at": 329.5,
+          "lines": [
+            "ภาพประกอบในงานประจำวัน",
+            "ทดลองไอเดียและสื่อสารร่วมกัน"
+          ]
+        }
+      ]
+    },
+    {
+      "t": 334.14,
+      "mode": "full"
+    }
+  ]
+}

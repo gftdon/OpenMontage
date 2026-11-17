@@ -1,0 +1,34 @@
+{
+  "schema": "yt-news-v4-episode/1",
+  "assetDir": "a67-broll",
+  "fps": 25,
+  "voEndSec": 8,
+  "totalDurationSec": 12,
+  "ctaT": 7,
+  "brollDur": {
+    "asset0": 3,
+    "asset1": 3
+  },
+  "beats": [
+    {
+      "t": 0,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "asset0",
+      "origin": "stock",
+      "headline": "หัวข้อ",
+      "sub": "คำอธิบาย"
+    },
+    {
+      "t": 4,
+      "mode": "pip",
+      "media": "broll",
+      "layout": "stage",
+      "src": "asset1",
+      "origin": "stock",
+      "headline": "หัวข้อ",
+      "sub": "คำอธิบาย"
+    }
+  ]
+}
