@@ -23,6 +23,18 @@ function body() {
   assert.ok(match, 'Agent must have YAML frontmatter followed by its instruction body');
   return { frontmatter: match[1], instructions: match[2] };
 }
+function validateSyntheticInput(input, c) {
+  assert.equal(input.schema, 1);
+  assert.equal(typeof input.report_id, 'string'); assert.ok(input.report_id.trim().length > 0);
+  const rules = c.input.do_not_copy;
+  assert.ok(Array.isArray(input.do_not_copy));
+  assert.ok(input.do_not_copy.length >= rules.min_items && input.do_not_copy.length <= rules.max_items);
+  for (const item of input.do_not_copy) {
+    assert.equal(typeof item, 'string');
+    assert.ok(item.trim().length >= rules.min_length && item.trim().length <= rules.max_length);
+  }
+  return structuredClone(input); // Preserve every original entry, without truncation/normalization.
+}
 function contract() {
   const match = read('rubric').match(/```json contract\n([\s\S]*?)\n```/);
   assert.ok(match, 'Rubric must expose the locked machine-readable contract');
@@ -32,6 +44,18 @@ function contract() {
 export const syntheticInput = {
   schema: 1, report_id: 'synthetic-gg-001',
   do_not_copy: ['The midnight glass elevator', 'A mirrored city folds into a paper crane'],
+};
+export const syntheticInputBoundaries = {
+  valid21: { ...syntheticInput, do_not_copy: Array.from({ length: 21 }, (_, i) => ` Keep complete entry ${i + 1} `) },
+  valid30: { ...syntheticInput, do_not_copy: Array.from({ length: 30 }, (_, i) => `Keep complete entry ${i + 1}`) },
+  valid500: { ...syntheticInput, do_not_copy: [` ${'a'.repeat(500)} `] },
+  validUtf16: { ...syntheticInput, do_not_copy: ['\u{1F600}'.repeat(250)] }, // 500 UTF-16 code units.
+  empty: { ...syntheticInput, do_not_copy: [] },
+  emptyString: { ...syntheticInput, do_not_copy: [''] },
+  whitespace: { ...syntheticInput, do_not_copy: ['  \t '] },
+  invalid31: { ...syntheticInput, do_not_copy: Array.from({ length: 31 }, (_, i) => `Entry ${i}`) },
+  invalid501: { ...syntheticInput, do_not_copy: ['a'.repeat(501)] },
+  invalidUtf16: { ...syntheticInput, do_not_copy: ['\u{1F600}'.repeat(251)] }, // 502 UTF-16 code units.
 };
 const categoryScores = {
   hook: 18, visual: 22.5, text: 14.25, story_pacing: 14.25, audio: 9, originality: 9, technical: 5,
@@ -45,6 +69,7 @@ const complete = {
     qc_input_path: '/synthetic/qc-input.json',
   },
   report_path: '/synthetic/GG_SYNTH_001_50_QC.json',
+  markdown_report_path: '/synthetic/GG_SYNTH_001_50_QC.md',
   scoring_status: 'complete', total: 92, verdict: 'PASS', category_scores: categoryScores,
   work_dir: '/synthetic/qc-work-example',
   scoring_details: {
@@ -308,7 +333,10 @@ function validateFixture(report, c) {
   assert.ok(['PASS', 'FAIL'].includes(report.verdict));
   assert.ok(report.inputs.final_path.endsWith(`${report.video_code}_40_Short_Final.mp4`));
   assert.ok(report.inputs.qc_input_path.endsWith('/qc-input.json'));
-  assert.ok(report.report_path.endsWith(`${report.video_code}_50_QC.json`));
+  assert.equal(report.report_path.split('/').at(-1), `${report.video_code}_50_QC.json`);
+  assert.equal(report.markdown_report_path.split('/').at(-1), `${report.video_code}_50_QC.md`);
+  assert.equal(report.markdown_report_path.slice(0, report.markdown_report_path.lastIndexOf('/')),
+    report.report_path.slice(0, report.report_path.lastIndexOf('/')));
   assert.deepEqual(Object.keys(report.category_scores).sort(), Object.keys(c.weights).sort());
   if (report.scoring_status === 'incomplete') {
     assert.equal(report.total, c.incomplete.total);
@@ -422,7 +450,8 @@ test('published scoring gate and input/report schemas preserve locked boundaries
     critical_count: 0, scoring_status: 'complete' });
   assert.equal(c.category_floors, null);
   assert.deepEqual(c.input, { filename: 'qc-input.json', schema: 1,
-    report_id: 'nonempty_string', do_not_copy: { min_items: 1, max_items: 20, item: 'nonempty_string' } });
+    report_id: 'nonempty_string', do_not_copy: { min_items: 1, max_items: 30, item: 'trimmed_string',
+      min_length: 1, max_length: 500, length_unit: 'UTF-16' } });
   assert.deepEqual(c.incomplete, { total: 0, scoring_status: 'incomplete', category_scores: null });
   for (const field of ['agent', 'rubric_version', 'report_id', 'video_code', 'total', 'verdict',
     'criticals', 'issues', 'category_scores', 'category_evidence', 'evidence', 'measurements',
@@ -541,6 +570,35 @@ for (const name of ['missingAudioStreamFail', 'ebur128FailureFail']) {
   });
 }
 
+test('caller contract requires exactly JSON and Thai Markdown reports with matching names', () => {
+  const c = contract();
+  assert.deepEqual(c.report_outputs, [
+    { field: 'report_path', filename: '<CODE>_50_QC.json' },
+    { field: 'markdown_report_path', filename: '<CODE>_50_QC.md' },
+  ]);
+  assert.ok(c.report_required.includes('markdown_report_path'));
+  for (const text of [body().instructions, read('rubric')]) {
+    for (const term of ['markdown_report_path', '<CODE>_50_QC.md', 'ภาษาไทย',
+      'partial publication', 'stage and validate both', 'same output parent']) assert.ok(text.includes(term), term);
+    assert.doesNotMatch(text, /Never write result\.json, a companion Markdown report|Write only caller `<CODE>_50_QC\.json`/);
+  }
+  for (const report of Object.values(syntheticReports)) {
+    assert.equal(report.markdown_report_path, '/synthetic/GG_SYNTH_001_50_QC.md');
+  }
+});
+
+test('do_not_copy accepts 21 and 30 entries and preserves every entry', () => {
+  assert.deepEqual(contract().input.do_not_copy, { min_items: 1, max_items: 30,
+    item: 'trimmed_string', min_length: 1, max_length: 500, length_unit: 'UTF-16' });
+  for (const name of ['valid21', 'valid30', 'valid500', 'validUtf16']) {
+    const input = syntheticInputBoundaries[name];
+    assert.deepEqual(validateSyntheticInput(input, contract()), input);
+  }
+  for (const name of ['empty', 'emptyString', 'whitespace', 'invalid31', 'invalid501', 'invalidUtf16']) {
+    assert.throws(() => validateSyntheticInput(syntheticInputBoundaries[name], contract()), name);
+  }
+});
+
 test('confirmed endpoint mismatch and absent ending fade are always SPEC criticals', () => {
   assert.deepEqual(contract().audio_spec_criticals,
     { confirmed_duration_mismatch: 'SPEC', confirmed_missing_ending_fade: 'SPEC' });
@@ -574,6 +632,9 @@ test('fixture validator rejects malformed reports and unsupported PASS claims', 
   const c = contract();
   for (const mutate of [
     (r) => { delete r.report_id; }, (r) => { r.total = '92'; },
+    (r) => { delete r.markdown_report_path; },
+    (r) => { r.markdown_report_path = '/other/GG_SYNTH_001_50_QC.md'; },
+    (r) => { r.markdown_report_path = '/synthetic/wrong_50_QC.md'; },
     (r) => { r.total = 101; }, (r) => { r.verdict = 'pass'; },
     (r) => { r.report_id = 'wrong-run'; }, (r) => { r.category_scores.audio = null; },
     (r) => { r.coverage.objective_audio_review = false; },
